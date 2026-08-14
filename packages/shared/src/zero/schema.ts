@@ -1004,6 +1004,8 @@ export const messageAttachmentTable = table('message_attachments')
 export enum DraftOrigin {
   user = 'user',
   twin = 'twin',
+  /** Bulk ticket rows that failed to create; metadata is a TicketDraftMetadata. */
+  ticket = 'ticket',
 }
 
 export const draftMessageTable = table('draft_messages')
@@ -1017,7 +1019,7 @@ export const draftMessageTable = table('draft_messages')
     content: string(),
     hasAttachment: boolean(),
     origin: enumeration<DraftOrigin>().optional(),
-    metadata: string().optional(), // twin-only: stringified JSON TwinReplyDraft payload
+    metadata: string().optional(), // twin: TwinReplyDraft JSON; ticket: TicketDraftMetadata JSON
     createdAt: number(),
     updatedAt: number(),
   })

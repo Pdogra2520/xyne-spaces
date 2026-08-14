@@ -51,6 +51,13 @@ import { EntityLinkContext } from '../../../contexts/EntityLinkContext';
 import { DiscussionListContext } from '../ConversationPannel/DiscussionListContext';
 import { usePlatform } from '../../../hooks/usePlatform';
 import { useRelatedContextAvailable } from '../../../contexts/RelatedContextAvailabilityContext';
+import {
+  BulkCreateTicketsModal,
+  type BulkTicketPrefill,
+} from '../../Tickets/BulkCreateTicketsModal/BulkCreateTicketsModal';
+import { TicketDraftsBar } from '../../Tickets/TicketDrafts/TicketDraftsBar';
+import type { TicketDraft } from '../../Tickets/TicketDrafts/ticketDrafts';
+import { parseTicketsFromText } from '../../Tickets/BulkCreateTicketsModal/parseTicketsFromText';
 import type { FocusPosition } from '@tiptap/react';
 import type { MentionResult } from '@xyne/shared';
 import { getSlashCommandArtifactDefinition } from '@xyne/shared';
@@ -457,6 +464,10 @@ const ChatInputInner = forwardRef<InputBoxHandle, ChatInputProps>(
       openAddPeople: () => setAddPeopleOpen(true),
     });
     const [ticketDescription, setTicketDescription] = useState('');
+    const [isBulkCreateTicketsModalOpen, setIsBulkCreateTicketsModalOpen] = useState(false);
+    const [bulkInitialTickets, setBulkInitialTickets] = useState<BulkTicketPrefill[]>([]);
+    // Set while the bulk modal is editing a ticket draft instead of new rows.
+    const [editingTicketDraft, setEditingTicketDraft] = useState<TicketDraft | null>(null);
     const [recentScheduledFor, setRecentScheduledFor] = useState<number | null>(null);
 
     const {
@@ -1291,6 +1302,15 @@ const ChatInputInner = forwardRef<InputBoxHandle, ChatInputProps>(
                 </span>
               </div>
             )}
+            <TicketDraftsBar
+              channelId={channelId}
+              conversationId={conversationId ?? null}
+              onEdit={draft => {
+                setEditingTicketDraft(draft);
+                setBulkInitialTickets([]);
+                setIsBulkCreateTicketsModalOpen(true);
+              }}
+            />
             <InputBox
               id={currentSessionId}
               channelId={channelId}
@@ -1386,6 +1406,24 @@ const ChatInputInner = forwardRef<InputBoxHandle, ChatInputProps>(
                 !conversationId && {
                   onCreateTicket: (description: string | undefined) => {
                     void (async () => {
+                      if (!isSupportChannel) {
+                        const drafts = parseTicketsFromText(description || '');
+                        if (drafts.length >= 2) {
+                          setBulkInitialTickets(
+                            drafts.map(d => ({
+                              title: d.title,
+                              description: d.description || d.title,
+                              parentIndex: d.parentIndex,
+                            })),
+                          );
+                          setEditingTicketDraft(null);
+                          // The composer keeps its content until the tickets
+                          // actually exist: handleTicketCreated clears it, so
+                          // cancelling the modal leaves the draft untouched.
+                          setIsBulkCreateTicketsModalOpen(true);
+                          return;
+                        }
+                      }
                       if (isSupportChannel && user) {
                         const messageContent = description || 'Support request';
                         try {
@@ -1522,6 +1560,26 @@ const ChatInputInner = forwardRef<InputBoxHandle, ChatInputProps>(
               onCancel={() => setAddPeopleOpen(false)}
             />
           </Dialog>
+        ) : null}
+        {channel && isBulkCreateTicketsModalOpen ? (
+          <BulkCreateTicketsModal
+            isOpen={isBulkCreateTicketsModalOpen}
+            onClose={() => {
+              setIsBulkCreateTicketsModalOpen(false);
+              setBulkInitialTickets([]);
+              setEditingTicketDraft(null);
+            }}
+            channelId={channelId}
+            initialTickets={bulkInitialTickets}
+            draft={editingTicketDraft ?? undefined}
+            draftTarget={{ channelId, conversationId: conversationId ?? null }}
+            sourceConversationId={conversationId ?? undefined}
+            onBulkCreated={() => {
+              // Rows typed in the composer now exist as tickets; a draft being
+              // edited never came from the composer's text.
+              if (!editingTicketDraft) handleTicketCreated();
+            }}
+          />
         ) : null}
       </>
     );

@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from 'express';
-import { Ticket } from '@prisma/client';
+import type { DraftMessage, Ticket } from '@prisma/client';
+import type { AuthenticatedUser } from '../types/express';
+import { TicketCreationError, bulkRowErrorOf, ticketCreationConflictOf } from '@/utils/ticketCreationError';
 import { currentWorkspaceId, withWorkspaceScope } from '@/database/tenant/context';
-import { PrismaClientKnownRequestError } from '@prisma/client/runtime/library';
 import { TicketRepository, emitTicketCreated } from '../database/repositories/ticketRepository';
 import { ConversationRepository } from '../database/repositories/conversationRepository';
 import { BoardRepository } from '../database/repositories/boardRepository';
@@ -19,7 +20,7 @@ import { callTranscriptionQueue } from '@/queues/callTranscriptionQueue';
 import { ReleaseRepository } from '../database/repositories/releaseRepository';
 import { getGroupedTagsWithConfig, DESK_EMAIL_SOURCE_TYPE, deskEmailConfigKey } from '@/tags';
 import {
-  CreateTicketRequest,
+  CreateTicketCoreInput,
   GetTicketDetailsResponse,
   TicketDuplicateCheckRequest,
   TicketDuplicateCheckResponse,
@@ -32,6 +33,7 @@ import { evaluateAssignmentRule } from '../utils/assignmentEngine';
 import { syncUserWorkload } from '../utils/workloadUtils';
 import { ticketAssignmentService, primaryUserIdOf, secondaryAssignmentsOf } from '../services/ticketAssignmentService';
 import {
+  buildCustomFieldWritePayload,
   buildPartialCustomFieldWritePayload,
   syncCustomFieldValues,
   type CustomFieldWritePayload,
@@ -49,6 +51,23 @@ import { TicketsSideEffectHandler } from '@/zero/side-effects/tables/tickets-han
 import { uploadFiles, UploadedFileResult } from '../services/fileUploadService';
 import { config } from '../config/env';
 import { superpositionClient } from '@/services/superpositionClient';
+import { validateChannelAccess } from '@/utils/channelAccess';
+import {
+  createTicketDraft,
+  findTicketDraft,
+  parseTicketDraftRows,
+  setTicketDraftRows,
+} from '@/services/tickets/ticketDraftService';
+import { resolveInheritedOwner } from '@/sdlc/entityLinkService';
+import { createSubTicket } from '@/services/subTicketService';
+import {
+  MAX_BULK_TICKETS,
+  type BulkTicketRowError,
+  type BulkTicketRowResult,
+  type CreateBulkTicketRequest,
+  type CreateBulkTicketResponse,
+  type TicketDraftRow,
+} from '@xyne/shared';
 import { randomUUID } from 'crypto';
 import { activityService } from '@/services/activity/activityService';
 import { entityLinkOwnerSchema, type EntityLinkOwner } from '@xyne/shared';
@@ -77,6 +96,7 @@ import { BaseTicketType,
   WorkspaceRole,
   OrgRole,
   AccessType,
+  UserType,
 } from '@xyne/shared';
 import { CommitAnalysisController } from './commitAnalysisController';
 import { isReleaseTicket } from '@xyne/shared';
@@ -132,6 +152,11 @@ const duplicateDecisionsOf = (raw: unknown): { sameAs: string | null; notSame: s
       .slice(0, MAX_DUPLICATE_DECISIONS),
   };
 };
+/** A ticket a bulk row hangs under. */
+interface BulkParent {
+  id: string;
+  xyneId: string;
+}
 
 export class TicketController {
   ticketRepository: TicketRepository;
@@ -258,12 +283,18 @@ export class TicketController {
     projectId: string;
     boardId: string;
     assignedTo?: string;
+    userGroupId?: string;
+    eta?: Date;
+    tags?: string[];
+    ticketType?: string;
+    stageName?: string;
     priority?: string;
     statusV2?: string;
     metadata?: Record<string, any>;
     messageContent?: string;
     messageSubtype?: string;
     entityLinkContext?: EntityLinkOwner;
+    creationMessageId?: string;
   }): Promise<Ticket> {
     const {
       title,
@@ -274,15 +305,21 @@ export class TicketController {
       projectId,
       boardId,
       assignedTo,
+      userGroupId,
+      eta,
+      tags,
+      ticketType,
+      stageName,
       priority = 'MEDIUM',
       statusV2 = 'TODO',
       metadata = {},
       messageContent,
       messageSubtype = 'ai_ticket',
       entityLinkContext,
+      creationMessageId: requestedCreationMessageId,
     } = params;
 
-    const ticket = await createTicketWithConversationTx(this, conversationId, projectId, title, description, createdBy, updatedBy, assignedTo, boardId, statusV2, priority, messageContent, messageSubtype, metadata, entityLinkContext);
+    const ticket = await createTicketWithConversationTx(this, conversationId, projectId, title, description, createdBy, updatedBy, assignedTo, boardId, statusV2, priority, messageContent, messageSubtype, metadata, entityLinkContext, { userGroupId, eta, tags, ticketType, stageName, creationMessageId: requestedCreationMessageId });
 
     // Ticket committed on its initial stage — auto-create the on-entry approval
     // request if that stage's single outgoing transition is configured for it.
@@ -312,6 +349,351 @@ export class TicketController {
 
     return ticket;
   }
+
+  /**
+   * POST /api/tickets/bulk-from-message
+   *
+   * Create many tickets in one request. Identity is taken from the session
+   * (never the body). Rows are created one after another, each through the same
+   * path as single-ticket creation, so a row that fails neither stops nor undoes
+   * the others: the response carries one result per row.
+   *
+   * A row can be a sub-ticket of an earlier row (`parentClientRowId`) or of an
+   * existing ticket (`parentTicketId`). It is created after its parent and then
+   * linked under it; when its parent failed, it fails too without being tried.
+   *
+   * With `draftTarget`, failed rows are saved as a ticket draft in that composer.
+   * With `draftId`, the request retries rows of that draft: they are replaced by
+   * whichever of them fail again, and the draft is deleted once it is empty.
+   *
+   * Submitting the same rows twice creates them twice, exactly as single-ticket
+   * creation does — there is no idempotency key.
+   */
+  createBulkTicket = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const user = req.user;
+      const userId = user?.id;
+      const workspaceId = user?.workspaceId;
+      if (!user || !userId || !workspaceId) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+
+      const caller = await db.user.findUnique({ where: { id: userId }, select: { userType: true } });
+      if (caller?.userType !== UserType.USER) {
+        res.status(403).json({
+          error: 'Bulk ticket creation is only available to users',
+          code: 'BULK_NOT_ALLOWED_FOR_NON_USER',
+        });
+        return;
+      }
+
+      const body = req.body as CreateBulkTicketRequest;
+      const rows = body.tickets ?? [];
+      if (rows.length === 0) {
+        res.status(400).json({ error: 'At least one ticket is required in "tickets"' });
+        return;
+      }
+      if (rows.length > MAX_BULK_TICKETS) {
+        res.status(400).json({ error: `Cannot create more than ${MAX_BULK_TICKETS} tickets in one request` });
+        return;
+      }
+
+      const retriedDraft = body.draftId ? await findTicketDraft(body.draftId, userId) : null;
+      if (body.draftId && !retriedDraft) {
+        res.status(404).json({ error: 'Ticket draft not found', code: 'TICKET_DRAFT_NOT_FOUND' });
+        return;
+      }
+
+      // sourceConversationId decides which SDLC owner every ticket inherits, so
+      // it gets the same existence + private-channel check as single creation.
+      let entityLinkOwner: EntityLinkOwner | undefined;
+      if (body.sourceConversationId) {
+        const sourceConversation = await this.conversationRepository.findById(body.sourceConversationId);
+        if (!sourceConversation) {
+          res.status(400).json({ error: 'Source conversation not found' });
+          return;
+        }
+        const sourceChannel = await this.channelRepository.findById(sourceConversation.channelId);
+        if (sourceChannel && sourceChannel.visibility === 'PRIVATE') {
+          const isParticipant = await this.channelParticipantRepository.isParticipant(
+            sourceConversation.channelId,
+            userId
+          );
+          if (!isParticipant) {
+            res.status(403).json({
+              error: 'Access denied - you do not have permission to access this conversation',
+              code: 'NOT_CONVERSATION_PARTICIPANT',
+            });
+            return;
+          }
+        }
+        entityLinkOwner = (await resolveInheritedOwner(db, body.sourceConversationId)) ?? undefined;
+      }
+
+      // The board decides the project, exactly as in single-ticket creation.
+      // Fetching by workspace also leaves foreign boards unresolved.
+      const boards = await prisma.board.findMany({
+        where: { id: { in: Array.from(new Set(rows.map((r) => r.boardId))) }, workspaceId },
+        select: { id: true, projectId: true },
+      });
+      const projectByBoardId = new Map(boards.map((b) => [b.id, b.projectId]));
+
+      // Created one at a time, in request order, so ticket numbers and thread
+      // order follow the rows.
+      const results: BulkTicketRowResult[] = [];
+      const failedRows: TicketDraftRow[] = [];
+      const followUps: Array<() => Promise<void>> = [];
+      // Tickets created by this request, by row, so later rows can hang under them.
+      const createdByRowId = new Map<string, BulkParent>();
+      const existingParents = new Map<string, Promise<BulkParent>>();
+      for (const row of rows) {
+        const clientRowId = row.clientRowId || randomUUID();
+        let parent: BulkParent | undefined = row.parentClientRowId
+          ? createdByRowId.get(row.parentClientRowId)
+          : undefined;
+        try {
+          if (!parent && row.parentTicketId) {
+            const pending =
+              existingParents.get(row.parentTicketId) ??
+              this.resolveBulkParent(row.parentTicketId, userId, workspaceId);
+            existingParents.set(row.parentTicketId, pending);
+            parent = await pending;
+          }
+          // A parent row that failed (or never came first) takes its subtree with it.
+          if (row.parentClientRowId && !parent) {
+            throw new TicketCreationError(409, {
+              error: "Its parent ticket wasn't created",
+              code: 'PARENT_NOT_CREATED',
+            });
+          }
+
+          const access = await validateChannelAccess(row.channelId, userId, workspaceId);
+          if (!access.hasAccess) {
+            throw new TicketCreationError(403, {
+              error: access.reason ?? 'You do not have access to this channel',
+              code: 'CHANNEL_ACCESS_DENIED',
+            });
+          }
+          const projectId = projectByBoardId.get(row.boardId);
+          if (!projectId) {
+            throw new TicketCreationError(404, { error: 'Board not found in your workspace', code: 'BOARD_NOT_FOUND' });
+          }
+          // Single creation checks the board's required form fields in the
+          // browser; bulk rows can come from an API call or a stale draft, so
+          // they are checked here too.
+          try {
+            await buildCustomFieldWritePayload(row.boardId, workspaceId, row.dynamicFields ?? {}, {
+              requireAllRequiredFields: true,
+            });
+          } catch (fieldError) {
+            throw new TicketCreationError(400, {
+              error: fieldError instanceof Error ? fieldError.message : 'Invalid form fields',
+              code: 'INVALID_FORM_FIELDS',
+            });
+          }
+
+          const { ticket, afterResponse } = await this.createTicketCore(
+            {
+              title: row.title,
+              description: row.description ?? '',
+              channelId: row.channelId,
+              boardId: row.boardId,
+              projectId,
+              ...(row.assignedTo ? { assignedTo: row.assignedTo } : {}),
+              ...(row.userGroupId ? { userGroupId: row.userGroupId } : {}),
+              ...(row.priority ? { priority: row.priority as TicketPriority } : {}),
+              ...(row.statusV2 ? { statusV2: row.statusV2 as TicketStatusV2 } : {}),
+              ...(row.eta ? { eta: new Date(row.eta) } : {}),
+              ...(row.ticketType ? { ticketType: row.ticketType } : {}),
+              fromTicketsTab: body.fromTicketsTab === true,
+              files: [],
+              entityLinkOwner,
+              dynamicFields: row.dynamicFields ?? {},
+              ...(parent ? { parentTicketId: parent.id } : {}),
+            },
+            user
+          );
+          followUps.push(afterResponse);
+          createdByRowId.set(clientRowId, { id: ticket.id, xyneId: ticket.xyneId });
+
+          // The ticket exists now, so a failed link is a warning, not a failed
+          // row: retrying the row would create the ticket a second time.
+          let warning: BulkTicketRowError | undefined;
+          if (parent) {
+            try {
+              await createSubTicket({
+                parentTicketId: parent.id,
+                title: ticket.title,
+                description: ticket.description,
+                createdBy: userId,
+                assignedTo: ticket.assignedTo,
+                mappedTicketId: ticket.id,
+                subTicketXyneId: ticket.xyneId,
+              });
+            } catch (linkError) {
+              logger.error('[Bulk Ticket] Linking sub-ticket failed:', linkError);
+              warning = {
+                code: 'SUB_TICKET_LINK_FAILED',
+                message: `Created, but not linked under ${parent.xyneId}`,
+              };
+            }
+          }
+          results.push({
+            clientRowId,
+            status: 'created',
+            ticket: {
+              id: ticket.id,
+              xyneId: ticket.xyneId,
+              title: ticket.title,
+              conversationId: ticket.conversationId,
+            },
+            ...(warning ? { warning } : {}),
+          });
+        } catch (error) {
+          const rowError = bulkRowErrorOf(error);
+          results.push({ clientRowId, status: 'failed', error: rowError });
+          // A parent that does exist is kept by id, so retrying links under it.
+          failedRows.push({
+            ...row,
+            clientRowId,
+            error: rowError,
+            ...(parent ? { parentTicketId: parent.id, parentTicketXyneId: parent.xyneId } : {}),
+          });
+        }
+      }
+
+      const draftId = await this.saveFailedRowsAsDraft(body, retriedDraft, failedRows, user);
+
+      const response: CreateBulkTicketResponse = {
+        results,
+        createdCount: results.length - failedRows.length,
+        failedCount: failedRows.length,
+        ...(draftId ? { draftId } : {}),
+      };
+      res.status(200).json(response);
+
+      for (const followUp of followUps) {
+        await followUp().catch((error: unknown) => {
+          logger.error('[Bulk Ticket] Follow-up after creation failed:', error);
+        });
+      }
+    } catch (error) {
+      logger.error('[Bulk Ticket] createBulkTicket failed:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to create tickets', code: 'BULK_CREATE_FAILED' });
+      }
+    }
+  };
+
+  /**
+   * Keep the rows that failed: in the draft being retried (alongside its rows
+   * this request did not retry, unless `replaceDraft`), or in a new draft at
+   * `draftTarget` when at least one row was created — if none were, the caller
+   * still has every row in front of it. Returns the draft id while one holds
+   * rows. Saving is best effort: the tickets that were created stand, and the
+   * response still reports every failed row.
+   */
+  private saveFailedRowsAsDraft = async (
+    body: CreateBulkTicketRequest,
+    retriedDraft: DraftMessage | null,
+    failedRows: TicketDraftRow[],
+    user: AuthenticatedUser
+  ): Promise<string | null> => {
+    try {
+      if (retriedDraft) {
+        const retriedIds = new Set(body.tickets.map((r) => r.clientRowId).filter(Boolean));
+        const untouched = body.replaceDraft
+          ? []
+          : parseTicketDraftRows(retriedDraft.metadata).filter((r) => !retriedIds.has(r.clientRowId));
+        return await setTicketDraftRows(retriedDraft, [...untouched, ...failedRows]);
+      }
+      const noneCreated = failedRows.length === body.tickets.length;
+      if (failedRows.length === 0 || noneCreated || !body.draftTarget) return null;
+      const access = await validateChannelAccess(body.draftTarget.channelId, user.id, user.workspaceId);
+      if (!access.hasAccess) return null;
+      return await createTicketDraft({
+        workspaceId: user.workspaceId,
+        userId: user.id,
+        channelId: body.draftTarget.channelId,
+        conversationId: body.draftTarget.conversationId ?? null,
+        rows: failedRows,
+      });
+    } catch (error) {
+      logger.error('[Bulk Ticket] Saving failed rows as a ticket draft failed:', error);
+      return null;
+    }
+  };
+
+  /**
+   * An existing ticket a bulk row should hang under: in the caller's workspace
+   * and in a channel they can reach, or the row fails.
+   */
+  private resolveBulkParent = async (
+    ticketId: string,
+    userId: string,
+    workspaceId: string
+  ): Promise<BulkParent> => {
+    const parent = await prisma.ticket.findUnique({
+      where: { id: ticketId },
+      select: { id: true, xyneId: true, workspaceId: true, channelId: true },
+    });
+    if (!parent || parent.workspaceId !== workspaceId) {
+      throw new TicketCreationError(404, { error: 'Parent ticket not found', code: 'PARENT_NOT_FOUND' });
+    }
+    const access = await validateChannelAccess(parent.channelId, userId, workspaceId);
+    if (!access.hasAccess) {
+      throw new TicketCreationError(403, {
+        error: "You don't have access to the parent ticket's channel",
+        code: 'PARENT_ACCESS_DENIED',
+      });
+    }
+    return { id: parent.id, xyneId: parent.xyneId };
+  };
+
+  /** DELETE /api/tickets/drafts/:draftId — discard a ticket draft. */
+  deleteTicketDraft = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+      const draft = await findTicketDraft(String(req.params['draftId']), userId);
+      if (!draft) {
+        res.status(404).json({ error: 'Ticket draft not found', code: 'TICKET_DRAFT_NOT_FOUND' });
+        return;
+      }
+      await setTicketDraftRows(draft, []);
+      res.status(204).end();
+    } catch (error) {
+      logger.error('[Ticket Draft] deleteTicketDraft failed:', error);
+      res.status(500).json({ error: 'Failed to discard ticket draft' });
+    }
+  };
+
+  /** DELETE /api/tickets/drafts/:draftId/rows/:clientRowId — discard one row. */
+  deleteTicketDraftRow = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+      const draft = await findTicketDraft(String(req.params['draftId']), userId);
+      if (!draft) {
+        res.status(404).json({ error: 'Ticket draft not found', code: 'TICKET_DRAFT_NOT_FOUND' });
+        return;
+      }
+      const clientRowId = String(req.params['clientRowId']);
+      const rows = parseTicketDraftRows(draft.metadata).filter((r) => r.clientRowId !== clientRowId);
+      const draftId = await setTicketDraftRows(draft, rows);
+      res.status(200).json({ draftId });
+    } catch (error) {
+      logger.error('[Ticket Draft] deleteTicketDraftRow failed:', error);
+      res.status(500).json({ error: 'Failed to discard ticket draft row' });
+    }
+  };
 
   getMyTicketBoardIds = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -435,35 +817,7 @@ export class TicketController {
         ];
       }
 
-      // Handle both FormData (with files) and JSON requests
-      const {
-        id: requestedTicketId,
-        title,
-        description,
-        assignedTo,
-        projectId: clientProjectId,
-        userGroupId,
-        statusV2,
-        priority,
-        eta,
-        metadata,
-        closedAt,
-        closedBy,
-        sourceConversationId,
-        sourceMessageId,
-        channelId,
-        excludedChatAttachmentIds,
-        draftAttachmentIds,
-        tags,
-        merchantId,
-        parentTicketId,
-        ticketType,
-        stageName
-      }: CreateTicketRequest & { parentTicketId?: string } = req.body;
-
-      let projectId = clientProjectId;
-
-      const fromTicketsTab = req.body.fromTicketsTab === true || req.body.fromTicketsTab === 'true';
+      const { excludedChatAttachmentIds, draftAttachmentIds } = req.body as CreateTicketCoreInput;
 
       // Validate excludedChatAttachmentIds if provided
       if (excludedChatAttachmentIds && !Array.isArray(excludedChatAttachmentIds)) {
@@ -520,508 +874,18 @@ export class TicketController {
       } else if (req.body.dynamicFields && typeof req.body.dynamicFields === 'object') {
         dynamicFields = req.body.dynamicFields as Record<string, string | string[]>;
       }
-      const requiredFields = { title, description, projectId };
-      for (const [field, value] of Object.entries(requiredFields)) {
-        if (!value) {
-          res.status(400).json({ error: `${field.charAt(0).toUpperCase() + field.slice(1)} is required` });
-          return;
-        }
-      }
 
-      if (!channelId && !sourceConversationId) {
-        res.status(400).json({ error: 'Either channelId or sourceConversationId is required' });
-        return;
-      }
-
-      // Validate multi-repo release config before the ticket exists (and the 201
-      // is sent) — an incomplete repo would otherwise be silently dropped when
-      // persisting releaseRepos, quietly covering fewer repos than configured.
-      const rawReleaseRepos = dynamicFields?.['releaseRepos'];
-      if (rawReleaseRepos !== undefined) {
-        if (!req.user) {
-          res.status(401).json({ error: 'Authentication required' });
-          return;
-        }
-        const privileged =
-          req.user.role === WorkspaceRole.ADMIN ||
-          req.user.role === WorkspaceRole.OWNER ||
-          req.user.orgRole === OrgRole.ADMIN ||
-          req.user.orgRole === OrgRole.OWNER;
-        if (!privileged) {
-          const releaseResource = await new ResourceRepository().findByName('RELEASE-MANAGER');
-          const allowed = releaseResource
-            ? await new ResourceAccessRepository().hasAccess(req.user.id, releaseResource.id, AccessType.WRITE)
-            : false;
-          if (!allowed) {
-            res.status(403).json({ error: 'Release Manager write access is required to create a release.' });
-            return;
-          }
-        }
-        let parsedReleaseRepos: unknown;
-        try {
-          parsedReleaseRepos =
-            typeof rawReleaseRepos === 'string' ? JSON.parse(rawReleaseRepos) : rawReleaseRepos;
-        } catch {
-          res.status(400).json({ error: 'releaseRepos is not valid JSON' });
-          return;
-        }
-        if (Array.isArray(parsedReleaseRepos)) {
-          const incomplete = parsedReleaseRepos.filter((r: any) => {
-            const has = (key: string): boolean => Boolean(String(r?.[key] ?? '').trim());
-            return !(has('mainReleaseBoardId') && has('branch') && has('deployedCommit') && has('newCommit'));
-          });
-          if (incomplete.length > 0) {
-            res.status(400).json({
-              error: `Each release repo needs mainReleaseBoardId, branch, deployedCommit and newCommit; ${incomplete.length} repo(s) are incomplete.`,
-            });
-            return;
-          }
-          const isSha = (s: string): boolean => /^[0-9a-f]{7,40}$/i.test(s);
-          const invalid = parsedReleaseRepos.filter((r: any) => {
-            const deployed = String(r?.deployedCommit ?? '').trim();
-            const newCommit = String(r?.newCommit ?? '').trim();
-            return !isSha(deployed) || !isSha(newCommit) || deployed === newCommit;
-          });
-          if (invalid.length > 0) {
-            res.status(400).json({
-              error: `Each release repo needs a distinct valid deployed and new commit hash; ${invalid.length} repo(s) are invalid.`,
-            });
-            return;
-          }
-          const actorWorkspaceId = req.user.workspaceId;
-          const boardIds = [
-            ...new Set(
-              parsedReleaseRepos.map((r: any) => String(r?.mainReleaseBoardId ?? '').trim()).filter(Boolean),
-            ),
-          ];
-          const repoBoards = await db.board.findMany({
-            where: { id: { in: boardIds } },
-            select: { id: true, workspaceId: true, projectId: true, boardType: true },
-          });
-          const owned =
-            repoBoards.length === boardIds.length &&
-            repoBoards.every(
-              b => b.workspaceId === actorWorkspaceId && b.boardType === BoardType.RELEASE,
-            ) &&
-            new Set(repoBoards.map(b => b.projectId)).size <= 1;
-          if (!owned) {
-            res.status(403).json({
-              error: 'Release repositories must be release boards in your workspace and belong to one project.',
-            });
-            return;
-          }
-        }
-      }
-
-      // Determine the actual channel to check its type
-      let actualChannelId = channelId;
-      if (!actualChannelId && sourceConversationId) {
-        const sourceConv = await this.conversationRepository.findById(sourceConversationId);
-        if (sourceConv) {
-          actualChannelId = sourceConv.channelId;
-        }
-      }
-
-      // Validate boardId based on channel type
-      let boardId = req.body.boardId as string | undefined;
-      if (!boardId) {
-        let isSupportChannel = false;
-        if (actualChannelId) {
-          const channel = await this.channelRepository.findById(actualChannelId);
-          isSupportChannel = channel?.type === ChannelType.SUPPORT;
-        }
-
-        if (isSupportChannel) {
-          // Support channels can use default board
-          boardId = await this.boardRepository.findDefaultBoardIdForProject(projectId);
-        } else {
-          // Non-support channels must provide boardId
-          res.status(400).json({ error: 'boardId is required' });
-          return;
-        }
-      }
-
-      // Validate enum fields if provided
-      if (statusV2 && !Object.values(TicketStatusV2).includes(statusV2 as TicketStatusV2)) {
-        res.status(400).json({
-          error: `Invalid statusV2 provided. Must be one of: ${Object.values(TicketStatusV2).join(', ')}`
-        });
-        return;
-      }
-
-      if (priority && !Object.values(TicketPriority).includes(priority as TicketPriority)) {
-        res.status(400).json({
-          error: `Invalid priority provided. Must be one of: ${Object.values(TicketPriority).join(', ')}`
-        });
-        return;
-      }
-
-      const userId = req.user?.id;
-      if (!userId || !req.user) {
-        res.status(401).json({ error: 'User not authenticated' });
-        return;
-      }
-
-      if (req.body.createdBy && req.body.createdBy !== userId) {
-        res.status(400).json({ error: 'createdBy must match the authenticated user' });
-        return;
-      }
-      if (req.body.updatedBy && req.body.updatedBy !== userId) {
-        res.status(400).json({ error: 'updatedBy must match the authenticated user' });
-        return;
-      }
-      if (req.body.closedBy && req.body.closedBy !== userId) {
-        res.status(400).json({ error: 'closedBy must match the authenticated user' });
-        return;
-      }
-
-      const queryContext = {
-        userID: userId,
-        workspaceId: req.user.workspaceId,
-        role: req.user.role,
-        orgRole: req.user.orgRole,
-        memberId: req.user.memberId,
-      };
-
-      const initialMessageId = randomUUID();
-
-      const board = await this.boardRepository.findBoardById(boardId);
-      if (board?.projectId) {
-        projectId = board.projectId;
-      }
-      const effectiveStatusV2 =
-        board?.boardType === BoardType.FLOW ? TicketStatusV2.TODO : (statusV2 as TicketStatusV2);
-      const effectiveStageName = board?.boardType === BoardType.FLOW ? 'TODO' : stageName;
-      const effectiveTicketType =
-        board?.boardType === BoardType.FLOW && !parentTicketId
-          ? BaseTicketType.Epic
-          : ticketType;
-
-      // Process file uploads BEFORE transaction (external I/O operation)
-      let uploadedFiles: UploadedFileResult[] = [];
-      if (files.length > 0 && (!draftAttachmentIds || draftAttachmentIds.length === 0)) {
-        // Fail entire ticket creation if file upload fails
-        // Pass fileMetadata to include dimensions for images/videos
-        uploadedFiles = await uploadFiles(files, undefined, fileMetadata);
-      }
-
-      // Validate conversation access before transaction
-      let validatedConversation: any = null;
-      if (sourceConversationId) {
-        validatedConversation = await this.conversationRepository.findById(sourceConversationId);
-
-        if (!validatedConversation) {
-          res.status(400).json({ error: 'Source conversation not found' });
-          return;
-        }
-
-        // 🔒 SECURITY FIX: ENFORCE CONVERSATION ACCESS CONTROL
-        // Check if user has access to the conversation via channel participation
-        const channel = await this.channelRepository.findById(validatedConversation.channelId);
-
-        if (channel && channel.visibility === 'PRIVATE') {
-          const isParticipant = await this.channelParticipantRepository.isParticipant(
-            validatedConversation.channelId,
-            userId
-          );
-          if (!isParticipant) {
-            res.status(403).json({
-              error: 'Access denied - you do not have permission to access this conversation',
-              code: 'NOT_CONVERSATION_PARTICIPANT',
-            });
-            return;
-          }
-        }
-      }
-
-      if (sourceMessageId) {
-        const sourceMessage = await this.messageRepository.findById(sourceMessageId);
-        if (!sourceMessage || sourceMessage.workspaceId !== req.user.workspaceId) {
-          res.status(400).json({ error: 'Source message not found' });
-          return;
-        }
-        const existingFromMessage = await prisma.ticket.findUnique({
-          where: { messageId: sourceMessageId },
-          select: { xyneId: true },
-        });
-        if (existingFromMessage) {
-          res.status(409).json({
-            error: `A ticket (${existingFromMessage.xyneId}) was already created from this message`,
-          });
-          return;
-        }
-      }
-
-      // Auto-assign ticket if userGroupId is provided but assignedTo is not
-      let finalAssignedTo = assignedTo;
-      let pendingFullRoleAssignment = false;
-
-      if (userGroupId && !assignedTo) {
-        try {
-          const boardMetaRow = await prisma.board.findUnique({ where: { id: boardId }, select: { metadata: true } });
-          const boardMeta = boardMetaRow?.metadata as BoardMetadata | undefined;
-
-          if (
-            (Array.isArray(boardMeta?.assignmentRoles) && boardMeta!.assignmentRoles!.length > 0)
-            || boardMeta?.fullRoleAssignment === true
-          ) {
-            // Full role assignment will be done after ticket creation
-            pendingFullRoleAssignment = true;
-          } else {
-            // The ticket lands in the source conversation's channel when one is given, else in channelId.
-            const ticketChannelId: string | null = (sourceConversationId ? validatedConversation?.channelId : channelId) ?? null;
-            const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId, ticketChannelId);
-            if (assignmentResult.assignedUserId) {
-              finalAssignedTo = assignmentResult.assignedUserId;
-            }
-          }
-        } catch (error) {
-          logger.error('[Ticket Creation] Error during auto-assignment:', error);
-          // Continue with ticket creation even if assignment fails
-        }
-      }
-
-      let formMapping: Awaited<ReturnType<typeof prisma.formContextMapping.findFirst>> | null = null;
-      let formFields: ResolvedFormFieldDefinition[] = [];
-      if (Object.keys(dynamicFields as Record<string, string>).length > 0) {
-        try {
-          formMapping = await prisma.formContextMapping.findFirst({
-            where: { contextId: boardId, contextType: FormContextType.BOARD, entityType: FormEntityType.TICKET },
-          });
-          if (formMapping) {
-            formFields = await resolveFormFieldDefinitionsForForm(prisma, formMapping.formId);
-          }
-        } catch (err) {
-          logger.error('[Ticket Creation] Error resolving form mapping/fields:', err);
-        }
-      }
-
-      let formFieldChangesForEmit: FormFieldChanges | undefined;
-      let duplicateScopeValues: DuplicateScopeFieldValue[] | undefined;
-      if (formFields.length > 0) {
-        const fieldsWithValues = formFields
-          .filter((f: any) => dynamicFields[f.fieldName] !== undefined)
-          .map((f: any) => ({
-            fieldId: f.id,
-            fieldName: f.fieldName,
-            actualFieldValue: dynamicFields[f.fieldName],
-          }));
-        if (fieldsWithValues.length > 0) {
-          formFieldChangesForEmit = buildCreationFormFieldChanges(fieldsWithValues);
-          duplicateScopeValues = fieldsWithValues.map(fv => ({ fieldId: fv.fieldId, value: fv.actualFieldValue }));
-        }
-      }
-
-      // Wrap all database operations in a transaction for data integrity
-      const { ticket } = await createTicketTx(projectId, sourceConversationId, validatedConversation, this, requestedTicketId, title, description, userId, finalAssignedTo, userGroupId, boardId, effectiveStatusV2, priority, eta, metadata, closedAt, closedBy, merchantId, sourceMessageId, effectiveTicketType, effectiveStageName, dynamicFields, formFieldChangesForEmit, channelId, excludedChatAttachmentIds, entityLinkOwner, fromTicketsTab, initialMessageId, board, uploadedFiles, draftAttachmentIds);
-
-      // Ticket committed on its initial stage — auto-create the on-entry approval
-      // request if that stage's single outgoing transition is configured for it.
-      // Post-commit + fire-and-forget so it can't delay or fail ticket creation.
-      if (ticket.stageName) {
-        void maybeCreateEntryApprovalRequest(ticket.id, ticket.createdBy, ticket.stageName);
-      }
-
-      // Automations re-read the ticket on their own connection, so the event must
-      // not be published before the transaction above commits.
-      void emitTicketCreated(ticket, formFieldChangesForEmit, ticket.createdBy);
-
-      if (sourceConversationId) {
-        void activityService.fillSdlcOwner(sourceConversationId, validatedConversation.channelId);
-      }
-
-      const ticketChannelId = sourceConversationId ? validatedConversation.channelId : channelId;
-      if (ticketChannelId) {
-        try {
-          await this.channelRepository.updateLastActivity(ticketChannelId);
-        } catch (err) {
-          logger.warn(
-            `[createTicket] Skipped last-activity update for channel ${String(ticketChannelId).replace(/[\r\n]/g, '')}: ${(err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')}`,
-          );
-        }
-      }
-
-      // Create TicketTag records for each tag
-      if (tags && tags.length > 0) {
-        try {
-          await prisma.ticketTag.createMany({
-            data: tags.map(tagName => ({
-              name: tagName.trim(),
-              ticketId: ticket.id,
-              workspaceId: ticket.workspaceId,
-            })),
-          });
-          await dualWriteTicketTags(ticket.id, tags.map(t => t.trim()), prisma);
-          logger.info(`[Ticket Creation] Created ${tags.length} tags for ticket ${ticket.id}`);
-        } catch (error) {
-          logger.error('[Ticket Creation] Error creating ticket tags:', error);
-          // Don't fail ticket creation if tag creation fails
-        }
-      }
-
-
-      // Create FormEntityValues records for dynamic fields
-      if (Object.keys(dynamicFields).length > 0 && formMapping && formFields.length > 0) {
-        try {
-          // Create FormEntityValues for each dynamic field
-          const formEntityValuesData = formFields
-            .filter((field: any) => dynamicFields[field.fieldName] !== undefined)
-            .map((field: any) => {
-              const value = dynamicFields[field.fieldName];
-              // Provide both fields for backward compatibility
-              return {
-                formId: formMapping.formId,
-                entityId: ticket.id,
-                entityType: FormEntityType.TICKET,
-                fieldId: field.id,
-                contextId: boardId,
-                workspaceId: ticket.workspaceId,
-                fieldValue: '', // Empty string for backward compatibility (not used anymore)
-                actualFieldValue: value, // Actual value stored in JSON field
-              };
-            });
-
-          if (formEntityValuesData.length > 0) {
-            await prisma.formEntityValues.createMany({
-              data: formEntityValuesData,
-            });
-            logger.info(`[Ticket Creation] Created ${formEntityValuesData.length} form entity values for ticket ${ticket.id}`);
-            if (Object.prototype.hasOwnProperty.call(dynamicFields, 'releaseVersion')) {
-                versionReleaseMappingService.syncTicketById(ticket.id).catch(error => {
-                  logger.error(`[Ticket Creation] Version release mapping failed for ticket ${ticket.xyneId}:`, error);
-                });
-              }
-          }
-        } catch (error) {
-          logger.error('[Ticket Creation] Error creating form entity values:', error);
-          // Don't fail ticket creation if form entity values creation fails
-        }
-      }
-
-      // Queue Vespa job after the ticket and any form fields are fully ingested.
-      await this.pushVespaJobForTicket(ticket.id, userId, req.user?.workspaceId);
-
-      void userActivityTrackingService.trackTicketCreated(userId, {
-        ticketId: ticket.id,
-        title: ticket.title,
-        boardId: ticket.boardId,
-      });
-
-      // Full role assignment when toggle is ON (runs after ticket is committed)
-      let fraAssignedUserId: string | null = null;
-      if (pendingFullRoleAssignment && userGroupId) {
-        try {
-          const fullRoles = await ticketAssignmentService.assignFullRolesToTicket({
-            ticketId: ticket.id,
-            userGroupId,
-            boardId,
-            createdBy: userId,
-            projectId: ticket.projectId,
-            channelId: ticket.channelId,
-          });
-          const primaryUserId = primaryUserIdOf(fullRoles);
-          if (primaryUserId) {
-            const prevAssignedTo = ticket.assignedTo;
-            const updatedTicket = await prisma.ticket.update({
-              where: { id: ticket.id },
-              data: { assignedTo: primaryUserId },
-            });
-            await syncConversationTicketMdFromPrismaTicket(prisma, updatedTicket);
-            fraAssignedUserId = primaryUserId;
-
-            const ticketsHandler = new TicketsSideEffectHandler(queryContext);
-            ticketsHandler.onUpdate({
-              entityId: ticket.id,
-              entityType: 'tickets',
-              operation: 'update',
-              args: { assignedTo: primaryUserId },
-              previousValue: {
-                assignedTo: prevAssignedTo,
-                stageName: ticket.stageName,
-                statusV2: ticket.statusV2,
-                eta: ticket.eta ? ticket.eta.getTime() : null,
-                boardId: ticket.boardId,
-                createdBy: ticket.createdBy,
-                channelId: ticket.channelId,
-              },
-            }).catch(err => logger.error('[Ticket Creation] TicketsSideEffectHandler error:', err));
-          }
-
-          const assignmentsHandler = new TicketAssignmentsSideEffectHandler(queryContext);
-          const fraAssignments = secondaryAssignmentsOf(fullRoles);
-          for (const assignment of fraAssignments) {
-            assignmentsHandler.onInsert({
-              entityId: assignment.assignmentId,
-              entityType: 'ticket_assignments',
-              operation: 'insert',
-            }).catch(err => logger.error(`[Ticket Creation] TicketAssignmentsSideEffectHandler error for assignment ${assignment.assignmentId}:`, err));
-          }
-
-          logger.info(`[Ticket Creation] Full role assignment complete for ticket ${ticket.id}`);
-        } catch (error) {
-          logger.error('[Ticket Creation] Error during full role assignment:', error);
-        }
-      }
-
-      // Sync workload mapping if ticket was assigned to a user
-      const finalAssignedUserId = fraAssignedUserId || ticket.assignedTo;
-      if (finalAssignedUserId && userGroupId) {
-        try {
-          await syncUserWorkload(finalAssignedUserId, userGroupId, boardId, userId);
-          logger.info(`[Ticket Creation] Synced workload for user ${finalAssignedUserId}`);
-        } catch (error) {
-          logger.error('[Ticket Creation] Error syncing workload:', error);
-        }
-      }
-
-      // Send notification for regular auto-assignment (non-FRA)
-      // FRA notifications are handled by side-effect handlers above
-      if (!pendingFullRoleAssignment && ticket.assignedTo && ticket.assignedTo !== userId) {
-        const ticketsHandler = new TicketsSideEffectHandler(queryContext);
-        ticketsHandler.onUpdate({
-          entityId: ticket.id,
-          entityType: 'tickets',
-          operation: 'update',
-          args: { assignedTo: ticket.assignedTo },
-          previousValue: {
-            assignedTo: null,
-            stageName: ticket.stageName,
-            statusV2: ticket.statusV2,
-            eta: ticket.eta ? ticket.eta.getTime() : null,
-            boardId: ticket.boardId,
-            createdBy: ticket.createdBy,
-            channelId: ticket.channelId,
-          },
-        }).catch(err => logger.error('[Ticket Creation] Non-FRA TicketsSideEffectHandler error:', err));
-      }
-
-      logger.info('analytics_event', {
-        event: 'ticket_created',
-        timestamp: new Date().toISOString(),
-        userId: ticket.createdBy,
-        userName: req.user?.name ?? null,
-      });
-
-      const duplicateDecisions = duplicateDecisionsOf(req.body.duplicateDecisions);
-      if (!duplicateDecisions.sameAs) {
-        ticketDuplicateService.persistDuplicateReferences({
-          ticketId: ticket.id,
-          ticketCreatedBy: ticket.createdBy,
-          title,
-          description,
-          projectId,
-          userId,
-          parentTicketId,
-          channelId: ticket.channelId,
-          scopeFieldValues: duplicateScopeValues,
-          excludeTicketIds: duplicateDecisions.notSame,
-        }).catch(error => {
-          logger.error('Failed to persist duplicate references for ticket', {
-            ticketId: ticket.id,
-            error,
-          });
-        });
-      }
+      const { ticket, afterResponse } = await this.createTicketCore(
+        {
+          ...(req.body as CreateTicketCoreInput),
+          fromTicketsTab: req.body.fromTicketsTab === true || req.body.fromTicketsTab === 'true',
+          files,
+          fileMetadata,
+          entityLinkOwner,
+          dynamicFields,
+        },
+        req.user,
+      );
 
       const response: GetTicketDetailsResponse = {
         id: ticket.id,
@@ -1047,6 +911,555 @@ export class TicketController {
 
       res.status(201).json(response);
 
+      await afterResponse();
+    } catch (error) {
+      if (res.headersSent) {
+        logger.error('Error after creating ticket:', error);
+        return;
+      }
+      if (error instanceof TicketCreationError) {
+        res.status(error.status).json(error.body);
+        return;
+      }
+      logger.error('Error creating ticket:', error);
+      const conflict = ticketCreationConflictOf(error);
+      if (conflict) {
+        res.status(409).json(conflict);
+        return;
+      }
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  };
+
+  /**
+   * Creates one ticket for `actor`: validation, the creating transaction and the
+   * side effects that land before the caller responds. Shared by createTicket and
+   * createBulkTicket. An expected failure throws TicketCreationError with the
+   * HTTP status and body to return. `afterResponse` holds the slow follow-ups
+   * (support workflow, release commit analysis) the caller runs once it has
+   * responded.
+   */
+  createTicketCore = async (
+    input: CreateTicketCoreInput,
+    actor: AuthenticatedUser | undefined,
+  ): Promise<{ ticket: Ticket; afterResponse: () => Promise<void> }> => {
+    const {
+      id: requestedTicketId,
+      title,
+      description,
+      assignedTo,
+      projectId: clientProjectId,
+      userGroupId,
+      statusV2,
+      priority,
+      eta,
+      metadata,
+      closedAt,
+      closedBy,
+      sourceConversationId,
+      sourceMessageId,
+      channelId,
+      excludedChatAttachmentIds,
+      draftAttachmentIds,
+      tags,
+      merchantId,
+      parentTicketId,
+      ticketType,
+      stageName,
+      fromTicketsTab,
+      files,
+      fileMetadata,
+      entityLinkOwner,
+      dynamicFields,
+    } = input;
+
+    let projectId = clientProjectId;
+
+    const requiredFields = { title, description, projectId };
+    for (const [field, value] of Object.entries(requiredFields)) {
+      if (!value) {
+        throw new TicketCreationError(400, { error: `${field.charAt(0).toUpperCase() + field.slice(1)} is required` });
+      }
+    }
+
+    if (!channelId && !sourceConversationId) {
+      throw new TicketCreationError(400, { error: 'Either channelId or sourceConversationId is required' });
+    }
+
+    // Validate multi-repo release config before the ticket exists (and the 201
+    // is sent) — an incomplete repo would otherwise be silently dropped when
+    // persisting releaseRepos, quietly covering fewer repos than configured.
+    const rawReleaseRepos = dynamicFields?.['releaseRepos'];
+    if (rawReleaseRepos !== undefined) {
+      if (!actor) {
+        throw new TicketCreationError(401, { error: 'Authentication required' });
+      }
+      const privileged =
+        actor.role === WorkspaceRole.ADMIN ||
+        actor.role === WorkspaceRole.OWNER ||
+        actor.orgRole === OrgRole.ADMIN ||
+        actor.orgRole === OrgRole.OWNER;
+      if (!privileged) {
+        const releaseResource = await new ResourceRepository().findByName('RELEASE-MANAGER');
+        const allowed = releaseResource
+          ? await new ResourceAccessRepository().hasAccess(actor.id, releaseResource.id, AccessType.WRITE)
+          : false;
+        if (!allowed) {
+          throw new TicketCreationError(403, { error: 'Release Manager write access is required to create a release.' });
+        }
+      }
+      let parsedReleaseRepos: unknown;
+      try {
+        parsedReleaseRepos =
+          typeof rawReleaseRepos === 'string' ? JSON.parse(rawReleaseRepos) : rawReleaseRepos;
+      } catch {
+        throw new TicketCreationError(400, { error: 'releaseRepos is not valid JSON' });
+      }
+      if (Array.isArray(parsedReleaseRepos)) {
+        const incomplete = parsedReleaseRepos.filter((r: any) => {
+          const has = (key: string): boolean => Boolean(String(r?.[key] ?? '').trim());
+          return !(has('mainReleaseBoardId') && has('branch') && has('deployedCommit') && has('newCommit'));
+        });
+        if (incomplete.length > 0) {
+          throw new TicketCreationError(400, {
+            error: `Each release repo needs mainReleaseBoardId, branch, deployedCommit and newCommit; ${incomplete.length} repo(s) are incomplete.`,
+          });
+        }
+        const isSha = (s: string): boolean => /^[0-9a-f]{7,40}$/i.test(s);
+        const invalid = parsedReleaseRepos.filter((r: any) => {
+          const deployed = String(r?.deployedCommit ?? '').trim();
+          const newCommit = String(r?.newCommit ?? '').trim();
+          return !isSha(deployed) || !isSha(newCommit) || deployed === newCommit;
+        });
+        if (invalid.length > 0) {
+          throw new TicketCreationError(400, {
+            error: `Each release repo needs a distinct valid deployed and new commit hash; ${invalid.length} repo(s) are invalid.`,
+          });
+        }
+        const actorWorkspaceId = actor.workspaceId;
+        const boardIds = [
+          ...new Set(
+            parsedReleaseRepos.map((r: any) => String(r?.mainReleaseBoardId ?? '').trim()).filter(Boolean),
+          ),
+        ];
+        const repoBoards = await db.board.findMany({
+          where: { id: { in: boardIds } },
+          select: { id: true, workspaceId: true, projectId: true, boardType: true },
+        });
+        const owned =
+          repoBoards.length === boardIds.length &&
+          repoBoards.every(
+            b => b.workspaceId === actorWorkspaceId && b.boardType === BoardType.RELEASE,
+          ) &&
+          new Set(repoBoards.map(b => b.projectId)).size <= 1;
+        if (!owned) {
+          throw new TicketCreationError(403, {
+            error: 'Release repositories must be release boards in your workspace and belong to one project.',
+          });
+        }
+      }
+    }
+
+    // Determine the actual channel to check its type
+    let actualChannelId = channelId;
+    if (!actualChannelId && sourceConversationId) {
+      const sourceConv = await this.conversationRepository.findById(sourceConversationId);
+      if (sourceConv) {
+        actualChannelId = sourceConv.channelId;
+      }
+    }
+
+    // Validate boardId based on channel type
+    let boardId = input.boardId as string | undefined;
+    if (!boardId) {
+      let isSupportChannel = false;
+      if (actualChannelId) {
+        const channel = await this.channelRepository.findById(actualChannelId);
+        isSupportChannel = channel?.type === ChannelType.SUPPORT;
+      }
+
+      if (isSupportChannel) {
+        // Support channels can use default board
+        boardId = await this.boardRepository.findDefaultBoardIdForProject(projectId);
+      } else {
+        // Non-support channels must provide boardId
+        throw new TicketCreationError(400, { error: 'boardId is required' });
+      }
+    }
+
+    // Validate enum fields if provided
+    if (statusV2 && !Object.values(TicketStatusV2).includes(statusV2 as TicketStatusV2)) {
+      throw new TicketCreationError(400, {
+        error: `Invalid statusV2 provided. Must be one of: ${Object.values(TicketStatusV2).join(', ')}`
+      });
+    }
+
+    if (priority && !Object.values(TicketPriority).includes(priority as TicketPriority)) {
+      throw new TicketCreationError(400, {
+        error: `Invalid priority provided. Must be one of: ${Object.values(TicketPriority).join(', ')}`
+      });
+    }
+
+    const userId = actor?.id;
+    if (!userId || !actor) {
+      throw new TicketCreationError(401, { error: 'User not authenticated' });
+    }
+
+    if (input.createdBy && input.createdBy !== userId) {
+      throw new TicketCreationError(400, { error: 'createdBy must match the authenticated user' });
+    }
+    if (input.updatedBy && input.updatedBy !== userId) {
+      throw new TicketCreationError(400, { error: 'updatedBy must match the authenticated user' });
+    }
+    if (input.closedBy && input.closedBy !== userId) {
+      throw new TicketCreationError(400, { error: 'closedBy must match the authenticated user' });
+    }
+
+    const queryContext = {
+      userID: userId,
+      workspaceId: actor.workspaceId,
+      role: actor.role,
+      orgRole: actor.orgRole,
+      memberId: actor.memberId,
+    };
+
+    const initialMessageId = randomUUID();
+
+    const board = await this.boardRepository.findBoardById(boardId);
+    if (board?.projectId) {
+      projectId = board.projectId;
+    }
+    const effectiveStatusV2 =
+      board?.boardType === BoardType.FLOW ? TicketStatusV2.TODO : (statusV2 as TicketStatusV2);
+    const effectiveStageName = board?.boardType === BoardType.FLOW ? 'TODO' : stageName;
+    const effectiveTicketType =
+      board?.boardType === BoardType.FLOW && !parentTicketId
+        ? BaseTicketType.Epic
+        : ticketType;
+
+    // Process file uploads BEFORE transaction (external I/O operation)
+    let uploadedFiles: UploadedFileResult[] = [];
+    if (files.length > 0 && (!draftAttachmentIds || draftAttachmentIds.length === 0)) {
+      // Fail entire ticket creation if file upload fails
+      // Pass fileMetadata to include dimensions for images/videos
+      uploadedFiles = await uploadFiles(files, undefined, fileMetadata);
+    }
+
+    // Validate conversation access before transaction
+    let validatedConversation: any = null;
+    if (sourceConversationId) {
+      validatedConversation = await this.conversationRepository.findById(sourceConversationId);
+
+      if (!validatedConversation) {
+        throw new TicketCreationError(400, { error: 'Source conversation not found' });
+      }
+
+      // 🔒 SECURITY FIX: ENFORCE CONVERSATION ACCESS CONTROL
+      // Check if user has access to the conversation via channel participation
+      const channel = await this.channelRepository.findById(validatedConversation.channelId);
+
+      if (channel && channel.visibility === 'PRIVATE') {
+        const isParticipant = await this.channelParticipantRepository.isParticipant(
+          validatedConversation.channelId,
+          userId
+        );
+        if (!isParticipant) {
+          throw new TicketCreationError(403, {
+            error: 'Access denied - you do not have permission to access this conversation',
+            code: 'NOT_CONVERSATION_PARTICIPANT',
+          });
+        }
+      }
+    }
+
+    if (sourceMessageId) {
+      const sourceMessage = await this.messageRepository.findById(sourceMessageId);
+      if (!sourceMessage || sourceMessage.workspaceId !== actor.workspaceId) {
+        throw new TicketCreationError(400, { error: 'Source message not found' });
+      }
+      const existingFromMessage = await prisma.ticket.findUnique({
+        where: { messageId: sourceMessageId },
+        select: { xyneId: true },
+      });
+      if (existingFromMessage) {
+        throw new TicketCreationError(409, {
+          error: `A ticket (${existingFromMessage.xyneId}) was already created from this message`,
+        });
+      }
+    }
+
+    // Auto-assign ticket if userGroupId is provided but assignedTo is not
+    let finalAssignedTo = assignedTo;
+    let pendingFullRoleAssignment = false;
+
+    if (userGroupId && !assignedTo) {
+      try {
+        const boardMetaRow = await prisma.board.findUnique({ where: { id: boardId }, select: { metadata: true } });
+        const boardMeta = boardMetaRow?.metadata as BoardMetadata | undefined;
+
+        if (
+          (Array.isArray(boardMeta?.assignmentRoles) && boardMeta!.assignmentRoles!.length > 0)
+          || boardMeta?.fullRoleAssignment === true
+        ) {
+          // Full role assignment will be done after ticket creation
+          pendingFullRoleAssignment = true;
+        } else {
+          // The ticket lands in the source conversation's channel when one is given, else in channelId.
+          const ticketChannelId: string | null = (sourceConversationId ? validatedConversation?.channelId : channelId) ?? null;
+          const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId, ticketChannelId);
+          if (assignmentResult.assignedUserId) {
+            finalAssignedTo = assignmentResult.assignedUserId;
+          }
+        }
+      } catch (error) {
+        logger.error('[Ticket Creation] Error during auto-assignment:', error);
+        // Continue with ticket creation even if assignment fails
+      }
+    }
+
+    let formMapping: Awaited<ReturnType<typeof prisma.formContextMapping.findFirst>> | null = null;
+    let formFields: ResolvedFormFieldDefinition[] = [];
+    if (Object.keys(dynamicFields as Record<string, string>).length > 0) {
+      try {
+        formMapping = await prisma.formContextMapping.findFirst({
+          where: { contextId: boardId, contextType: FormContextType.BOARD, entityType: FormEntityType.TICKET },
+        });
+        if (formMapping) {
+          formFields = await resolveFormFieldDefinitionsForForm(prisma, formMapping.formId);
+        }
+      } catch (err) {
+        logger.error('[Ticket Creation] Error resolving form mapping/fields:', err);
+      }
+    }
+
+    let formFieldChangesForEmit: FormFieldChanges | undefined;
+    let duplicateScopeValues: DuplicateScopeFieldValue[] | undefined;
+    if (formFields.length > 0) {
+      const fieldsWithValues = formFields
+        .filter((f: any) => dynamicFields[f.fieldName] !== undefined)
+        .map((f: any) => ({
+          fieldId: f.id,
+          fieldName: f.fieldName,
+          actualFieldValue: dynamicFields[f.fieldName],
+        }));
+      if (fieldsWithValues.length > 0) {
+        formFieldChangesForEmit = buildCreationFormFieldChanges(fieldsWithValues);
+        duplicateScopeValues = fieldsWithValues.map(fv => ({ fieldId: fv.fieldId, value: fv.actualFieldValue }));
+      }
+    }
+
+    // Wrap all database operations in a transaction for data integrity
+    const { ticket } = await createTicketTx(projectId, sourceConversationId, validatedConversation, this, requestedTicketId, title, description, userId, finalAssignedTo, userGroupId, boardId, effectiveStatusV2, priority, eta, metadata, closedAt, closedBy, merchantId, sourceMessageId, effectiveTicketType, effectiveStageName, dynamicFields, formFieldChangesForEmit, channelId, excludedChatAttachmentIds, entityLinkOwner, fromTicketsTab, initialMessageId, board, uploadedFiles, draftAttachmentIds);
+
+    // Ticket committed on its initial stage — auto-create the on-entry approval
+    // request if that stage's single outgoing transition is configured for it.
+    // Post-commit + fire-and-forget so it can't delay or fail ticket creation.
+    if (ticket.stageName) {
+      void maybeCreateEntryApprovalRequest(ticket.id, ticket.createdBy, ticket.stageName);
+    }
+
+    // Automations re-read the ticket on their own connection, so the event must
+    // not be published before the transaction above commits.
+    void emitTicketCreated(ticket, formFieldChangesForEmit, ticket.createdBy);
+
+    if (sourceConversationId) {
+      void activityService.fillSdlcOwner(sourceConversationId, validatedConversation.channelId);
+    }
+
+    const ticketChannelId = sourceConversationId ? validatedConversation.channelId : channelId;
+    if (ticketChannelId) {
+      try {
+        await this.channelRepository.updateLastActivity(ticketChannelId);
+      } catch (err) {
+        logger.warn(
+          `[createTicket] Skipped last-activity update for channel ${String(ticketChannelId).replace(/[\r\n]/g, '')}: ${(err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')}`,
+        );
+      }
+    }
+
+    // Create TicketTag records for each tag
+    if (tags && tags.length > 0) {
+      try {
+        await prisma.ticketTag.createMany({
+          data: tags.map(tagName => ({
+            name: tagName.trim(),
+            ticketId: ticket.id,
+            workspaceId: ticket.workspaceId,
+          })),
+        });
+        await dualWriteTicketTags(ticket.id, tags.map(t => t.trim()), prisma);
+        logger.info(`[Ticket Creation] Created ${tags.length} tags for ticket ${ticket.id}`);
+      } catch (error) {
+        logger.error('[Ticket Creation] Error creating ticket tags:', error);
+        // Don't fail ticket creation if tag creation fails
+      }
+    }
+
+
+    // Create FormEntityValues records for dynamic fields
+    if (Object.keys(dynamicFields).length > 0 && formMapping && formFields.length > 0) {
+      try {
+        // Create FormEntityValues for each dynamic field
+        const formEntityValuesData = formFields
+          .filter((field: any) => dynamicFields[field.fieldName] !== undefined)
+          .map((field: any) => {
+            const value = dynamicFields[field.fieldName];
+            // Provide both fields for backward compatibility
+            return {
+              formId: formMapping.formId,
+              entityId: ticket.id,
+              entityType: FormEntityType.TICKET,
+              fieldId: field.id,
+              contextId: boardId,
+              workspaceId: ticket.workspaceId,
+              fieldValue: '', // Empty string for backward compatibility (not used anymore)
+              actualFieldValue: value, // Actual value stored in JSON field
+            };
+          });
+
+        if (formEntityValuesData.length > 0) {
+          await prisma.formEntityValues.createMany({
+            data: formEntityValuesData,
+          });
+          logger.info(`[Ticket Creation] Created ${formEntityValuesData.length} form entity values for ticket ${ticket.id}`);
+          if (Object.prototype.hasOwnProperty.call(dynamicFields, 'releaseVersion')) {
+              versionReleaseMappingService.syncTicketById(ticket.id).catch(error => {
+                logger.error(`[Ticket Creation] Version release mapping failed for ticket ${ticket.xyneId}:`, error);
+              });
+            }
+        }
+      } catch (error) {
+        logger.error('[Ticket Creation] Error creating form entity values:', error);
+        // Don't fail ticket creation if form entity values creation fails
+      }
+    }
+
+    // Queue Vespa job after the ticket and any form fields are fully ingested.
+    await this.pushVespaJobForTicket(ticket.id, userId, actor?.workspaceId);
+
+    void userActivityTrackingService.trackTicketCreated(userId, {
+      ticketId: ticket.id,
+      title: ticket.title,
+      boardId: ticket.boardId,
+    });
+
+    // Full role assignment when toggle is ON (runs after ticket is committed)
+    let fraAssignedUserId: string | null = null;
+    if (pendingFullRoleAssignment && userGroupId) {
+      try {
+        const fullRoles = await ticketAssignmentService.assignFullRolesToTicket({
+          ticketId: ticket.id,
+          userGroupId,
+          boardId,
+          createdBy: userId,
+          projectId: ticket.projectId,
+          channelId: ticket.channelId,
+        });
+        const primaryUserId = primaryUserIdOf(fullRoles);
+        if (primaryUserId) {
+          const prevAssignedTo = ticket.assignedTo;
+          const updatedTicket = await prisma.ticket.update({
+            where: { id: ticket.id },
+            data: { assignedTo: primaryUserId },
+          });
+          await syncConversationTicketMdFromPrismaTicket(prisma, updatedTicket);
+          fraAssignedUserId = primaryUserId;
+
+          const ticketsHandler = new TicketsSideEffectHandler(queryContext);
+          ticketsHandler.onUpdate({
+            entityId: ticket.id,
+            entityType: 'tickets',
+            operation: 'update',
+            args: { assignedTo: primaryUserId },
+            previousValue: {
+              assignedTo: prevAssignedTo,
+              stageName: ticket.stageName,
+              statusV2: ticket.statusV2,
+              eta: ticket.eta ? ticket.eta.getTime() : null,
+              boardId: ticket.boardId,
+              createdBy: ticket.createdBy,
+              channelId: ticket.channelId,
+            },
+          }).catch(err => logger.error('[Ticket Creation] TicketsSideEffectHandler error:', err));
+        }
+
+        const assignmentsHandler = new TicketAssignmentsSideEffectHandler(queryContext);
+        const fraAssignments = secondaryAssignmentsOf(fullRoles);
+        for (const assignment of fraAssignments) {
+          assignmentsHandler.onInsert({
+            entityId: assignment.assignmentId,
+            entityType: 'ticket_assignments',
+            operation: 'insert',
+          }).catch(err => logger.error(`[Ticket Creation] TicketAssignmentsSideEffectHandler error for assignment ${assignment.assignmentId}:`, err));
+        }
+
+        logger.info(`[Ticket Creation] Full role assignment complete for ticket ${ticket.id}`);
+      } catch (error) {
+        logger.error('[Ticket Creation] Error during full role assignment:', error);
+      }
+    }
+
+    // Sync workload mapping if ticket was assigned to a user
+    const finalAssignedUserId = fraAssignedUserId || ticket.assignedTo;
+    if (finalAssignedUserId && userGroupId) {
+      try {
+        await syncUserWorkload(finalAssignedUserId, userGroupId, boardId, userId);
+        logger.info(`[Ticket Creation] Synced workload for user ${finalAssignedUserId}`);
+      } catch (error) {
+        logger.error('[Ticket Creation] Error syncing workload:', error);
+      }
+    }
+
+    // Send notification for regular auto-assignment (non-FRA)
+    // FRA notifications are handled by side-effect handlers above
+    if (!pendingFullRoleAssignment && ticket.assignedTo && ticket.assignedTo !== userId) {
+      const ticketsHandler = new TicketsSideEffectHandler(queryContext);
+      ticketsHandler.onUpdate({
+        entityId: ticket.id,
+        entityType: 'tickets',
+        operation: 'update',
+        args: { assignedTo: ticket.assignedTo },
+        previousValue: {
+          assignedTo: null,
+          stageName: ticket.stageName,
+          statusV2: ticket.statusV2,
+          eta: ticket.eta ? ticket.eta.getTime() : null,
+          boardId: ticket.boardId,
+          createdBy: ticket.createdBy,
+          channelId: ticket.channelId,
+        },
+      }).catch(err => logger.error('[Ticket Creation] Non-FRA TicketsSideEffectHandler error:', err));
+    }
+
+    logger.info('analytics_event', {
+      event: 'ticket_created',
+      timestamp: new Date().toISOString(),
+      userId: ticket.createdBy,
+      userName: actor?.name ?? null,
+    });
+
+    const duplicateDecisions = duplicateDecisionsOf(input.duplicateDecisions);
+    if (!duplicateDecisions.sameAs) {
+      ticketDuplicateService.persistDuplicateReferences({
+        ticketId: ticket.id,
+        ticketCreatedBy: ticket.createdBy,
+        title,
+        description,
+        projectId,
+        userId,
+        parentTicketId,
+        channelId: ticket.channelId,
+        scopeFieldValues: duplicateScopeValues,
+        excludeTicketIds: duplicateDecisions.notSame,
+      }).catch(error => {
+        logger.error('Failed to persist duplicate references for ticket', {
+          ticketId: ticket.id,
+          error,
+        });
+      });
+    }
+
+    const afterResponse = async (): Promise<void> => {
       // Check if this is a support channel by fetching the channel type
       const channel = await this.channelRepository.findById(ticket.channelId);
       if (channel && channel.type === ChannelType.SUPPORT) {
@@ -1061,7 +1474,7 @@ export class TicketController {
             queryText: description,
             channelId: channel.id,
             userId,
-            userName: req.user?.name,
+            userName: actor?.name,
             conversationId: ticket.conversationId,
             xyneId: ticket.xyneId,
           },
@@ -1146,9 +1559,9 @@ export class TicketController {
             branch,
             parentTicketId,
             currentTicketId: ticket.id,
-            userName: req.user?.name,
+            userName: actor?.name,
             isHotFix: ticket.ticketType === BaseTicketType.Hotfix,
-            workspaceId: xyneReleaseBot?.workspaceId || req.user?.workspaceId,
+            workspaceId: xyneReleaseBot?.workspaceId || actor?.workspaceId,
           }).then((result) => {
             if (result.success) {
               logger.info(`[Ticket Creation] Commit analysis completed for ticket ${ticket.xyneId}`);
@@ -1163,41 +1576,9 @@ export class TicketController {
           });
         }
       }
+    };
 
-    } catch (error) {
-      logger.error('Error creating ticket:', error);
-
-      if (error instanceof PrismaClientKnownRequestError) {
-        if (error.code === 'P2002') {
-          const target = error.meta?.target as string[];
-          if (target && target.includes('messageId')) {
-            res.status(409).json({
-              error: 'A ticket was already created from this message',
-              code: 'DUPLICATE_SOURCE_MESSAGE',
-            });
-            return;
-          }
-          if (target && target.includes('xyneId')) {
-            res.status(409).json({
-              error: 'Ticket ID conflict. Please try again.',
-              code: 'DUPLICATE_ID',
-            });
-            return;
-          }
-          // Client-supplied `id` (requestedTicketId) collided with an existing
-          // ticket. Signal 409 so the caller can retry with a new id.
-          if (!target || target.includes('id') || target.includes('PRIMARY')) {
-            res.status(409).json({
-              error: 'A ticket with this id already exists. Retry with a new id.',
-              code: 'DUPLICATE_TICKET_ID',
-            });
-            return;
-          }
-        }
-      }
-
-      res.status(500).json({ error: 'Internal server error' });
-    }
+    return { ticket, afterResponse };
   };
 
   /**

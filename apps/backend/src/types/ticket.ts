@@ -42,6 +42,33 @@ export interface CreateTicketRequest {
 
 }
 
+/** Dimensions and thumbnail pairing for an uploaded file, by index into `files`. */
+export interface TicketFileMetadata {
+  fileIndex: number;
+  hasThumbnail: boolean;
+  thumbnailIndex?: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * Input to TicketController.createTicketCore: the request body with its
+ * multipart / JSON-string fields already parsed.
+ */
+export interface CreateTicketCoreInput
+  extends Omit<CreateTicketRequest, 'workspaceId' | 'dynamicFields' | 'entityLinkContext'> {
+  parentTicketId?: string;
+  /** Only checked against the actor; tickets are always created as the actor. */
+  createdBy?: string;
+  updatedBy?: string;
+  duplicateDecisions?: unknown;
+  fromTicketsTab: boolean;
+  files: Express.Multer.File[];
+  fileMetadata?: TicketFileMetadata[] | undefined;
+  entityLinkOwner?: EntityLinkOwner | undefined;
+  dynamicFields: Record<string, string | string[]>;
+}
+
 export interface GetTicketDetailsResponse {
   id: string;
   title: string;

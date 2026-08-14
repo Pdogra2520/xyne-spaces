@@ -170,6 +170,8 @@ export type Conversation = QueryResultType<typeof queries.channelConversationsPa
 
 export type DraftMessageDB = QueryResultType<typeof queries.userDrafts>[number];
 export type TwinDraftDB = DraftMessageDB;
+/** A DraftMessage with origin ticket: bulk ticket rows that failed to create. */
+export type TicketDraftDB = DraftMessageDB;
 export type DelayedMessageDB = QueryResultType<typeof queries.userDelayedMessages>[number];
 export type UnreadActivity = QueryResultType<typeof queries.userUnreadActivities>[number];
 export type UserPreference = QueryResultType<typeof queries.getCurrentUserPreference>;
@@ -305,6 +307,7 @@ interface StateMachineContext {
   relatedContext: DraftRelatedContexts;
   draftMessages: DraftMessageDB[];
   twinDrafts: TwinDraftDB[];
+  ticketDrafts: TicketDraftDB[];
   delayedMessages: DelayedMessageDB[];
   userPreference: UserPreference;
   allUserGroups: UserGroup[];
@@ -633,7 +636,7 @@ export const stateMachine = setup({
       draftMessages: ({ context, event }) => {
         if (event.type === 'ADD_USER_DRAFTS') {
           return event.draftMessages.filter(d => {
-            if (d.origin === 'twin') return false;
+            if (d.origin === 'twin' || d.origin === 'ticket') return false;
             const hasContent = d.content.trim() !== '';
             const hasAttachments = (d.attachments?.length ?? 0) > 0;
             return hasContent || hasAttachments;
@@ -646,6 +649,12 @@ export const stateMachine = setup({
           return event.draftMessages.filter(d => d.origin === 'twin');
         }
         return context.twinDrafts;
+      },
+      ticketDrafts: ({ context, event }) => {
+        if (event.type === 'ADD_USER_DRAFTS') {
+          return event.draftMessages.filter(d => d.origin === 'ticket');
+        }
+        return context.ticketDrafts;
       },
     }),
     addUserDelayedMessages: assign({
@@ -845,6 +854,7 @@ export const stateMachine = setup({
       userGroupMappings: [],
       draftMessages: [],
       twinDrafts: [],
+      ticketDrafts: [],
       delayedMessages: [],
       unreadActivities: [],
       filteredTicketIds: [],
@@ -899,6 +909,7 @@ export const stateMachine = setup({
     relatedContext: loadRelatedContext(),
     draftMessages: [],
     twinDrafts: [],
+    ticketDrafts: [],
     delayedMessages: [],
     userPreference: undefined,
     allUserGroups: [],

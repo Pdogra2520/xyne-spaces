@@ -136,6 +136,47 @@ const lowlight = createLowlight(all);
 const MAX_LIST_DEPTH = 5;
 const LIST_TYPES = new Set(['bulletList', 'orderedList']);
 
+/**
+ * A list as indented lines: two spaces per nesting level, each item with its
+ * marker (its number for ordered lists, `-` otherwise). An item's further
+ * paragraphs follow it, indented past the marker.
+ */
+const listLines = (list: PMNode, depth: number): string[] => {
+  const ordered = list.type.name === 'orderedList';
+  const start = typeof list.attrs['start'] === 'number' ? list.attrs['start'] : 1;
+  const indent = '  '.repeat(depth);
+  const lines: string[] = [];
+  list.forEach((item, _offset, index) => {
+    const marker = ordered ? `${start + index}.` : '-';
+    let wroteItem = false;
+    item.forEach(child => {
+      if (LIST_TYPES.has(child.type.name)) {
+        if (!wroteItem) lines.push(`${indent}${marker} `);
+        wroteItem = true;
+        lines.push(...listLines(child, depth + 1));
+        return;
+      }
+      const text = child.textBetween(0, child.content.size, '\n');
+      text.split('\n').forEach(line => {
+        lines.push(wroteItem ? `${indent}   ${line}` : `${indent}${marker} ${line}`);
+        wroteItem = true;
+      });
+    });
+    if (!wroteItem) lines.push(`${indent}${marker} `);
+  });
+  return lines;
+};
+
+/**
+ * getText() drops list markers and nesting, but ticket creation needs both: a
+ * numbered list is what turns one draft into several tickets, and nesting is
+ * what makes sub-tickets.
+ */
+const TICKET_TEXT_SERIALIZERS = {
+  orderedList: ({ node }: { node: PMNode }): string => listLines(node, 0).join('\n'),
+  bulletList: ({ node }: { node: PMNode }): string => listLines(node, 0).join('\n'),
+};
+
 const getMaxListDepth = (doc: PMNode): number => {
   let maxDepth = 0;
   const stack: { node: PMNode; depth: number }[] = [{ node: doc, depth: 0 }];
@@ -2300,7 +2341,11 @@ export const InputBox = forwardRef<InputBoxHandle, InputBoxProps>(
                                 <DropdownMenuItem
                                   onClick={() => {
                                     setIsSendMenuOpen(false);
-                                    onCreateTicket(editor?.getText().trim() || '');
+                                    onCreateTicket(
+                                      editor
+                                        ?.getText({ textSerializers: TICKET_TEXT_SERIALIZERS })
+                                        .trim() || '',
+                                    );
                                   }}
                                   data-track-category='CHAT_INPUT'
                                   data-track-name='CREATE_TICKET_FROM_INPUT'

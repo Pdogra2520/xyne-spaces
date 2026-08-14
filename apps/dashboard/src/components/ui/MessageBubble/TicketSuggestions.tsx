@@ -2,6 +2,7 @@ import { logger, Event as LogEvent } from '../../../utils/logger';
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { CreateTicketModal } from '../../Tickets/CreateTicketModal/CreateTicketModal';
+import { BulkCreateTicketsModal } from '../../Tickets/BulkCreateTicketsModal/BulkCreateTicketsModal';
 import { TicketSuggestion, TicketCreatedInfo } from '../../../utils/markdownTicketSuggestions.ts';
 import { useChannel } from '../../../hooks/useChannels';
 import { conversationService } from '../../../services/Chat/conversationService';
@@ -26,11 +27,11 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
   messageId,
   conversationId,
 }) => {
-  // Queue-based state management (single source of truth)
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [creationQueue, setCreationQueue] = useState<string[]>([]);
   const [isUpdating, setIsUpdating] = useState(false);
   const [initialQueueLength, setInitialQueueLength] = useState(0);
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
 
   const currentChannel = useChannel(channelId || '');
   const navigate = useNavigate();
@@ -55,10 +56,8 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
     [suggestions],
   );
 
-  // Store snapshot of suggestions at creation time to survive WebSocket updates
   const queuedSuggestionsRef = React.useRef<Map<string, TicketSuggestion>>(new Map());
 
-  // Derived state - modal visibility is determined purely by queue state
   const activeId = creationQueue[0] ?? null;
   const activeSuggestion = activeId ? queuedSuggestionsRef.current.get(activeId) : null;
   const shouldShowModal = creationQueue.length > 0 && activeSuggestion !== null;
@@ -69,7 +68,6 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
 
   const startCreation = () => {
     if (selectedIds.length > 0) {
-      // Snapshot the suggestions at creation time
       queuedSuggestionsRef.current.clear();
       selectedIds.forEach(id => {
         const suggestion = suggestionMap.get(id);
@@ -127,9 +125,24 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
     );
   };
 
+  const startBulkCreation = () => {
+    if (suggestions.length === 0) return;
+    setIsBulkModalOpen(true);
+  };
+
+  // Rows carry their suggestionId as clientRowId so results pair back to suggestions.
+  const bulkInitialTickets = useMemo(
+    () =>
+      suggestions.map(s => ({
+        title: s.title,
+        description: s.description,
+        clientRowId: s.suggestionId,
+      })),
+    [suggestions],
+  );
+
   return (
     <div className='mt-3 pl-2 -ml-8'>
-      {/* Render created tickets (read-only links) */}
       {ticketsCreated.map(created => (
         <div key={created.ticketId} className='flex items-start gap-2 py-2'>
           <div className='flex-1 min-w-0'>
@@ -147,7 +160,6 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
         </div>
       ))}
 
-      {/* Ticket rows (uncreated suggestions) */}
       {suggestions.map(suggestion => {
         const isSelected = selectedIds.includes(suggestion.suggestionId);
         const checkboxId = `ticket-suggestion-${suggestion.suggestionId}`;
@@ -175,9 +187,8 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
         );
       })}
 
-      {/* Create button */}
-      {selectedIds.length > 0 && (
-        <div className='pt-1'>
+      <div className='pt-1 flex items-center gap-3'>
+        {selectedIds.length > 0 && (
           <button
             onClick={startCreation}
             data-track-category='MESSAGE'
@@ -187,10 +198,74 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
           >
             {isUpdating ? 'Creating...' : `Create Tickets (${selectedIds.length})`}
           </button>
+        )}
+      </div>
+
+      {suggestions.length >= 2 && (
+        <div className='pt-1'>
+          <button
+            onClick={startBulkCreation}
+            disabled={isUpdating}
+            className='text-sm font-medium text-primary hover:underline disabled:opacity-50 disabled:cursor-not-allowed bg-transparent border-none p-0'
+            data-track-category='Tickets'
+            data-track-name='TicketSuggestionsCreateBulk'
+          >
+            Create all as tickets
+          </button>
         </div>
       )}
 
-      {/* Create Ticket Modal - driven by derived state */}
+      {isBulkModalOpen && currentChannel && (
+        <BulkCreateTicketsModal
+          isOpen={true}
+          onClose={() => setIsBulkModalOpen(false)}
+          channelId={channelId}
+          initialTickets={bulkInitialTickets}
+          // Failures surface above the channel's message box, which is on screen
+          // wherever this message is being read.
+          draftTarget={{ channelId, conversationId: null }}
+          sourceConversationId={conversationId}
+          onBulkCreated={result => {
+            // Without this the suggestions stay selectable and the bulk button
+            // stays live, so a second click recreates the whole batch — the
+            // single-ticket path is guarded server-side, this one is not.
+            // Rows carry their suggestionId as clientRowId and the backend echoes
+            // it back, so pairing survives rows being deleted or added in the modal.
+            const suggestionById = new Map(suggestions.map(s => [s.suggestionId, s]));
+            void (async () => {
+              try {
+                for (const row of result.results) {
+                  if (row.status !== 'created') continue;
+                  const { ticket } = row;
+                  const suggestion = row.clientRowId
+                    ? suggestionById.get(row.clientRowId)
+                    : undefined;
+                  if (!suggestion) continue;
+                  await conversationService.markTicketSuggestionAsCreated(
+                    conversationId,
+                    messageId,
+                    {
+                      suggestionId: suggestion.suggestionId,
+                      ticketId: ticket.id,
+                      xyneId: ticket.xyneId,
+                      title: ticket.title,
+                      ticketConversationId: ticket.conversationId,
+                    },
+                  );
+                }
+                setSelectedIds([]);
+              } catch (error) {
+                logger.error(LogEvent.FRONTEND_ERROR, {
+                  type: 'migrated_console_error',
+                  message: String('Failed to mark bulk suggestions as created:'),
+                  error,
+                });
+              }
+            })();
+          }}
+        />
+      )}
+
       {shouldShowModal && currentChannel && (
         <CreateTicketModal
           key={activeId}

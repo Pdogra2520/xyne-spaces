@@ -1059,6 +1059,8 @@ export class WorkflowController {
           ignoreDuration: 0,
           mode: WorkflowExecutionMode.MANUAL,
           createdBy: execution.createdBy || null,
+          entityType: execution.entityType,
+          entityId: execution.entityId,
         });
 
         logger.info(`[WORKFLOW-CONTROLLER] Created rerun execution ${rerunExecution.id} for step ${stepId} with existing output`);
@@ -1075,8 +1077,6 @@ export class WorkflowController {
           stepSubType: step.stepSubType,
           markdownSummary: step.markdownSummary,
           attachment: step.attachment,
-          entityType: step.entityType,
-          entityId: step.entityId,
         });
 
         // Copy parent agent steps to new execution

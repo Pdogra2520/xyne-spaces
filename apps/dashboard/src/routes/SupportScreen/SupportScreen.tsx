@@ -36,7 +36,7 @@ import {
   SUPPORT_SIDEBAR_MAX_WIDTH,
   SUPPORT_SIDEBAR_MIN_WIDTH,
 } from './supportSidebarWidth';
-import { useCanReadTicket } from '../../hooks/usePermissions';
+import { useCanReadTicket, useCanSendDeskEmail } from '../../hooks/usePermissions';
 import { cn } from '../../utils/classNames';
 import { getApiErrorMessage } from '../../utils/apiError';
 import { surfaceMutationError } from '../../utils/zeroMutationToast';
@@ -670,6 +670,7 @@ const SupportScreen = (): ReactElement => {
   const navigate = useNavigate();
   // Gate the Tickets shortcut the same way the main rail gates '/projects'.
   const canAccessProjects = useCanReadTicket();
+  const canSendDeskEmail = useCanSendDeskEmail();
   const [searchParams, setSearchParams] = useSearchParams();
   const { userID } = useAuthContextValues();
   const isGuest = useAuth().user?.role === WorkspaceRole.GUEST;
@@ -4394,6 +4395,7 @@ const SupportScreen = (): ReactElement => {
                           )}
                         {isSelectedChannelJoined &&
                           selectedChannelId &&
+                          canSendDeskEmail &&
                           !COMPOSE_DISABLED_CHANNEL_TYPES.has(selectedChannelFull?.type) && (
                             <Tooltip content='Compose new email' side='bottom'>
                               <Button

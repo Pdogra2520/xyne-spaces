@@ -153,6 +153,7 @@ import { handleAutoDraftCallback } from '@/controllers/autodraftCallback.handler
 import { handleDeskReportCallback } from '@/controllers/deskReportCallback.handler';
 import { handleClawCallAiCallback } from '@/controllers/clawCallAiCallback.handler';
 import { CLAW_CALL_AI_CALLBACK_PATH } from '@/services/callAi/clawCallAiRunner';
+import { handleDeskThreadCanvasCallback } from '@/controllers/deskThreadCanvasCallback.handler';
 import automationWebhookRoutes from '@/automations/routes/webhook-trigger.handler';
 import activityLogRoutes from '@/routes/activityLog';
 import userActivityRoutes from '@/routes/userActivity';
@@ -700,6 +701,11 @@ export class App {
       `${CLAW_CALL_AI_CALLBACK_PATH}/:runKey`,
       validateS2SKey,
       handleClawCallAiCallback,
+    );
+    this.app.post(
+      '/api/internal/desk-canvas/callback/:canvasId/:sessionId',
+      validateS2SKey,
+      handleDeskThreadCanvasCallback,
     );
 
     // Internal canvas read/update (S2S-only, used by MCP tools)

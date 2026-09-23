@@ -36,7 +36,11 @@ import {
   SUPPORT_SIDEBAR_MAX_WIDTH,
   SUPPORT_SIDEBAR_MIN_WIDTH,
 } from './supportSidebarWidth';
-import { useCanReadTicket, useCanSendDeskEmail } from '../../hooks/usePermissions';
+import {
+  useCanReadTicket,
+  useCanSendDeskEmail,
+  useHasDeskInsightsAccess,
+} from '../../hooks/usePermissions';
 import { cn } from '../../utils/classNames';
 import { getApiErrorMessage } from '../../utils/apiError';
 import { surfaceMutationError } from '../../utils/zeroMutationToast';
@@ -2085,8 +2089,8 @@ const SupportScreen = (): ReactElement => {
   // Mailbox folders are email-only, so other desk types get no folder filter on their list.
   const selectedChannelHasMailboxFolders =
     sortedEmailChannels.find(c => c.id === selectedChannelId)?.type === ChannelType.EMAIL;
-  // Desk insight panels (metrics, report, topics) are restricted to the desk owner
-  // and channel admins, matching canManage in useDeskSettingsForm.
+  // Desk insight panels (metrics, report, topics) are restricted to the desk owner,
+  // channel admins, and the desk's metricsMinAccess SUPPORT tier.
   // myChannelParticipations only returns this user's ADMIN participations.
   const [myAdminParticipations] = useCachedQuery(queries.myChannelParticipations({}));
   const isChannelAdmin = (myAdminParticipations ?? []).some(
@@ -2096,7 +2100,8 @@ const SupportScreen = (): ReactElement => {
     p => p.channelId === ticketViewsChannelId,
   );
   const isDeskOwner = !!userID && channelPreference?.ownerUserId === userID;
-  const canManageDeskInsights = isDeskOwner || isChannelAdmin;
+  const hasDeskInsightsAccess = useHasDeskInsightsAccess(channelPreference?.metricsMinAccess);
+  const canManageDeskInsights = isDeskOwner || isChannelAdmin || hasDeskInsightsAccess;
   const myAdminChannelIds = useMemo(
     () => new Set((myAdminParticipations ?? []).map(p => p.channelId)),
     [myAdminParticipations],

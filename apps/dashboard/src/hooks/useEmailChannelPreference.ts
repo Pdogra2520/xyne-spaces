@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { EmailMergeMode, AutoDraftMode } from '@xyne/shared';
+import { EmailMergeMode, AutoDraftMode, type AccessType } from '@xyne/shared';
 import { useZero } from './useZero';
 import { queries } from '../zero/queries';
 import { useCachedQuery } from './useCachedQuery';
@@ -73,6 +73,7 @@ export function useUpdateEmailChannelPreference() {
       metricsEnabled,
       frtStageNames,
       metricsGuestVisibility,
+      metricsMinAccess,
       appWebhookDeliveryEnabled,
       deskReportEnabled,
       deskReportAgentSlug,
@@ -92,6 +93,7 @@ export function useUpdateEmailChannelPreference() {
       metricsEnabled?: boolean;
       frtStageNames?: string | null;
       metricsGuestVisibility?: string | null;
+      metricsMinAccess?: AccessType | null;
       appWebhookDeliveryEnabled?: boolean;
       deskReportEnabled?: boolean;
       deskReportAgentSlug?: string | null;
@@ -115,6 +117,7 @@ export function useUpdateEmailChannelPreference() {
           ...(metricsEnabled !== undefined ? { metricsEnabled } : {}),
           ...(frtStageNames !== undefined ? { frtStageNames } : {}),
           ...(metricsGuestVisibility !== undefined ? { metricsGuestVisibility } : {}),
+          ...(metricsMinAccess !== undefined ? { metricsMinAccess } : {}),
           ...(appWebhookDeliveryEnabled !== undefined ? { appWebhookDeliveryEnabled } : {}),
           ...(deskReportEnabled !== undefined ? { deskReportEnabled } : {}),
           ...(deskReportAgentSlug !== undefined

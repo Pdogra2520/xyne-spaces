@@ -286,6 +286,11 @@ export const ThreadMessages = ({
     return !!source;
   }, [propConversationParticipant, conversation?.participants]);
 
+  const subscriptionParticipant =
+    conversationDetails.type === 'complete'
+      ? { participant: conversation?.participants ?? null }
+      : {};
+
   const ticket = useMemo(() => parseTicketMd(conversation?.ticket_md), [conversation?.ticket_md]);
   const derivedTicketId = ticketId || conversation?.ticketId || '';
 
@@ -1160,6 +1165,7 @@ export const ThreadMessages = ({
                               <ConversationSubscription
                                 conversationId={derivedConversationId}
                                 {...(conversation && { conversation })}
+                                {...subscriptionParticipant}
                                 variant='icon-only'
                                 className='flex items-center justify-center'
                               />
@@ -1401,6 +1407,7 @@ export const ThreadMessages = ({
                   <ConversationSubscription
                     conversationId={derivedConversationId}
                     {...(conversation && { conversation })}
+                    {...subscriptionParticipant}
                     variant='dropdown'
                     menuOpen
                     className='px-2 py-1.5'
@@ -1528,6 +1535,7 @@ export const ThreadMessages = ({
                 <ConversationSubscription
                   conversationId={derivedConversationId}
                   {...(conversation && { conversation })}
+                  {...subscriptionParticipant}
                   variant='icon-only'
                   className={cn(
                     'h-7 w-7 rounded-lg flex items-center justify-center transition-colors hover:bg-accent dark:hover:bg-accent/50',
@@ -1631,6 +1639,7 @@ export const ThreadMessages = ({
                       <ConversationSubscription
                         conversationId={derivedConversationId}
                         {...(conversation && { conversation })}
+                        {...subscriptionParticipant}
                         variant='dropdown'
                         menuOpen
                         className='px-2 py-1.5'

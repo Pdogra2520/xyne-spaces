@@ -3479,10 +3479,11 @@ export function createMutators(
 
           if (existingParticipant) {
             // User already exists, just update isSubscribed to true
-            if (!existingParticipant.isSubscribed) {
+            if (!existingParticipant.isSubscribed || existingParticipant.unsubscribedAt) {
               await tx.mutate.conversation_participants.update({
                 id: existingParticipant.id,
                 isSubscribed: true,
+                unsubscribedAt: null,
               });
             }
             return;
@@ -3519,8 +3520,10 @@ export function createMutators(
       unsubscribeFromConversation: defineMutator(
         z.object({
           conversationId: z.string(),
+          timestamp: z.number().optional(),
+          participantId: z.string().optional(),
         }),
-        async ({ tx, args: { conversationId } }) => {
+        async ({ tx, args: { conversationId, timestamp = Date.now(), participantId = uuidv4() } }) => {
           // Find user's subscription
           const subscription = await tx.run(
             zql.conversation_participants
@@ -3530,11 +3533,44 @@ export function createMutators(
           );
 
           if (!subscription) {
-            // User is not a participant
+            const conversation = await tx.run(
+              zql.conversations.where('conversationId', conversationId).one()
+            );
+
+            if (!conversation) {
+              throw new Error('Conversation not found');
+            }
+
+            let trueLastReplyAt: number | undefined = undefined;
+            if (conversation.replyCount > 0) {
+              const latestReply = await tx.run(
+                zql.messages
+                  .where('conversationId', conversationId)
+                  .where('messageId', '!=', conversation.initialMessageId)
+                  .orderBy('createdAt', 'desc')
+                  .limit(1)
+              );
+              if (latestReply[0]) {
+                trueLastReplyAt = latestReply[0].createdAt;
+              }
+            }
+
+            await tx.mutate.conversation_participants.insert({
+              workspaceId: authData.workspaceId,
+              id: participantId,
+              conversationId,
+              userId: authData.sub,
+              isSubscribed: false,
+              unsubscribedAt: timestamp,
+              joinedAt: timestamp,
+              lastReadAt: timestamp,
+              channelId: conversation.channelId,
+              ...(trueLastReplyAt ? { lastReplyAt: trueLastReplyAt } : {}),
+            });
             return;
           }
 
-          if (!subscription.isSubscribed) {
+          if (!subscription.isSubscribed && subscription.unsubscribedAt) {
             // Already unsubscribed
             return;
           }
@@ -3543,6 +3579,7 @@ export function createMutators(
           await tx.mutate.conversation_participants.update({
             id: subscription.id,
             isSubscribed: false,
+            unsubscribedAt: timestamp,
           });
         }
       ),
@@ -4112,7 +4149,7 @@ export function createMutators(
                   .one());
 
                 // Only delete if they're MENTIONED type (keep AUTHOR participants)
-                if (participant && participant.participationType === ConversationParticipation.MENTIONED) {
+                if (participant && participant.participationType === ConversationParticipation.MENTIONED && (participant.isSubscribed || !participant.unsubscribedAt)) {
                   await tx.mutate.conversation_participants.delete({
                     id: participant.id
                   });
@@ -4586,7 +4623,7 @@ export function createMutators(
                   .one());
 
                 // Only delete if they're MENTIONED type (keep AUTHOR participants for now)
-                if (participant && participant.participationType === ConversationParticipation.MENTIONED) {
+                if (participant && participant.participationType === ConversationParticipation.MENTIONED && (participant.isSubscribed || !participant.unsubscribedAt)) {
                   await tx.mutate.conversation_participants.delete({
                     id: participant.id
                   });
@@ -4615,7 +4652,7 @@ export function createMutators(
                 .one());
 
               // Remove AUTHOR participant (they have no more messages)
-              if (senderParticipant && senderParticipant.participationType === ConversationParticipation.AUTHOR) {
+              if (senderParticipant && senderParticipant.participationType === ConversationParticipation.AUTHOR && (senderParticipant.isSubscribed || !senderParticipant.unsubscribedAt)) {
                 await tx.mutate.conversation_participants.delete({
                   id: senderParticipant.id
                 });

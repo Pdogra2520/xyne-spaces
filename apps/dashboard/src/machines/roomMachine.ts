@@ -2087,8 +2087,8 @@ export const roomMachine = setup({
           target: 'connected',
           actions: assign({
             callWindowHandoffId: ({ event, context }) =>
-              (event.output as { callWindowHandoffId?: number } | undefined)
-                ?.callWindowHandoffId ?? context.callWindowHandoffId,
+              (event.output as { callWindowHandoffId?: number } | undefined)?.callWindowHandoffId ??
+              context.callWindowHandoffId,
           }),
         },
         onError: {

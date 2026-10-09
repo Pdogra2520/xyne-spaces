@@ -13,10 +13,9 @@ import {
   MicOff,
   PhoneOff,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../../utils/classNames';
 import { APP_NO_DRAG_STYLE } from '../../../utils/electronApp';
-import ThreadMessages from '../../Chat/ThreadPannel';
 import { CallControls } from '../CallControls/CallControls';
 import { CallStateTransition } from '../CallStateTransition/CallStateTransition';
 import { ParticipantGrid } from '../ParticipantGrid/ParticipantGrid';
@@ -31,8 +30,13 @@ import { isTranscriptionAgentIdentity } from '../../../utils/livekitAgent';
 import { useAuth } from '../../../hooks/useAuth';
 import { useTelepresenceEnabled } from '../useTelepresenceEnabled';
 import { useAutoPresentationMode } from '../useAutoPresentationMode';
-import { PresentationModeOverlay } from '../PresentationMode/PresentationModeOverlay';
-import { CallWhiteboardView } from '../CallWhiteboard';
+import {
+  LazyCallWhiteboardView,
+  LazyPresentationModeOverlay,
+  LazyThreadMessages,
+  MountOnceOpen,
+  PanelLoading,
+} from '../lazyPanels';
 import { useCallWhiteboardStore } from '../../../stores/callWhiteboardStore';
 import Tooltip from '../../ui/Tooltip';
 
@@ -508,12 +512,14 @@ export function MiniCallView({
         )}
 
         {/* Presentation Mode Overlay — fullscreen + smooth fade, consistent with FullCallView */}
-        <PresentationModeOverlay
-          callId={callId}
-          isOpen={isPresentationMode}
-          participant={presentationParticipant ?? null}
-          onExit={() => setIsPresentationMode(false)}
-        />
+        <MountOnceOpen open={isPresentationMode}>
+          <LazyPresentationModeOverlay
+            callId={callId}
+            isOpen={isPresentationMode}
+            participant={presentationParticipant ?? null}
+            onExit={() => setIsPresentationMode(false)}
+          />
+        </MountOnceOpen>
       </>
     );
   }
@@ -612,16 +618,18 @@ export function MiniCallView({
                 >
                   {isWhiteboardOpen ? (
                     <div className='h-full'>
-                      <CallWhiteboardView
-                        participants={participants}
-                        room={room}
-                        className='h-full'
-                        compact={true}
-                        showSidebar={true}
-                        displayOnly={true}
-                        aiController={aiController}
-                        requestedAiController={requestedAiController}
-                      />
+                      <Suspense fallback={<PanelLoading />}>
+                        <LazyCallWhiteboardView
+                          participants={participants}
+                          room={room}
+                          className='h-full'
+                          compact={true}
+                          showSidebar={true}
+                          displayOnly={true}
+                          aiController={aiController}
+                          requestedAiController={requestedAiController}
+                        />
+                      </Suspense>
                     </div>
                   ) : focusedScreenShare ? (
                     <div className='h-full'>
@@ -710,12 +718,14 @@ export function MiniCallView({
                 borderRadius: '0 0 12px 12px',
               }}
             >
-              <ThreadMessages
-                channelId={channelId}
-                conversationId={conversationId}
-                ticketId={null}
-                onClose={onToggleThread}
-              />
+              <Suspense fallback={<PanelLoading />}>
+                <LazyThreadMessages
+                  channelId={channelId}
+                  conversationId={conversationId}
+                  ticketId={null}
+                  onClose={onToggleThread}
+                />
+              </Suspense>
 
               <ResizeHandles onResizeStart={handleResizeStart} showCorner={true} />
             </div>
@@ -754,12 +764,14 @@ export function MiniCallView({
       )}
 
       {/* Presentation Mode Overlay — fullscreen + smooth fade, consistent with FullCallView */}
-      <PresentationModeOverlay
-        callId={callId}
-        isOpen={isPresentationMode}
-        participant={presentationParticipant ?? null}
-        onExit={() => setIsPresentationMode(false)}
-      />
+      <MountOnceOpen open={isPresentationMode}>
+        <LazyPresentationModeOverlay
+          callId={callId}
+          isOpen={isPresentationMode}
+          participant={presentationParticipant ?? null}
+          onExit={() => setIsPresentationMode(false)}
+        />
+      </MountOnceOpen>
     </>
   );
 }

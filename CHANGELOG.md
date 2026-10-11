@@ -1,3 +1,10 @@
+## [1.489.2](https://github.com/juspay/xyne-spaces/compare/v1.489.1...v1.489.2) (2026-10-11)
+
+
+### Bug Fixes
+
+* let urgent email through quiet hours and never drop it ([#2875](https://github.com/juspay/xyne-spaces/issues/2875)) ([473c2eb](https://github.com/juspay/xyne-spaces/commit/473c2ebf6ebc2640e13b3301887a36bd25aff14d))
+
 ## [1.489.1](https://github.com/juspay/xyne-spaces/compare/v1.489.0...v1.489.1) (2026-10-11)
 
 

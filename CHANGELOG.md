@@ -1,3 +1,10 @@
+## [1.489.3](https://github.com/juspay/xyne-spaces/compare/v1.489.2...v1.489.3) (2026-10-11)
+
+
+### Bug Fixes
+
+* cap xyne-claw's global HTTP dispatcher so pods stop exhausting ports to claw-auth ([#2877](https://github.com/juspay/xyne-spaces/issues/2877)) ([3675a1b](https://github.com/juspay/xyne-spaces/commit/3675a1bc64007d1231362fd22135588b6607ca7d))
+
 ## [1.489.2](https://github.com/juspay/xyne-spaces/compare/v1.489.1...v1.489.2) (2026-10-11)
 
 

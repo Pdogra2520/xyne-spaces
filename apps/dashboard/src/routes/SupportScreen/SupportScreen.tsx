@@ -36,7 +36,7 @@ import {
   SUPPORT_SIDEBAR_MAX_WIDTH,
   SUPPORT_SIDEBAR_MIN_WIDTH,
 } from './supportSidebarWidth';
-import { useHasResourceAccess } from '../../hooks/usePermissions';
+import { useCanReadTicket } from '../../hooks/usePermissions';
 import { cn } from '../../utils/classNames';
 import { getApiErrorMessage } from '../../utils/apiError';
 import { surfaceMutationError } from '../../utils/zeroMutationToast';
@@ -241,6 +241,7 @@ import { DeskSettings } from '../../components/xyne-desk/DeskSettings';
 import { DeskAppsMenu } from '../../components/xyne-desk/DeskApps/DeskAppsMenu';
 import { ArtifactAppHost } from '../../components/ArtifactApp/ArtifactAppHost';
 import { useDeskApps } from '../../components/xyne-desk/DeskApps/useDeskApps';
+import { useChannelPublishedApps } from '../../hooks/useChannelPublishedApps';
 import { DeskMetricsDashboard } from '../../components/xyne-desk/DeskMetrics';
 import { TopicsExplorer } from '../../components/xyne-desk/TopicsExplorer';
 import { AutoLabelWizard } from '../../components/xyne-desk/AutoLabelWizard/AutoLabelWizard';
@@ -668,7 +669,7 @@ const SupportScreen = (): ReactElement => {
   const supportBase = workspaceId ? `/${workspaceId}/support` : '/support';
   const navigate = useNavigate();
   // Gate the Tickets shortcut the same way the main rail gates '/projects'.
-  const canAccessProjects = useHasResourceAccess('PROJECTS');
+  const canAccessProjects = useCanReadTicket();
   const [searchParams, setSearchParams] = useSearchParams();
   const { userID } = useAuthContextValues();
   const isGuest = useAuth().user?.role === WorkspaceRole.GUEST;
@@ -2231,10 +2232,11 @@ const SupportScreen = (): ReactElement => {
   const isFacebookDesk = selectedChannelIntegration.sourceType === 'facebook';
   const isCallDesk = selectedChannelFull?.type === ChannelType.CALL;
 
-  // Artifact apps added to this desk (EmailChannelPreference.deskAppIds). Every
-  // member sees and opens them; the desk owner and channel admins add/remove
-  // them — the same rule the preference ACL enforces on the write.
-  const deskApps = useDeskApps(channelPreference?.deskAppIds);
+  // Artifact apps added to this desk (channel_published_tabs). Every member sees
+  // and opens them; the desk owner and channel admins add/remove them — the same
+  // rule the table's ACL enforces on the write (canPublishAppsTo).
+  const deskPublishedAppIds = useChannelPublishedApps(preferenceChannelId);
+  const deskApps = useDeskApps(deskPublishedAppIds);
   const canManageDeskApps =
     canManageDeskInsights && isSelectedChannelJoined && selectedChannelId !== ALL_CHANNELS_ID;
   const requestedDeskAppId = searchParams.get('deskApp');
@@ -3324,7 +3326,7 @@ const SupportScreen = (): ReactElement => {
                     </div>
                   </div>
                   {/* Tickets shortcut — jumps to the Projects/Tickets board.
-                    Replaces the old rail icon; gated on PROJECTS access. */}
+                    Replaces the old rail icon; gated on TICKETS READ access or above. */}
                   {canAccessProjects && (
                     <div className='shrink-0'>
                       <button

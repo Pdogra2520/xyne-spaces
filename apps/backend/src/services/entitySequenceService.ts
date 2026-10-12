@@ -24,6 +24,7 @@ export const SequenceEntityType = {
   NAMESPACE_TICKET: 'NAMESPACE_TICKET', // entityValue = namespaceId; ticket numbering per board namespace
   BOARD_STAGE: 'BOARD_STAGE', // entityValue = boardId; monotonic stage sequence numbers
   FORM_FIELD: 'FORM_FIELD', // entityValue = formId; monotonic field sequence numbers
+  SECRET_VERSION: 'SECRET_VERSION', // entityValue = secretDefinitionId; monotonic secret version numbers
 } as const;
 
 export type SequenceEntityType =

@@ -82,7 +82,7 @@ const VALUE_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 // What main redacted before @xyne/logger (backend errors, claw strings). While `enabled` is false
-// only these run, on strings and top-level fields — no traversal.
+// only these run, on every string (nested too, as main's claw redactValue did) — no key detector.
 const LEGACY_PATTERNS: Array<[RegExp, string]> = [
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]"],
   [/\b(authorization|token|password|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]"],
@@ -94,6 +94,29 @@ function legacyRedact(s: string): string {
   let out = s;
   for (const [re, rep] of LEGACY_PATTERNS) out = out.replace(re, rep);
   return out;
+}
+
+function isPlainObject(v: object): boolean {
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+// Copy of `value` with legacyRedact applied to every string in plain objects/arrays; other objects are kept as is.
+function legacyRedactDeep(value: unknown, seen: WeakSet<object> = new WeakSet(), depth = 0): unknown {
+  if (typeof value === "string") return legacyRedact(value);
+  if (value === null || typeof value !== "object") return value;
+  if (!Array.isArray(value) && !isPlainObject(value)) return value;
+  // Returning the original here would put its unredacted strings back in the output.
+  if (seen.has(value)) return "[Circular]";
+  if (depth >= DEFAULTS.maxDepth) return Array.isArray(value) ? "[Array]" : "[Object]";
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((v) => legacyRedactDeep(v, seen, depth + 1));
+    const entries = Object.entries(value).filter(([k]) => k !== "__proto__" && k !== "constructor" && k !== "prototype");
+    return Object.fromEntries(entries.map(([k, v]) => [k, legacyRedactDeep(v, seen, depth + 1)]));
+  } finally {
+    seen.delete(value);
+  }
 }
 
 // Neutralise newlines/tabs (→ space) so a user value can't forge extra log
@@ -251,7 +274,13 @@ function shredAt(value: unknown, o: Required<ShredOptions>, path: string, allow:
  * a record with a string `module`, that module's allow-list entries apply.
  */
 export function shred(value: unknown, opts?: ShredOptions): LogValueOut {
-  if (!getRedactConfig().enabled) return (typeof value === "string" ? legacyRedact(value) : value) as LogValueOut;
+  if (!getRedactConfig().enabled) {
+    try {
+      return legacyRedactDeep(value) as LogValueOut;
+    } catch {
+      return "[unserializable]";
+    }
+  }
   const o = { ...DEFAULTS, ...opts };
   let allow: ReadonlySet<string> | undefined;
   try {
@@ -307,9 +336,12 @@ export function shredRecordInPlace<T extends Record<string, unknown>>(
   // be indexed for reading). Symbol keys are untouched since we iterate Object.keys.
   const rec = record as Record<string, unknown>;
   if (!getRedactConfig().enabled) {
-    for (const key of Object.keys(rec)) {
-      const v = rec[key];
-      if (key !== "level" && key !== "timestamp" && typeof v === "string") rec[key] = legacyRedact(v);
+    try {
+      for (const key of Object.keys(rec)) {
+        if (key !== "level" && key !== "timestamp") rec[key] = legacyRedactDeep(rec[key]);
+      }
+    } catch {
+      /* never throw from the logging path */
     }
     return record;
   }

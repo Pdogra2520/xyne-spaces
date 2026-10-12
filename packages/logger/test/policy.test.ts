@@ -129,18 +129,37 @@ describe("allow paths", () => {
 });
 
 describe("enabled kill switch", () => {
-  it("false runs only main's legacy patterns, on strings and top-level fields", () => {
+  it("false runs only main's legacy patterns, on every string including nested ones", () => {
     setRedactConfig({ enabled: false });
     const bearer = ["Bearer", "zz1234567890abcdef"].join(" ");
     const obj = { password: "hunter2", nested: { auth: bearer } };
-    expect(shred(obj)).toBe(obj); // objects untouched: no traversal
+    expect(shred(obj)).toEqual({ password: "hunter2", nested: { auth: "Bearer [REDACTED]" } }); // no key detector
+    expect(obj.nested.auth).toBe(bearer); // input not mutated
     expect(shred(`x ${bearer}`)).toBe("x Bearer [REDACTED]");
     expect(shredText("call token=abcd1234 done")).toBe("call token=[REDACTED] done");
     const err = new Error(bearer);
     expect(shredError(err)).toBe(err);
     const rec: Record<string, unknown> = { level: "info", message: `m ${bearer}`, password: "hunter2", key: "api_key=abcdefabcdef12", nested: { auth: bearer } };
     shredRecordInPlace(rec);
-    expect(rec).toEqual({ level: "info", message: "m Bearer [REDACTED]", password: "hunter2", key: "api_key=[REDACTED]", nested: { auth: bearer } });
+    expect(rec).toEqual({ level: "info", message: "m Bearer [REDACTED]", password: "hunter2", key: "api_key=[REDACTED]", nested: { auth: "Bearer [REDACTED]" } });
+  });
+
+  it("false is never weaker than main's claw redactValue (nested objects and arrays)", () => {
+    setRedactConfig({ enabled: false });
+    const bearer = ["Bearer", "abcd1234efgh5678ijkl"].join(" ");
+    const sk = ["sk", "abcdefghij0123456789"].join("-");
+    const meta = { detail: bearer, url: "https://x.io/?api_key=ABCD1234EFGH5678", list: [sk] };
+    const expected = { detail: "Bearer [REDACTED]", url: "https://x.io/?api_key=[REDACTED]", list: ["[REDACTED]"] };
+    expect(shred({ meta })).toEqual({ meta: expected });
+    const rec: Record<string, unknown> = { message: "m", meta };
+    expect(shredRecordInPlace(rec)).toEqual({ message: "m", meta: expected });
+  });
+
+  it("false survives circular records", () => {
+    setRedactConfig({ enabled: false });
+    const a: Record<string, unknown> = { s: "token=abcd1234" };
+    a.self = a;
+    expect(shred(a)).toEqual({ s: "token=[REDACTED]", self: "[Circular]" });
   });
 
   it("is relayed downstream and shows in accepted", () => {

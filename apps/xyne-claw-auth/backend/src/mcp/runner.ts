@@ -15,37 +15,10 @@ import { provisionStdioCommand } from "./provision.js";
 import { prisma } from "../db.js";
 import { decrypt } from "../crypto.js";
 import { CONFIG } from "../config.js";
+import { forwardChildStderr } from "xyne-claw-shared";
 
 import { createLogger } from "../logger.js";
 const log = createLogger("runner");
-
-/**
- * Forward a stdio MCP child's stderr through the structured logger, one log
- * record per line, so secrets in it are shredded like any other log field.
- * The listener also keeps the pipe drained, so a chatty child never blocks.
- */
-function forwardChildStderr(transport: StdioClientTransport, serverType: string): void {
-  const stream = transport.stderr;
-  if (!stream) return;
-  let pending = "";
-  stream.on("data", (chunk: string | Buffer) => {
-    pending += chunk.toString();
-    const lines = pending.split("\n");
-    pending = lines.pop() ?? "";
-    for (const line of lines) {
-      if (line.trim()) log.info("mcp child stderr", { serverType, line });
-    }
-    // A child that never prints a newline must not grow this buffer unbounded.
-    if (pending.length > 65536) {
-      log.info("mcp child stderr", { serverType, line: pending });
-      pending = "";
-    }
-  });
-  stream.on("end", () => {
-    if (pending.trim()) log.info("mcp child stderr", { serverType, line: pending });
-    pending = "";
-  });
-}
 
 /**
  * Tolerant JSON Schema validator for MCP tool output schemas.
@@ -399,7 +372,7 @@ async function spawnSession(
       // bearer tokens there.
       stderr: "pipe",
     });
-    forwardChildStderr(transport, serverType);
+    forwardChildStderr(transport, log, serverType);
   }
 
   const client = new Client(

@@ -65,6 +65,8 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   'rtf', 'pages', 'numbers', 'key', 'eml', 'msg', 'ics', 'vcf',
   // text / data
   'txt', 'md', 'csv', 'tsv', 'log', 'json', 'jsonl', 'xml', 'yaml', 'yml', 'toml',
+  // SARIF (static-analysis results) is JSON; shared from security/DevSecOps scans
+  'sarif',
   'ini', 'conf', 'env', 'sql', 'har', 'html', 'htm', 'xhtml',
   // archives
   'zip', 'tar', 'gz', 'tgz', 'bz2', '7z', 'rar', 'xz',

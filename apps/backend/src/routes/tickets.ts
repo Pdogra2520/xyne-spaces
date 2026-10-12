@@ -48,10 +48,9 @@ router.post(
 // Update a ticket (assignee, stage, group, title, description, priority, status, eta)
 router.patch('/:ticketId', ticketController.updateTicket);
 
-// Transfer a ticket to a board in a different ticket namespace (creates a new
-// ticket + relationship, optionally closes the original). Same-namespace moves
-// use PATCH /:ticketId (boardId) instead.
-router.post('/:ticketId/transfer', ticketController.transferTicketToBoard);
+// Change a ticket's board: moves it within the same ticket namespace, otherwise
+// creates a linked ticket on the target board (optionally closing the original).
+router.post('/:ticketId/change-board', ticketController.changeTicketBoard);
 
 // Workflow metrics for tickets dashboard
 router.get('/workflow-metrics', analyticsAuthMiddleware.requireWorkspaceContext, analyticsController.getWorkflowMetrics);

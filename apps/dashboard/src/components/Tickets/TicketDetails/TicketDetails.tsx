@@ -657,7 +657,7 @@ export const TicketDetails: React.FC<TicketDetailsProps> = ({
   // Cross-namespace board changes become a transfer (new ticket + link); this
   // controls whether the original is closed as part of it.
   const [closeOriginalOnTransfer, setCloseOriginalOnTransfer] = useState(true);
-  const [isTransferringBoard, setIsTransferringBoard] = useState(false);
+  const [isChangingBoard, setIsChangingBoard] = useState(false);
   const [isGeneratingReleaseNotes, setIsGeneratingReleaseNotes] = useState(false);
   const [showArchiveConfirmDialog, setShowArchiveConfirmDialog] = useState(false);
   const [pendingTitleValue, setPendingTitleValue] = useState<string | null>(null);
@@ -1391,7 +1391,7 @@ export const TicketDetails: React.FC<TicketDetailsProps> = ({
     ticketNamespacesDetails.type !== 'unknown' &&
     ticketProjectDetails.type !== 'unknown';
 
-  // Transfer only when the boards' effective namespaces differ, matching the backend
+  // Picks the dialog copy; the backend makes the same move-vs-transfer decision
   const boardChangeCodeMismatch = useMemo(() => {
     if (!pendingBoardChange || !ticket?.xyneId || !boardChangeDataReady) return null;
     const boardList = boards && !(boards instanceof Error) ? boards : [];
@@ -3179,57 +3179,37 @@ export const TicketDetails: React.FC<TicketDetailsProps> = ({
     }
   };
 
-  // Cross-namespace change: the id can't move to a different code (it's immutable),
-  // so create a new ticket on the target board via the transfer endpoint, link it
-  // back, and optionally close the original.
-  const handleTransferToBoard = async (): Promise<void> => {
-    if (!pendingBoardChange || !ticket) return;
-    setIsTransferringBoard(true);
+  // Every board change goes through the API: the backend moves the ticket when the
+  // boards share a ticket code, otherwise it creates a linked ticket on the target board
+  // (ids are immutable) and optionally closes the original.
+  const confirmBoardChange = async (): Promise<void> => {
+    if (!pendingBoardChange || !ticket || !boardChangeDataReady) return;
+    setIsChangingBoard(true);
     try {
-      const response = await apiInstance.post(`/tickets/${ticket.id}/transfer`, {
+      const response = await apiInstance.post(`/tickets/${ticket.id}/change-board`, {
         targetBoardId: pendingBoardChange,
-        closeOld: closeOriginalOnTransfer,
+        ...(boardChangeCodeMismatch && { closeOld: closeOriginalOnTransfer }),
       });
-      const newXyneId = (response?.data as { newXyneId?: string } | undefined)?.newXyneId;
-      toast.success(
-        closeOriginalOnTransfer
-          ? `Transferred to ${newXyneId ?? 'a new ticket'} and closed ${ticket.xyneId}`
-          : `Created ${newXyneId ?? 'a linked ticket'}, linked to ${ticket.xyneId}`,
-      );
+      const data = response?.data as
+        | { mode?: 'moved' | 'transferred'; newXyneId?: string }
+        | undefined;
+      if (data?.mode === 'transferred') {
+        toast.success(
+          closeOriginalOnTransfer
+            ? `Transferred to ${data.newXyneId ?? 'a new ticket'} and closed ${ticket.xyneId}`
+            : `Created ${data.newXyneId ?? 'a linked ticket'}, linked to ${ticket.xyneId}`,
+        );
+      }
       setShowBoardChangeConfirmDialog(false);
       setPendingBoardChange(null);
     } catch (err) {
       const message =
         (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        (err instanceof Error ? err.message : 'Failed to transfer ticket');
+        (err instanceof Error ? err.message : 'Failed to change board');
       toast.error(message);
     } finally {
-      setIsTransferringBoard(false);
+      setIsChangingBoard(false);
     }
-  };
-
-  const confirmBoardChange = (): void => {
-    if (!pendingBoardChange || !ticket || !boardChangeDataReady) return;
-
-    // Different namespace -> transfer (new ticket + relationship), never a move.
-    if (boardChangeCodeMismatch) {
-      void handleTransferToBoard();
-      return;
-    }
-
-    zero.mutate(mutators.ticketStageRequest.deleteByTicketId({ ticketId: ticket.id }));
-
-    void applyTicketUpdate(
-      {
-        id: ticket.id,
-        boardId: pendingBoardChange,
-        updatedAt: Date.now(),
-      },
-      'Failed to change board',
-    );
-
-    setShowBoardChangeConfirmDialog(false);
-    setPendingBoardChange(null);
   };
 
   const handleToggleTag = (tagName: string): void => {
@@ -6152,15 +6132,15 @@ export const TicketDetails: React.FC<TicketDetailsProps> = ({
               <Button
                 variant='secondary'
                 onClick={() => setShowBoardChangeConfirmDialog(false)}
-                disabled={isTransferringBoard}
+                disabled={isChangingBoard}
                 data-track-category='Tickets'
                 data-track-name='CANCEL_BOARD_CHANGE'
               >
                 Cancel
               </Button>
               <Button
-                onClick={confirmBoardChange}
-                disabled={isTransferringBoard || !boardChangeDataReady}
+                onClick={() => void confirmBoardChange()}
+                disabled={isChangingBoard || !boardChangeDataReady}
                 data-track-category='Tickets'
                 data-track-name='CONFIRM_BOARD_CHANGE'
                 className='bg-primary text-primary-foreground hover:opacity-90'
@@ -6168,10 +6148,12 @@ export const TicketDetails: React.FC<TicketDetailsProps> = ({
                 {!boardChangeDataReady
                   ? 'Checking…'
                   : boardChangeCodeMismatch
-                    ? isTransferringBoard
+                    ? isChangingBoard
                       ? 'Creating…'
                       : 'Create ticket'
-                    : 'Confirm'}
+                    : isChangingBoard
+                      ? 'Moving…'
+                      : 'Confirm'}
               </Button>
             </div>
           </div>

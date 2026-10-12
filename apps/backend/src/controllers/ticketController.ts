@@ -102,6 +102,13 @@ import { createTicketTx, TicketCreateAccessError } from '@/bypassAcl/transaction
 import { mergeTicketTx } from '@/bypassAcl/transactions/controllersTicketController';
 import { unmergeTicketTx } from '@/bypassAcl/transactions/controllersTicketController';
 import { transferTicketAcrossNamespacesTx } from '@/bypassAcl/transactions/controllersTicketController';
+import {
+  BoardChangeError,
+  assertCanChangeBoard,
+  isCrossNamespaceChange,
+  loadBoardChangeBoards,
+  moveTicketToBoard,
+} from '@/services/tickets/ticketBoardChangeService';
 import { acquireLock, releaseLock } from '@/utils/distributedLock';
 
 
@@ -390,14 +397,11 @@ export class TicketController {
   };
 
   /**
-   * Transfer a ticket to a board in a DIFFERENT ticket namespace. We never re-key
-   * an id (it is immutable and external refs depend on it), so instead we create a
-   * fresh ticket on the target board — which draws a new id from the target
-   * namespace — link it to the original via TicketReferenceMapping, copy the
-   * labels, and (by default) close the original. A move WITHIN the same namespace
-   * must use the normal ticket update (boardId change), not this endpoint.
+   * Every board change. Same namespace: move the ticket in place. Different namespace:
+   * ids are immutable, so create a ticket on the target board (new id from its
+   * namespace), link it to the original, copy labels and (by default) close the original.
    */
-  transferTicketToBoard = async (req: Request, res: Response): Promise<void> => {
+  changeTicketBoard = async (req: Request, res: Response): Promise<void> => {
     try {
       const userId = req.user?.id;
       const workspaceId = req.user?.workspaceId;
@@ -427,49 +431,37 @@ export class TicketController {
         res.status(404).json({ error: 'Ticket not found' });
         return;
       }
+      if (source.boardId === targetBoardId) {
+        res.status(400).json({ error: 'Ticket is already on this board' });
+        return;
+      }
+
+      const { source: sourceBoard, target: targetBoard } = await loadBoardChangeBoards(
+        source.boardId,
+        targetBoardId,
+        workspaceId,
+      );
+
+      if (!(await isCrossNamespaceChange(sourceBoard, targetBoard))) {
+        const moved = await moveTicketToBoard({
+          ticketId,
+          targetBoardId,
+          ctx: {
+            userID: userId,
+            workspaceId,
+            role: req.user!.role,
+            orgRole: req.user!.orgRole,
+            memberId: req.user!.memberId,
+          },
+        });
+        res.status(200).json({ success: true, mode: 'moved', ticketId: moved.id, xyneId: moved.xyneId });
+        return;
+      }
+
+      await assertCanChangeBoard(source, sourceBoard, targetBoard, userId);
       // Already closed (e.g. by an earlier transfer); a transfer would duplicate it
       if (source.isArchived || source.statusV2 === TicketStatusV2.CANCELLED) {
         res.status(409).json({ error: 'Cannot transfer an archived or cancelled ticket' });
-        return;
-      }
-
-      const [targetBoard, sourceBoard] = await Promise.all([
-        db.board.findFirst({
-          where: { id: targetBoardId, workspaceId },
-          select: { id: true, projectId: true, ticketNamespaceId: true },
-        }),
-        db.board.findFirst({
-          where: { id: source.boardId },
-          select: { projectId: true, ticketNamespaceId: true },
-        }),
-      ]);
-      if (!targetBoard) {
-        res.status(404).json({ error: 'Target board not found' });
-        return;
-      }
-
-      // Effective namespace = board's own namespace, else its project's default.
-      const effectiveNamespaceId = async (
-        boardNamespaceId: string | null,
-        projectId: string,
-      ): Promise<string | null> => {
-        if (boardNamespaceId) return boardNamespaceId;
-        const project = await db.project.findUnique({
-          where: { id: projectId },
-          select: { defaultTicketNamespaceId: true },
-        });
-        return project?.defaultTicketNamespaceId ?? null;
-      };
-      const [sourceNamespaceId, targetNamespaceId] = await Promise.all([
-        effectiveNamespaceId(sourceBoard?.ticketNamespaceId ?? null, source.projectId),
-        effectiveNamespaceId(targetBoard.ticketNamespaceId, targetBoard.projectId),
-      ]);
-
-      if (sourceNamespaceId && targetNamespaceId && sourceNamespaceId === targetNamespaceId) {
-        res.status(400).json({
-          error:
-            'Target board shares the same ticket namespace; move the ticket with a board update instead of a transfer.',
-        });
         return;
       }
 
@@ -522,6 +514,7 @@ export class TicketController {
 
       res.status(200).json({
         success: true,
+        mode: 'transferred',
         newTicketId: created.ticketId,
         newXyneId: created.xyneId,
         oldTicketId: source.id,
@@ -530,9 +523,13 @@ export class TicketController {
         closedOld: closeOld,
       });
     } catch (error) {
-      logger.error('[TRANSFER-TICKET] Transfer failed:', error);
+      if (error instanceof BoardChangeError) {
+        res.status(error.status).json({ error: error.message });
+        return;
+      }
+      logger.error('[CHANGE-BOARD] Board change failed:', error);
       res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to transfer ticket',
+        error: error instanceof Error ? error.message : 'Failed to change board',
       });
     }
   };

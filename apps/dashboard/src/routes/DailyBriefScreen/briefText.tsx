@@ -155,20 +155,26 @@ export function useBriefRenderContext(
   key: string,
 ): BriefRenderContext {
   const [projects] = useCachedQuery(queries.getAllProjects());
-  const [namespaces] = useCachedQuery(queries.allTicketNamespaces());
-  const ticketPrefixes = useMemo(() => {
-    const prefixes = new Set<string>();
-    for (const p of (projects ?? []) as Array<{ code?: string | null }>) {
-      const code = (p.code ?? '').toUpperCase();
-      if (code) prefixes.add(code);
-    }
-    // Board-scoped codes (e.g. SEA) are not project codes, so linkify from namespaces too.
-    for (const n of (namespaces ?? []) as Array<{ code?: string | null }>) {
-      const code = (n.code ?? '').toUpperCase();
-      if (code) prefixes.add(code);
-    }
-    return prefixes;
-  }, [projects, namespaces]);
+  // Board codes (e.g. SEA) aren't project codes; look up only the ones this brief mentions
+  const candidateCodes = useMemo(
+    () => [...new Set([...content.matchAll(TICKET_ID_RE)].map(match => match[1]))].sort(),
+    [content],
+  );
+  const [namespaces] = useCachedQuery(queries.ticketNamespacesByCodes({ codes: candidateCodes }), {
+    enabled: candidateCodes.length > 0,
+  });
+  const ticketPrefixes = useMemo(
+    () =>
+      new Set(
+        [
+          ...((projects ?? []) as Array<{ code?: string | null }>),
+          ...((namespaces ?? []) as Array<{ code?: string | null }>),
+        ]
+          .map(item => (item.code ?? '').toUpperCase())
+          .filter(Boolean),
+      ),
+    [projects, namespaces],
+  );
 
   return useMemo(() => {
     const clawCitations = data?.clawCitations as ToolInvocation[] | undefined;

@@ -9,6 +9,7 @@ import { loadBoardEtaContext } from '@/bypassAcl/transactions/prismaContext';
 import { syncStageOverdueFlag } from '@/services/tickets/syncStageOverdueFlag';
 import { calculateETADeadline } from '@/utils/etaCalculation';
 import { syncConversationTicketMdFromPrismaTicket } from '@/utils/ticketMd';
+import { recordTicketTimelineEvent, type RecordTicketTimelineEventInput } from '@/services/ticketTimelineEventService';
 import { Prisma } from '@prisma/client';
 import { GuestEntity } from '@xyne/shared';
 import { TicketStatusV2, parseTicketEtaManagement, mergeTicketEtaManagement, TicketPriority, MessageType, ConversationParticipation, type TicketCardSummary, serializeTicketMd, BoardType, AttachmentEntityType, TicketReferenceRelation, ActivityType } from '@xyne/shared';
@@ -27,8 +28,8 @@ import { lockTicketMetadataAndEta } from '@/bypassAcl/rowLockServices';
 import { createTicketWithConversation as createTransferredTicket } from '@/apps/core/ticketutils';
 
 
-export function transferTicketToBoardTx(targetBoardId: string, ticketId: string, now: Date, updatedBy: string, currentTicket: any, systemActorId: string) {
-  return transaction(['Board', 'Conversation', 'Stage', 'StageTransition', 'Ticket', 'TicketActivity', 'TicketStageEta', 'TicketSubTicketMapping'], 'transferTicketToBoard: board transfer, ETA ledger reset, ETA evaluation and markdown sync must commit atomically; tx is not ACL-wrapped', prismaClient, async tx => {
+export function transferTicketToBoardTx(targetBoardId: string, ticketId: string, now: Date, updatedBy: string, currentTicket: any, systemActorId: string, boardEvent: RecordTicketTimelineEventInput) {
+  return transaction(['Board', 'Conversation', 'Message', 'Stage', 'StageTransition', 'Ticket', 'TicketActivity', 'TicketStageEta', 'TicketStageRequest', 'TicketSubTicketMapping'], 'transferTicketToBoard: board transfer, stage-request cleanup, ETA ledger reset, ETA evaluation, board activity and markdown sync must commit atomically; tx is not ACL-wrapped', prismaClient, async tx => {
     const newBoardStages = await tx.stage.findMany({
       where: { boardId: targetBoardId },
       orderBy: { sequenceNumber: 'asc' },
@@ -74,6 +75,8 @@ export function transferTicketToBoardTx(targetBoardId: string, ticketId: string,
     });
 
     await tx.ticketStageEta.deleteMany({ where: { ticketId } });
+    // Pending stage requests belong to the old board's stages
+    await tx.ticketStageRequest.deleteMany({ where: { ticketId } });
 
     let newStageEtaEntryId: string | null = null;
     let stageEtaDeadline: Date | null = null;
@@ -167,9 +170,11 @@ export function transferTicketToBoardTx(targetBoardId: string, ticketId: string,
       systemActorId,
     });
 
+    const { messageId: boardEventMessageId } = await recordTicketTimelineEvent(boardEvent, tx);
+
     await syncConversationTicketMdFromPrismaTicket(tx, updatedTicket);
 
-    return { updatedTicket, etaResult };
+    return { updatedTicket, etaResult, boardEventMessageId };
   });
 }
 export function createTicketWithConversationTx(self: TicketController, conversationId: string, projectId: string, title: string, description: string, createdBy: string, updatedBy: string, assignedTo: string | undefined, boardId: string, statusV2: string, priority: string, messageContent: string | undefined, messageSubtype: string, metadata: Record<string, any>, entityLinkContext: { sourceId: string; sourceType: "CANVAS" | "ATTACHMENT" | "TRACK" | "FOLDER" | "LINK"; } | undefined) {

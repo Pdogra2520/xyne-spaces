@@ -4482,7 +4482,6 @@ export const mutators = defineMutators({
           ticketType?: string;
           userGroupId?: string;
           eta?: number;
-          boardId?: string;
           metadata?: ReadonlyJSONValue;
           isArchived?: boolean;
           kanbanPosition?: string | null;
@@ -4490,6 +4489,10 @@ export const mutators = defineMutators({
 
         const currentTicket = await tx.run(zql.tickets.where('id', id).one());
         if (!currentTicket) throw new Error('Ticket not found');
+        // Board changes go through POST /api/tickets/:ticketId/change-board only
+        if (boardId !== undefined && boardId !== currentTicket.boardId) {
+          throw new Error("Use the change-board API to change a ticket's board");
+        }
         const updateData: TicketUpdateData = {
           updatedBy: ctx.userID,
           updatedAt: updatedAt,
@@ -4510,7 +4513,6 @@ export const mutators = defineMutators({
           updateData.userGroupId = userGroupId;
         }
         if (eta !== undefined) updateData.eta = eta;
-        if (boardId !== undefined) updateData.boardId = boardId;
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
         if (metadata !== undefined) updateData.metadata = metadata;
         if (isArchived !== undefined) updateData.isArchived = isArchived;

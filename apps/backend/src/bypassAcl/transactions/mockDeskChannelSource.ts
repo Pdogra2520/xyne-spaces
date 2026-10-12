@@ -1,5 +1,11 @@
 import { transaction } from '../base';
 import { db } from '@/database/client';
+import type { ExternalSourcePlatform } from '@/integrations/core/types';
+
+export type MockDeskChannelSourceType =
+  | ExternalSourcePlatform.GOOGLE
+  | ExternalSourcePlatform.MICROSOFT
+  | ExternalSourcePlatform.SLACK_DESK;
 
 export interface MockDeskChannelSourceInput {
   name: string;
@@ -8,7 +14,7 @@ export interface MockDeskChannelSourceInput {
   channelId: string;
   boardId: string;
   email: string;
-  sourceType: string;
+  sourceType: MockDeskChannelSourceType;
   /** Already-encrypted mock credentials string. */
   credentials: string;
 }

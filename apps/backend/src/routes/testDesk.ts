@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { NextFunction, Request, Response, Router } from 'express';
 import {
   AttachmentEntityType,
+  EmailMergeMode,
   EmailType,
   TicketReferenceRelation,
   TicketPriority,
@@ -12,10 +13,18 @@ import { db } from '@/database/client';
 import { config } from '@/config/env';
 import { encrypt } from '@/services/encryptionService';
 import { emailService } from '@/services/emailService';
-import { mockDeskMailService } from '@/services/mockDeskMailService';
+import { mockDeskMailService, type SentMailFilter } from '@/services/mockDeskMailService';
 import { externalSourceCore } from '@/integrations/core/core';
-import { googleAdapter } from '@/integrations/adapters/google';
-import { upsertMockDeskChannelSourceTx } from '@/bypassAcl/transactions/mockDeskChannelSource';
+import { ExternalSourcePlatform } from '@/integrations/core/types';
+import {
+  googleAdapter,
+  type GooglePubSubData,
+  type ParsedEmailData,
+} from '@/integrations/adapters/google';
+import {
+  upsertMockDeskChannelSourceTx,
+  type MockDeskChannelSourceType,
+} from '@/bypassAcl/transactions/mockDeskChannelSource';
 import { ChannelExternalSourceResolver } from '@/services/channelExternalSourceResolver';
 import { logger } from '@/utils/logger';
 import {
@@ -37,7 +46,6 @@ const INCOMING_EMAIL_WINDOW_MS = 60_000;
 // Mock-only, process-local rate limiting. This is best-effort protection for
 // local/CI fixtures, not a production-grade distributed throttling mechanism.
 const incomingEmailTimestampsByChannel = new Map<string, number[]>();
-type MockDeskChannelSourceType = 'google' | 'microsoft' | 'slack-desk';
 
 function isDeskMockRouteEnvironment(): boolean {
   return (
@@ -64,7 +72,7 @@ function getStringQueryParam(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function getSentMailFilterFromQuery(req: Request): { channelId?: string; conversationId?: string } {
+function getSentMailFilterFromQuery(req: Request): SentMailFilter {
   return {
     channelId: getStringQueryParam(req.query.channelId),
     conversationId: getStringQueryParam(req.query.conversationId),
@@ -101,8 +109,9 @@ function normalizeEmail(value: string): string {
 }
 
 function getMockDeskChannelSourceType(value: unknown): MockDeskChannelSourceType {
-  if (value === 'microsoft' || value === 'slack-desk') return value;
-  return 'google';
+  if (value === ExternalSourcePlatform.MICROSOFT) return ExternalSourcePlatform.MICROSOFT;
+  if (value === ExternalSourcePlatform.SLACK_DESK) return ExternalSourcePlatform.SLACK_DESK;
+  return ExternalSourcePlatform.GOOGLE;
 }
 
 function getOptionalDateOrNow(value: unknown): Date {
@@ -212,6 +221,9 @@ interface MockAttachmentInput {
   size?: number;
 }
 
+/** Attachment after asMockAttachments has filled in mimetype/size defaults. */
+type MockAttachment = Required<MockAttachmentInput>;
+
 function isMockAttachmentInput(value: unknown): value is MockAttachmentInput {
   if (!value || typeof value !== 'object') return false;
   const record = value as Partial<Record<keyof MockAttachmentInput, unknown>>;
@@ -222,6 +234,8 @@ function isMockAttachmentInput(value: unknown): value is MockAttachmentInput {
   );
 }
 
+// Kept local rather than derived from ParsedEmailData: this is untrusted fixture
+// input, so optional fields stay `unknown` until normalized in preprocess below.
 interface BulkGmailMessage {
   messageId: string;
   threadId: string;
@@ -252,11 +266,7 @@ function isBulkGmailMessage(value: unknown): value is BulkGmailMessage {
   );
 }
 
-function asMockAttachments(value: unknown): Array<{
-  filename: string;
-  mimetype: string;
-  size: number;
-}> {
+function asMockAttachments(value: unknown): MockAttachment[] {
   if (!Array.isArray(value)) return [];
 
   return value.flatMap((item) => {
@@ -273,7 +283,7 @@ function asMockAttachments(value: unknown): Array<{
 }
 
 async function createMockEmailAttachments(params: {
-  attachments: Array<{ filename: string; mimetype: string; size: number }>;
+  attachments: MockAttachment[];
   emailId: string;
   conversationId: string;
   userId: string;
@@ -323,7 +333,10 @@ router.post('/desk/workspace-mailbox', async (req, res, next) => {
       });
     }
 
-    const sourceType = req.body?.sourceType === 'microsoft' ? 'microsoft' : 'google';
+    const sourceType =
+      req.body?.sourceType === ExternalSourcePlatform.MICROSOFT
+        ? ExternalSourcePlatform.MICROSOFT
+        : ExternalSourcePlatform.GOOGLE;
     const email = getOptionalEmailOrDefault(
       req.body?.email,
       `xynedesk.internal+${workspaceId}@${config.deskMockDefaultEmailDomain}`
@@ -572,7 +585,7 @@ router.patch('/desk/channel/:channelId/auto-merge', async (req, res, next) => {
         error: 'Project has no boards configured - cannot set the Desk auto-merge preference',
       });
     }
-    const emailMergeMode = enabled ? 'ENABLED' : 'DISABLED';
+    const emailMergeMode = enabled ? EmailMergeMode.ENABLED : EmailMergeMode.DISABLED;
     const preference = await db.emailChannelPreference.upsert({
       where: { channelId },
       create: { channelId, workspaceId, boardId: firstBoard.id, emailMergeMode },
@@ -607,7 +620,7 @@ router.post('/desk/slack-workspace', async (req, res, next) => {
       where: { name },
       create: {
         name,
-        sourceType: 'slack',
+        sourceType: ExternalSourcePlatform.SLACK,
         displayName: 'Mock Slack Workspace',
         workspaceId,
         // Workspace-level (no channel/owner) like a real Slack install; the
@@ -876,13 +889,16 @@ router.post('/desk/pubsub/bulk-gmail', async (req, res, next) => {
     const deterministicAdapter = {
       ...googleAdapter,
       transform: (...[payload, src]: Parameters<typeof googleAdapter.transform>) => {
-        const parsedEmail = (payload as { parsedEmail?: { messageId?: string } } | undefined)?.parsedEmail;
+        const parsedEmail = (payload as { parsedEmail?: Pick<ParsedEmailData, 'messageId'> } | undefined)
+          ?.parsedEmail;
         if (failAtMessageId && parsedEmail?.messageId === failAtMessageId) {
           throw new InjectedPubSubFailure(`Injected retryable failure at ${failAtMessageId}`);
         }
         return googleAdapter.transform(payload, src);
       },
-      preprocess: async () =>
+      preprocess: async (): Promise<
+        Array<{ pubsubData: GooglePubSubData; parsedEmail: ParsedEmailData }>
+      > =>
         messages.map((message) => ({
           pubsubData: { emailAddress: source.displayName, historyId },
           parsedEmail: {

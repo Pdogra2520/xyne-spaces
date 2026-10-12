@@ -1,5 +1,6 @@
 import { config } from '@/config/env';
 import { decrypt } from '@/services/encryptionService';
+import type { MailReplyResult } from '@/integrations/core/baseMailReplySender';
 import { mockDeskMailService, type CaptureDeskMailInput } from '@/services/mockDeskMailService';
 
 export function buildMockDeskCredentials(payload: Record<string, unknown>): Record<string, unknown> {
@@ -23,7 +24,7 @@ export function buildMockDeskCredentials(payload: Record<string, unknown>): Reco
 export function captureMockDeskSentMail(
   encryptedCredentials: string | null | undefined,
   input: CaptureDeskMailInput
-): { threadId: string; messageId?: string } | undefined {
+): MailReplyResult | undefined {
   if (!config.isDeskMockEnabled) return undefined;
   if (!parseMockDeskCredentials(encryptedCredentials).isMock) return undefined;
 

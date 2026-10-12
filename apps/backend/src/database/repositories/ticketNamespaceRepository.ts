@@ -6,7 +6,7 @@ export interface CreateTicketNamespaceInput {
   workspaceId: string;
   projectId: string;
   code: string;
-  name?: string;
+  description?: string;
   createdBy: string;
 }
 
@@ -32,7 +32,7 @@ export class TicketNamespaceRepository {
     return this.db.ticketNamespace.create({
       data: {
         code: data.code,
-        name: data.name,
+        description: data.description,
         workspaceId: data.workspaceId,
         projectId: data.projectId,
         createdBy: data.createdBy,

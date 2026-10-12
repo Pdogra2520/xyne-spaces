@@ -5065,18 +5065,18 @@ export const mutators = defineMutators({
     update: defineMutator(
       z.object({
         namespaceId: z.string(),
-        name: z.string(),
+        description: z.string(),
         timestamp: z.number(),
       }),
-      async ({ tx, ctx, args: { namespaceId, name, timestamp } }) => {
+      async ({ tx, ctx, args: { namespaceId, description, timestamp } }) => {
         const namespace = await tx.run(zql.ticket_namespaces.where('id', namespaceId).one());
         if (!namespace) {
           throw new Error('Ticket namespace not found');
         }
-        // Only the display label is editable; the ACL freezes code/projectId/sequence.
+        // Only the description is editable; the ACL freezes code/projectId/sequence.
         await tx.mutate.ticket_namespaces.update({
           id: namespaceId,
-          name,
+          description,
           updatedBy: ctx.userID,
           updatedAt: timestamp,
         });

@@ -392,7 +392,7 @@ export const ticketNamespaceTable = table('ticket_namespaces')
     projectId: string(),
     code: string(),
     ticketSequence: number(),
-    name: string().optional(),
+    description: string().optional(),
     createdBy: string(),
     updatedBy: string().optional(),
     createdAt: number(),

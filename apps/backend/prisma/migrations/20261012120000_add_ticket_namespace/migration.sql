@@ -11,7 +11,7 @@ CREATE TABLE "public"."ticket_namespaces" (
     "projectId" TEXT NOT NULL,
     "code" TEXT NOT NULL,
     "ticketSequence" INTEGER NOT NULL,
-    "name" TEXT,
+    "description" TEXT,
     "createdBy" TEXT NOT NULL,
     "updatedBy" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL,

@@ -38,7 +38,7 @@ export class TicketNamespaceController {
         return;
       }
 
-      const { projectId, code, name } = req.body;
+      const { projectId, code, description } = req.body;
       if (!projectId || typeof projectId !== 'string') {
         res.status(400).json({ error: 'projectId is required' });
         return;
@@ -72,7 +72,7 @@ export class TicketNamespaceController {
 
       const namespace = await this.repo.create({
         code: sanitizedCode,
-        name: typeof name === 'string' && name.trim() ? name.trim() : undefined,
+        description: typeof description === 'string' && description.trim() ? description.trim() : undefined,
         workspaceId,
         projectId,
         createdBy: userId,
@@ -80,7 +80,7 @@ export class TicketNamespaceController {
 
       res.status(201).json({
         success: true,
-        namespace: { id: namespace.id, code: namespace.code, name: namespace.name, projectId: namespace.projectId },
+        namespace: { id: namespace.id, code: namespace.code, description: namespace.description, projectId: namespace.projectId },
       });
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {

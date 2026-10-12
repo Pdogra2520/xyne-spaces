@@ -10,7 +10,7 @@ import { hasProjectAdminAccess } from '../core/admin-access';
 import { assertGuestWriteBlocked } from '../core/guest-access';
 
 // Frozen after creation: changing any of these would break existing ticket ids
-// (or move the namespace across tenants). Only `name` (display label) is editable.
+// (or move the namespace across tenants). Only `description` is editable.
 type FrozenArgs = { code?: string; projectId?: string; workspaceId?: string; ticketSequence?: number };
 type NamespaceRow = { code: string; projectId: string; workspaceId: string; ticketSequence: number };
 

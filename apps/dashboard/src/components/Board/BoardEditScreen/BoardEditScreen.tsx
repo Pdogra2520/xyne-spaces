@@ -1613,8 +1613,8 @@ const BoardEditScreen = ({
                     items={[
                       {
                         items: namespaces.map(namespace => ({
-                          label: namespace.name
-                            ? `${namespace.code} · ${namespace.name}`
+                          label: namespace.description
+                            ? `${namespace.code} · ${namespace.description}`
                             : namespace.code,
                           value: namespace.id,
                         })),

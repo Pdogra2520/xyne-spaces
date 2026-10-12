@@ -21,8 +21,8 @@ interface TicketNamespacesModalProps {
 
 /**
  * Manage a project's ticket codes (namespaces): the prefixes its boards use for
- * ticket IDs. Reads live via Zero, creates over REST, renames via the Zero mutator.
- * A code is frozen once created; only its display name can change.
+ * ticket IDs. Reads live via Zero, creates over REST, edits via the Zero mutator.
+ * A code is frozen once created; only its description can change.
  */
 export const TicketNamespacesModal = ({
   projectId,
@@ -39,12 +39,12 @@ export const TicketNamespacesModal = ({
   });
 
   const [newCode, setNewCode] = useState('');
-  const [newName, setNewName] = useState('');
+  const [newDescription, setNewDescription] = useState('');
   const [creating, setCreating] = useState(false);
 
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
-  const [savingRename, setSavingRename] = useState(false);
+  const [editDescription, setEditDescription] = useState('');
+  const [savingDescription, setSavingDescription] = useState(false);
 
   const boardCountByNamespace = useMemo(() => {
     const counts = new Map<string, number>();
@@ -69,11 +69,11 @@ export const TicketNamespacesModal = ({
       await apiInstance.post('/ticket-namespaces', {
         projectId,
         code,
-        ...(newName.trim() && { name: newName.trim() }),
+        ...(newDescription.trim() && { description: newDescription.trim() }),
       });
       toast.success(`Added code ${code}`);
       setNewCode('');
-      setNewName('');
+      setNewDescription('');
     } catch (error) {
       toast.error('Could not add code', {
         description: error instanceof Error ? error.message : 'Please try again.',
@@ -84,35 +84,35 @@ export const TicketNamespacesModal = ({
     }
   };
 
-  const startRename = (id: string, name: string | null): void => {
+  const startEdit = (id: string, description: string | null): void => {
     setEditingId(id);
-    setEditName(name ?? '');
+    setEditDescription(description ?? '');
   };
 
-  const handleRename = async (namespaceId: string): Promise<void> => {
-    const name = editName.trim();
-    if (!name) {
+  const handleSaveDescription = async (namespaceId: string): Promise<void> => {
+    const description = editDescription.trim();
+    if (!description) {
       setEditingId(null);
       return;
     }
     try {
-      setSavingRename(true);
+      setSavingDescription(true);
       const result = zero.mutate(
-        mutators.ticketNamespace.update({ namespaceId, name, timestamp: Date.now() }),
+        mutators.ticketNamespace.update({ namespaceId, description, timestamp: Date.now() }),
       );
       const res = await result.server;
       if (res?.type === 'error') {
-        toast.error('Rename failed', { description: res.error.message, duration: 5000 });
+        toast.error('Update failed', { description: res.error.message, duration: 5000 });
         return;
       }
       setEditingId(null);
     } catch (error) {
-      toast.error('Rename failed', {
+      toast.error('Update failed', {
         description: error instanceof Error ? error.message : 'Please try again.',
         duration: 5000,
       });
     } finally {
-      setSavingRename(false);
+      setSavingDescription(false);
     }
   };
 
@@ -169,17 +169,19 @@ export const TicketNamespacesModal = ({
                     </Badge>
                     {isEditing ? (
                       <Input
-                        value={editName}
-                        onChange={e => setEditName(e.target.value)}
-                        placeholder='Display name'
-                        disabled={savingRename}
+                        value={editDescription}
+                        onChange={e => setEditDescription(e.target.value)}
+                        placeholder='Description'
+                        disabled={savingDescription}
                         autoFocus
                         className='h-8'
                       />
-                    ) : namespace.name ? (
-                      <span className='truncate text-sm text-foreground'>{namespace.name}</span>
+                    ) : namespace.description ? (
+                      <span className='truncate text-sm text-foreground'>
+                        {namespace.description}
+                      </span>
                     ) : (
-                      <span className='truncate text-sm text-muted-foreground'>No name</span>
+                      <span className='truncate text-sm text-muted-foreground'>No description</span>
                     )}
                     {isDefault && <Badge variant='outline'>Default</Badge>}
                   </div>
@@ -193,15 +195,15 @@ export const TicketNamespacesModal = ({
                           variant='ghost'
                           size='sm'
                           onClick={() => setEditingId(null)}
-                          disabled={savingRename}
+                          disabled={savingDescription}
                         >
                           Cancel
                         </Button>
                         <Button
                           variant='default'
                           size='sm'
-                          loading={savingRename}
-                          onClick={() => void handleRename(namespace.id)}
+                          loading={savingDescription}
+                          onClick={() => void handleSaveDescription(namespace.id)}
                         >
                           Save
                         </Button>
@@ -210,11 +212,11 @@ export const TicketNamespacesModal = ({
                       <Button
                         variant='ghost'
                         size='sm'
-                        onClick={() => startRename(namespace.id, namespace.name)}
+                        onClick={() => startEdit(namespace.id, namespace.description)}
                         data-track-category='TicketNamespace'
-                        data-track-name='StartRename'
+                        data-track-name='StartEditDescription'
                       >
-                        Rename
+                        Edit
                       </Button>
                     )}
                   </div>
@@ -245,15 +247,15 @@ export const TicketNamespacesModal = ({
             </div>
             <div className='flex-1'>
               <label
-                htmlFor='ticket-namespace-name'
+                htmlFor='ticket-namespace-description'
                 className='mb-1 block text-xs text-muted-foreground'
               >
-                Name (optional)
+                Description (optional)
               </label>
               <Input
-                id='ticket-namespace-name'
-                value={newName}
-                onChange={e => setNewName(e.target.value)}
+                id='ticket-namespace-description'
+                value={newDescription}
+                onChange={e => setNewDescription(e.target.value)}
                 placeholder='e.g. Payments squad'
                 disabled={creating}
               />

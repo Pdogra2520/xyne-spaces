@@ -1795,7 +1795,7 @@ model TicketNamespace {
   projectId      String
   code           String
   ticketSequence Int
-  name           String?
+  description    String?
   createdBy      String
   updatedBy      String?
   createdAt      DateTime

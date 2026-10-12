@@ -1423,7 +1423,11 @@ const ChatListV4: React.FC<ChatListProps> = ({
   // again, which would keep the DMs nav dot on until the user leaves. So mark again
   // whenever that count comes back while the user is looking at the newest messages:
   // window active, scrolled to the end, nothing held behind the "Latest messages" pill.
+  // One attempt per newest conversation: a mark the server rejects brings the count
+  // straight back, and retrying it would loop.
   const hasMarkedOnOpenRef = useRef(false);
+  const lastMarkedConversationIdRef = useRef<string | undefined>(undefined);
+  const newestConversationId = conversations[conversations.length - 1]?.conversationId;
   const isWindowActive = useIsWindowActive();
   const hasDmUnread = isDmScope && (channelParticipation?.unreadCount ?? 0) > 0;
   const isViewingLatest =
@@ -1440,9 +1444,14 @@ const ChatListV4: React.FC<ChatListProps> = ({
     if (skipMarkAsReadRef?.current || activitySkipMarkAsReadChannelRef.current) return;
 
     const isOpenMark = !hasMarkedOnOpenRef.current && !reopenedForLinkedTarget;
-    if (!isOpenMark && !(hasDmUnread && isViewingLatest)) return;
+    const isLiveMark =
+      hasDmUnread &&
+      isViewingLatest &&
+      newestConversationId !== lastMarkedConversationIdRef.current;
+    if (!isOpenMark && !isLiveMark) return;
 
     hasMarkedOnOpenRef.current = true;
+    lastMarkedConversationIdRef.current = newestConversationId;
     // No draft args: the composer may not have loaded the draft yet, and sending
     // '' would delete it. The unmount call above still saves the draft on leave.
     void zero.mutate(mutators.channel.markChannelAsViewed({ channelId, timestamp: Date.now() }));
@@ -1452,6 +1461,7 @@ const ChatListV4: React.FC<ChatListProps> = ({
     reopenedForLinkedTarget,
     hasDmUnread,
     isViewingLatest,
+    newestConversationId,
     skipMarkAsReadRef,
     zero,
   ]);

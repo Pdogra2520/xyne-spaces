@@ -29,7 +29,6 @@
 import { PrismaClient } from '@prisma/client';
 import { createId } from '@paralleldrive/cuid2';
 import { hashPassword } from '../src/utils/passwordUtils';
-import { createDefaultTicketNamespace } from '../src/utils/ticketNamespaceUtils';
 import {
   serializeInitialMessageMd,
   serializeTicketMd,
@@ -301,11 +300,27 @@ async function ensureProjectAndBoard(workspaceId: string, createdBy: string) {
     });
   }
 
-  await createDefaultTicketNamespace(prisma, {
-    workspaceId,
-    projectId: project.id,
-    code: PROJECT_CODE,
-    createdBy,
+  // Written directly: the shared helper is gated on the backfill, which never runs locally
+  const now = new Date();
+  const namespace = await prisma.ticketNamespace.create({
+    data: {
+      code: PROJECT_CODE,
+      workspaceId,
+      projectId: project.id,
+      createdBy,
+      ticketSequence: 0,
+      createdAt: now,
+      updatedAt: now,
+    },
+    select: { id: true },
+  });
+  await prisma.project.update({
+    where: { id: project.id },
+    data: { defaultTicketNamespaceId: namespace.id },
+  });
+  await prisma.board.update({
+    where: { id: board.id },
+    data: { ticketNamespaceId: namespace.id },
   });
 
   return { projectId: project.id, boardId: board.id };

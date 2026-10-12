@@ -1,3 +1,10 @@
+## [1.491.0](https://github.com/juspay/xyne-spaces/compare/v1.490.0...v1.491.0) (2026-10-12)
+
+
+### Features
+
+* Removed Release Manager Navigation ([#2921](https://github.com/juspay/xyne-spaces/issues/2921)) ([#2926](https://github.com/juspay/xyne-spaces/issues/2926)) ([2f6d42b](https://github.com/juspay/xyne-spaces/commit/2f6d42b710bb4e64b22439c392528cfeb45fe1f8))
+
 ## [1.490.0](https://github.com/juspay/xyne-spaces/compare/v1.489.3...v1.490.0) (2026-10-12)
 
 

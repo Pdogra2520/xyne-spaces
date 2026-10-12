@@ -413,6 +413,7 @@ Enforced by `scripts/validation/validate-filename.ts`:
 | `tests/03_e2e/03_project/project.cpt` | `Creating project <projectAlias> for user <userAlias>` |
 | `tests/03_e2e/04_channel/channel.cpt` | `Navigating to channel <channelAlias> for user <userAlias>`, `Creating channel <channelAlias> for user <userAlias>` |
 | `tests/03_e2e/05_messaging/messaging.cpt` | `Creating DM with user <userAlias>`, `Creating group DM with users <userAlias1> and <userAlias2>`, `Sending stored message <messageAlias> in dm <dmAlias> for user <userAlias>`, `Verifying stored message ... in dm/channel ... is visible in current conversation`, `Sending stored message <messageAlias> in channel <channelAlias> for user <userAlias>`, `Navigating to chat`, `Opening DM from user <userAlias>` |
+| `tests/03_e2e/11_xyne-desk/xyne-desk.cpt` | `Creating DL Desk channel <channelAlias> for user <userAlias> in project <projectAlias>` |
 
 ## Step definition file map
 
@@ -426,6 +427,12 @@ Enforced by `scripts/validation/validate-filename.ts`:
 | `tests/03_e2e/e2e-common.steps.ts` | E2E | Ensure not logged in, verify redirect path (supports wildcard `/*` matching) |
 | `tests/03_e2e/03_project/project.steps.ts` | E2E/Project | Login and store user, ensure/generate project and channel fixtures, capture created channel details |
 | `tests/03_e2e/05_messaging/messaging.steps.ts` | E2E/Messaging | Generate message fixtures with unique suffix in DM and channel contexts; navigate to baseline DM via stored URL (`opening baseline DM for user <userAlias>`) |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-channel.steps.ts` | E2E/Desk | Mock shared mailbox, DL/personal/Slack Desk channel creation via API, sent-mail reset, mailbox connect/disconnect, auto-merge setting |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-mail.steps.ts` | E2E/Desk | Generate/inject mock email and Slack messages, ingestion and ticket assertions, ticket update, shared/separate conversations |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-reply-compose.steps.ts` | E2E/Desk | Reply, reply-all, compose, sent-mail assertions, merge/unmerge, compose/filter/AI-rewrite UI controls |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-pubsub.steps.ts` | E2E/Desk | Deterministic Pub/Sub Gmail batches: publish, republish, injected failure, redelivery, ticket counts |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-mock-dl.steps.ts` | E2E/Desk | Mock DL provider reset, DL membership, provider mail send, mock inbox counts |
+| `tests/03_e2e/11_xyne-desk/xyne-desk-{state,api,browser,mock-mail}.ts` | E2E/Desk | Support modules (no steps): scenario state/types/constants, API helpers, browser auth/navigation/composer, mock mail builders |
 
 ## Change checklist
 

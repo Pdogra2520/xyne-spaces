@@ -15,9 +15,6 @@
 * verifying mock Desk email "routing-mail-a" was ingested
 * verifying mock Desk email "routing-mail-b" was ingested
 * verifying mock Desk email "routing-mail-c" was ingested
-* verifying Desk channel "channel-desk-dl-routing-a" does not contain email "routing-mail-b" for user "admin-1"
-* verifying Desk channel "channel-desk-dl-routing-a" does not contain email "routing-mail-c" for user "admin-1"
-* verifying Desk channel "channel-desk-dl-routing-b" does not contain email "routing-mail-a" for user "admin-1"
-* verifying Desk channel "channel-desk-dl-routing-b" does not contain email "routing-mail-c" for user "admin-1"
-* verifying Desk channel "channel-desk-dl-routing-c" does not contain email "routing-mail-a" for user "admin-1"
-* verifying Desk channel "channel-desk-dl-routing-c" does not contain email "routing-mail-b" for user "admin-1"
+* verifying Desk channel "channel-desk-dl-routing-a" contains only email "routing-mail-a" for user "admin-1"
+* verifying Desk channel "channel-desk-dl-routing-b" contains only email "routing-mail-b" for user "admin-1"
+* verifying Desk channel "channel-desk-dl-routing-c" contains only email "routing-mail-c" for user "admin-1"

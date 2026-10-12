@@ -1,24 +1,10 @@
-import type { BrowserContext } from '@playwright/test';
+import type { APIResponse, BrowserContext, Cookie } from '@playwright/test';
 import { config } from '@/config';
 
-interface HeaderEntry {
-  name: string;
-  value: string;
-}
+type ResponseWithHeaders = Pick<APIResponse, 'headersArray'>;
 
-interface ResponseWithHeaders {
-  headersArray?(): HeaderEntry[] | Promise<HeaderEntry[]>;
-}
-
-interface ParsedCookie {
-  name: string;
-  value: string;
-  path?: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: 'Strict' | 'Lax' | 'None';
-}
+type ParsedCookie = Pick<Cookie, 'name' | 'value'> &
+  Partial<Pick<Cookie, 'path' | 'expires' | 'httpOnly' | 'secure' | 'sameSite'>>;
 
 function isXyneAuthCookie(name: string): boolean {
   return (
@@ -35,8 +21,8 @@ async function getSetCookieHeaders(response: ResponseWithHeaders | undefined): P
     return [];
   }
 
-  const headerArray = (await response.headersArray?.()) ?? [];
-  return headerArray
+  return response
+    .headersArray()
     .filter((header) => header.name.toLowerCase() === 'set-cookie')
     .map((header) => header.value);
 }

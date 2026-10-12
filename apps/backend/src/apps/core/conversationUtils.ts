@@ -55,7 +55,6 @@ export async function findOrCreateConversation(
         isMarkdown: isMarkdown,
         metadata: metadata,
         uploadedFiles: uploadedFiles,
-        emitsMessageReceivedViaSideEffects: true,
       });
 
       // Trigger side effects for notifications, activities, and unread counts

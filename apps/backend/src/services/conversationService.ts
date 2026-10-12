@@ -111,10 +111,8 @@ export interface AddMessageToConversationParams {
   isMarkdown?: boolean;
   /** Migration-only: advance participant read state to the imported reply timestamp. */
   markParticipantsRead?: boolean;
-  /** Migration import: skip live-only side effects (TICKET_COMMENTED and MESSAGE_RECEIVED automations, meet-link extraction) so bulk-imported history never fires workflows. */
+  /** Migration import: skip live-only side effects (TICKET_COMMENTED automations, meet-link extraction) so bulk-imported history never fires workflows. */
   suppressAutomations?: boolean;
-  /** Caller replays MessagesSideEffectHandler.onInsert itself, which already emits MESSAGE_RECEIVED for the reply — don't emit it twice. */
-  emitsMessageReceivedViaSideEffects?: boolean;
   /** Slack migration import: with FILE_CONTENT_ENABLED=false, attachment Vespa feeds are downgraded to metadata-only. */
   isMigrationImport?: boolean;
 }
@@ -624,7 +622,6 @@ export class ConversationService {
       isAddingParticipant = true,
       markParticipantsRead = false,
       suppressAutomations = false,
-      emitsMessageReceivedViaSideEffects = false,
       isMigrationImport = false,
     } = params;
 
@@ -878,18 +875,6 @@ export class ConversationService {
         isBot,
         userId,
         createdAt: message.createdAt,
-      });
-    }
-
-    // Replies only reach automations with `includeReplies` on.
-    if (!suppressAutomations && !emitsMessageReceivedViaSideEffects) {
-      void emitMessageReceived({
-        messageId: message.messageId,
-        conversationId,
-        channelId: conversation.channelId,
-        msgType: message.msgType as MessageType,
-        userId,
-        isReply: true,
       });
     }
 

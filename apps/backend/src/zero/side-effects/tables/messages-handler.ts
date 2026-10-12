@@ -339,15 +339,15 @@ export class MessagesSideEffectHandler extends BaseSideEffectHandler {
     const { senderId, content, conversationId } = message;
     const { channelId } = conversation;
 
-    // Replies fan out too; only automations with `includeReplies` act on them.
-    void emitMessageReceived({
-      messageId: message.messageId,
-      conversationId,
-      channelId,
-      msgType: message.msgType as MessageType,
-      userId: senderId,
-      isReply: conversation.initialMessageId !== message.messageId,
-    });
+    if (conversation.initialMessageId === message.messageId) {
+      void emitMessageReceived({
+        messageId: message.messageId,
+        conversationId,
+        channelId,
+        msgType: message.msgType as MessageType,
+        userId: senderId,
+      });
+    }
 
     const [channel, sender, channelParticipantsRaw, userPreference] = await Promise.all([
       db.channel.findUnique({
@@ -2275,6 +2275,7 @@ export class MessagesSideEffectHandler extends BaseSideEffectHandler {
       !currentMessage.isDeleted &&
       previousValue.content !== undefined &&
       currentMessage.content !== previousValue.content &&
+      !previousValue.isThreadReply &&
       previousValue.channelId
     ) {
       void emitMessageReceived({
@@ -2284,7 +2285,6 @@ export class MessagesSideEffectHandler extends BaseSideEffectHandler {
         msgType: previousValue.msgType as MessageType,
         userId: previousValue.senderId,
         isEdit: true,
-        isReply: previousValue.isThreadReply,
         previousContent: previousValue.content,
       });
     }

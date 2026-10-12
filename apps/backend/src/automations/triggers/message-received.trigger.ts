@@ -50,10 +50,6 @@ const MessageReceivedConfigSchema = z.object({
     .describe(
       'Also fire when an edit turns a non-matching message into a match. Only that transition fires. Needs a Content Contains value.',
     ),
-  includeReplies: z
-    .boolean()
-    .default(false)
-    .describe('Also fire on replies within existing conversations, not just new messages.'),
 });
 
 export const MessageReceivedOutputSchema = z.object({
@@ -78,7 +74,6 @@ export const MessageReceivedOutputSchema = z.object({
   msgType: z.nativeEnum(MessageType),
   deleted: z.boolean(),
   isEdit: z.boolean().optional(),
-  isReply: z.boolean().optional(),
   previousContentMatched: z.boolean().optional(),
   mentionedUsers: z
     .array(
@@ -115,7 +110,7 @@ export class MessageReceivedTrigger extends BaseTrigger<typeof MessageReceivedCo
   readonly outputSchema = MessageReceivedOutputSchema;
   readonly name = 'When a message is received in a channel';
   readonly description =
-    'Fires when a person starts a new message in a channel; turn on Include Replies to also fire on replies within existing conversations. Scope by channel or sender; optionally refine by message kind or text.';
+    'Fires when a person starts a new message in a channel (not replies within an existing conversation). Scope by channel or sender; optionally refine by message kind or text.';
   readonly category = TriggerCategory.EVENT;
   readonly icon = 'MessageSquare';
   readonly scopeFilterFields = ['channelIds', 'fromUserIds'] as const;
@@ -134,7 +129,6 @@ export class MessageReceivedTrigger extends BaseTrigger<typeof MessageReceivedCo
   ): Record<string, unknown> | null {
     const { _transient, ...rest } = payload as {
       isEdit?: boolean;
-      isReply?: boolean;
       _transient?: { previousContent?: string };
     };
     // Edits only matter to automations that opted in. Dropping here — rather than
@@ -142,7 +136,6 @@ export class MessageReceivedTrigger extends BaseTrigger<typeof MessageReceivedCo
     // execution, state row and queue job per automation in the workspace.
     const cfg = this.configSchema.parse(config);
     if (rest.isEdit && !cfg.fireOnEdit) return null;
-    if (rest.isReply && !cfg.includeReplies) return null;
 
     const previousContent = _transient?.previousContent;
     if (previousContent === undefined) return rest;
@@ -174,7 +167,6 @@ export class MessageReceivedTrigger extends BaseTrigger<typeof MessageReceivedCo
     if (p.deleted) return { matched: false, failed: 'deleted' };
     // Edits reach every candidate; only automations that opted in act on them.
     if (p.isEdit && !cfg.fireOnEdit) return { matched: false, failed: 'fireOnEdit' };
-    if (p.isReply && !cfg.includeReplies) return { matched: false, failed: 'includeReplies' };
     if (cfg.messageTypes && cfg.messageTypes.length > 0) {
       if (!cfg.messageTypes.includes(p.msgType)) return { matched: false, failed: 'messageTypes' };
     }
@@ -303,7 +295,6 @@ interface ReceivedMessage {
   msgType?: MessageType | undefined;
   userId: string;
   isEdit?: boolean;
-  isReply?: boolean;
   previousContent?: string;
 }
 
@@ -331,7 +322,6 @@ export async function emitMessageReceived(message: ReceivedMessage): Promise<voi
           authorId: message.userId,
           msgType: message.msgType ?? MessageType.USER,
           ...(message.isEdit ? { isEdit: true } : {}),
-          ...(message.isReply ? { isReply: true } : {}),
           ...(message.previousContent !== undefined
             ? { _transient: { previousContent: message.previousContent } }
             : {}),

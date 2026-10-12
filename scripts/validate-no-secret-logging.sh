@@ -1,36 +1,12 @@
 #!/bin/bash
 
-# Secret-in-log-message Guard
-# ---------------------------
-# Blocks a commit / PR from adding a NEW log call that interpolates a secret into
-# the log MESSAGE text, e.g.
+# Fails when a change adds a log call that interpolates a secret into the message text,
+# e.g. log.info(`Bearer ${accessToken}`). Log it as a structured field instead; the shredder
+# redacts fields. Only counts going UP per file fail, so existing code isn't flagged.
+# Escape hatch: append `// log-safe: <reason>` to the line (visible to the PR reviewer).
 #
-#   log.info(`Setting cookie: ${name}=${value}`)
-#   logger.debug(`calling upstream with Bearer ${accessToken}`)
-#   console.log(`key=${this.apiKey}`)
-#
-# Why: the @xyne/logger shredder redacts secret-named FIELDS and secret-SHAPED
-# values at runtime, but it cannot know that an arbitrary `${value}` inside a
-# message string is a credential. Structured fields are the safe path:
-#
-#   log.info("Setting cookie", { name, maxAge })   // value omitted
-#   log.info("upstream call", { tokenPresent: !!accessToken })
-#
-# Like the raw-SQL guard, this compares the per-file COUNT of offending lines in
-# the OLD content vs the NEW content and fails only when it goes UP, so existing
-# code is never retroactively flagged and moving/reindenting a line is free.
-#
-# Escape hatch (reviewed): append `// log-safe: <reason>` to the line, e.g. when
-# the interpolated identifier only *sounds* like a secret. The marker is visible
-# in the PR diff, so a reviewer signs off on it.
-#
-# Usage:
-#   scripts/validate-no-secret-logging.sh              # staged changes (pre-commit)
-#   scripts/validate-no-secret-logging.sh --base <ref> # <ref>...HEAD
-#   scripts/validate-no-secret-logging.sh --ci         # CI: merge-base with $CHANGE_TARGET/main
-#   scripts/validate-no-secret-logging.sh --scan-all   # report every existing hit (no fail)
-#
-# Exit: 0 clean · 1 violation · 2 usage error.
+# Usage: validate-no-secret-logging.sh [--base <ref> | --ci | --scan-all]   (default: staged)
+# Exit: 0 clean, 1 violation, 2 usage error.
 
 set -euo pipefail
 
@@ -46,14 +22,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# A line is flagged when it contains a log call AND either
-#   (A) interpolates an identifier whose LAST segment names a secret
-#       (${token}, ${accessToken}, ${req.headers.authorization}, ${this.apiKey}), or
-#   (B) names a secret and prints a plain value right after it
-#       ("token=${t}", "Bearer ${x}"), or
-#   (C) prints a cookie pair ("cookie: ${name}=${value}").
-# Presence/length checks (${!!token}, ${token.length}, ${tokenCount},
-# ${t ? "set" : "missing"}) and names (${cookieNames}) are NOT flagged.
+# Flagged: ${<secret-named id>}, "token=${x}"/"Bearer ${x}", or a cookie pair.
+# Not flagged: presence/length checks (${!!token}, ${token.length}) and names (${cookieNames}).
 LOG_CALL='\b(?:log|logger|console|this\.log|this\.logger|childLogger)\.(?:info|warn|error|debug|log|trace|verbose|fatal)\s*\('
 SECRET_STEM='(?:password|passwd|pwd|secret|token|api_?key|cookie|authorization|credentials?|jwt|private_?key|passphrase)'
 IDENT="[\\w.?\\[\\]'\"]"

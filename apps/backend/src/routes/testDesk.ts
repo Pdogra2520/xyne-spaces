@@ -321,17 +321,9 @@ router.post('/desk/workspace-mailbox', async (req, res, next) => {
   try {
     if (!requireMockDeskEnabled(res)) return;
 
-    const workspaceId = req.user?.workspaceId;
-    const userId = req.user?.id;
-    if (!workspaceId || !userId) {
-      return res.status(401).json({ error: 'Authenticated user workspace is required' });
-    }
-    const user = await getCurrentWorkspaceUser(userId, workspaceId);
-    if (!canManageWorkspaceDesk(user?.role)) {
-      return res.status(403).json({
-        error: 'Only workspace owners and admins can configure the shared Desk mailbox',
-      });
-    }
+    const manager = await requireWorkspaceDeskManager(req, res);
+    if (!manager) return;
+    const { workspaceId, userId } = manager;
 
     const sourceType =
       req.body?.sourceType === ExternalSourcePlatform.MICROSOFT

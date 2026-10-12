@@ -9,7 +9,7 @@ import type {
 type MockMailFields = Omit<MockDeskMailFixture, 'alias' | 'to'> & { to?: string };
 
 /** Builds a mock Desk mail fixture addressed to the mock DL unless `to` is given. */
-export function buildMockMail(alias: string, fields: MockMailFields): MockDeskMailFixture {
+function buildMockMail(alias: string, fields: MockMailFields): MockDeskMailFixture {
   return { alias, to: config.desk.mockDlEmail, ...fields };
 }
 

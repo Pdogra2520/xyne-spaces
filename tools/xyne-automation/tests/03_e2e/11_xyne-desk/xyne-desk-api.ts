@@ -3,7 +3,6 @@ import { type APIRequestContext, type APIResponse, request } from '@playwright/t
 import { config } from '@/config';
 import { buildRandomSuffix, getStoredUser } from '@/fixtures/fixture-helpers';
 import { getUserCatalogEntry } from '@/fixtures/user-catalog';
-import { buildUniqueDeskChannelName } from '@/tests/03_e2e/11_xyne-desk/xyne-desk-name-utils';
 import {
   apiContextsByUserAlias,
   type ConnectedDeskSourceStatus,
@@ -47,7 +46,6 @@ async function createDevAuthenticatedApiContext(userAlias: string): Promise<APIR
     extraHTTPHeaders: {
       Accept: 'application/json',
       'x-workspace-id': user.workspaceId,
-      'x-desk-test-user-alias': userAlias,
     },
   });
 
@@ -144,6 +142,31 @@ function getSharedMailboxDomain(): string {
 /** Lower-cased `<localPart>@<mock shared mailbox domain>`. */
 export function buildDeskMailboxEmail(localPart: string): string {
   return `${localPart}@${getSharedMailboxDomain()}`.toLowerCase();
+}
+
+function sanitizeNamePart(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Builds an 80-char-safe channel name with the run id and a random suffix, so
+ * parallel and repeated runs never collide on channel names.
+ */
+function buildUniqueDeskChannelName(channelAlias: string): string {
+  const runId = sanitizeNamePart(process.env.XYNE_RUN_ID ?? 'local');
+  if (!runId) {
+    throw new Error('XYNE_RUN_ID must contain at least one alphanumeric character when set');
+  }
+  const normalizedAlias = sanitizeNamePart(channelAlias) || 'channel-desk';
+  const uniqueSuffix = `${runId}-${buildRandomSuffix()}`;
+  const maxAliasLength = Math.max(1, 80 - uniqueSuffix.length - 1);
+  const trimmedAlias = normalizedAlias.slice(0, maxAliasLength).replace(/-+$/g, '');
+
+  return `${trimmedAlias}-${uniqueSuffix}`;
 }
 
 // ---------------------------------------------------------------------------

@@ -3856,7 +3856,6 @@ const SupportScreen = (): ReactElement => {
                                   id='assignee'
                                   active={hasAssigneeFilter}
                                   open={assigneeOpen}
-                                  data-testid='desk-filter-assignee'
                                 />
                               </Popover.Trigger>
                               <Popover.Content

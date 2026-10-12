@@ -7,7 +7,7 @@ export type MockDeskChannelSourceType =
   | ExternalSourcePlatform.MICROSOFT
   | ExternalSourcePlatform.SLACK_DESK;
 
-export interface MockDeskChannelSourceInput {
+interface MockDeskChannelSourceInput {
   name: string;
   workspaceId: string;
   userId: string;

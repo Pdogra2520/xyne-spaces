@@ -14,7 +14,7 @@ function createMockDeskValidationError(message: string): Error & { status: numbe
   return error;
 }
 
-export interface CapturedDeskMail {
+interface CapturedDeskMail {
   id: string;
   kind: 'reply' | 'compose';
   status: 'sent';
@@ -51,7 +51,7 @@ export interface SentMailFilter {
   conversationId?: string;
 }
 
-export interface MockDlMail {
+interface MockDlMail {
   id: string;
   dlEmail: string;
   from: string;
@@ -61,7 +61,7 @@ export interface MockDlMail {
   createdAt: string;
 }
 
-export interface MockDlGroup {
+interface MockDlGroup {
   email: string;
   members: string[];
 }

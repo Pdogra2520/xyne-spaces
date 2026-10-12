@@ -22,7 +22,7 @@ export interface MockDeskMailFixture {
   xyneId?: string;
 }
 
-export interface MockDeskAttachmentFixture {
+interface MockDeskAttachmentFixture {
   filename: string;
   mimetype: string;
   size: number;
@@ -121,7 +121,7 @@ export const mockPubSubBatches = new Map<string, PubSubBatch>();
 export const mockPubSubMessages = new Map<string, PubSubMessage[]>();
 export const apiContextsByUserAlias = new Map<string, APIRequestContext>();
 
-export async function disposeDeskApiContexts(): Promise<void> {
+async function disposeDeskApiContexts(): Promise<void> {
   const contexts = [...apiContextsByUserAlias.values()];
   apiContextsByUserAlias.clear();
 

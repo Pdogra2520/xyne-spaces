@@ -17,7 +17,7 @@ export function escapeRegExp(value: string): string {
 // Page + locator helpers
 // ---------------------------------------------------------------------------
 
-export async function waitForDeskPageToSettle(): Promise<void> {
+async function waitForDeskPageToSettle(): Promise<void> {
   const page = testContext.activePage;
   await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => undefined);
   await page.waitForTimeout(300);
@@ -41,7 +41,7 @@ export async function clickWhenVisible(locator: Locator): Promise<void> {
   await locator.click();
 }
 
-export async function isVisible(locator: Locator, timeout: number): Promise<boolean> {
+async function isVisible(locator: Locator, timeout: number): Promise<boolean> {
   try {
     await locator.waitFor({ state: 'visible', timeout });
     return true;
@@ -94,7 +94,7 @@ async function assertDashboardAuthCookieForWorkspace(
   );
 }
 
-export async function ensureBrowserAuthenticatedForDesk(
+async function ensureBrowserAuthenticatedForDesk(
   userAlias: string,
   options: { force?: boolean } = {}
 ): Promise<void> {

@@ -1,12 +1,15 @@
 import { useEffect } from 'react';
 import { useQuery as useTanStackQuery } from '@tanstack/react-query';
-import { REDACT_ALLOW_CONFIG_KEY } from '@xyne/logger';
+import { REDACT_CONFIG_KEY } from '@xyne/logger';
 import { useCacConfig } from '@xyne/shared/hooks';
 import { queries } from '../zero/queries';
 import { useCachedQuery } from '../hooks/useCachedQuery';
 import { stateMachineActor } from '../machines/stateMachine';
 import { apiInstance } from '../services/clients/apiClient';
 import { logger } from '../utils/logger';
+
+// So long-lived tabs and the desktop app pick up redaction changes.
+const LOG_REDACT_REFETCH_MS = 5 * 60 * 1000;
 
 interface CurrentUserRolesApiResponse {
   success: boolean;
@@ -29,9 +32,10 @@ export const DeferredLoader: React.FC = () => {
     staleTime: 10 * 60 * 1000,
   });
 
-  const { config: logRedactAllowList, isSuccess: logRedactAllowListLoaded } = useCacConfig<unknown>({
-    key: REDACT_ALLOW_CONFIG_KEY,
+  const { config: logRedactConfig, isSuccess: logRedactConfigLoaded } = useCacConfig<unknown>({
+    key: REDACT_CONFIG_KEY,
     fallbackConfig: null,
+    refetchInterval: LOG_REDACT_REFETCH_MS,
   });
 
   useEffect(() => {
@@ -51,8 +55,8 @@ export const DeferredLoader: React.FC = () => {
   }, [currentUserRolesQuery.isSuccess, currentUserRolesQuery.data]);
 
   useEffect(() => {
-    if (logRedactAllowListLoaded) logger.setRedactAllowList(logRedactAllowList);
-  }, [logRedactAllowListLoaded, logRedactAllowList]);
+    if (logRedactConfigLoaded) logger.setRedactConfig(logRedactConfig);
+  }, [logRedactConfigLoaded, logRedactConfig]);
 
   return null;
 };

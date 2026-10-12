@@ -377,14 +377,15 @@ export class Logger implements LoggerConfig {
     }
   }
 
-  setRedactAllowList(redactAllowList: unknown): void {
+  setRedactConfig(redactConfig: unknown): void {
     if (this.worker) {
       const message: WorkerMessage = {
-        type: 'SET_REDACT_ALLOW_LIST',
-        payload: { redactAllowList },
+        type: 'SET_REDACT_CONFIG',
+        payload: { redactConfig },
       };
       this.worker.postMessage(message);
     }
+    window.electronAPI?.setLogRedactConfig?.(redactConfig);
   }
 
   setNotificationWsId(notificationWsId: string): void {

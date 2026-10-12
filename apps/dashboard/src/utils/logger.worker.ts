@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { CLIENT_EVENT_SHRED_OPTIONS, setRedactAllowList, shred } from '@xyne/logger';
+import { CLIENT_EVENT_SHRED_OPTIONS, setRedactConfig, shred } from '@xyne/logger';
 import type { LogEvent } from './logger';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
@@ -28,7 +28,7 @@ export interface WorkerMessage {
     | 'SET_ZERO_CLIENT_ID'
     | 'SET_ZERO_CLIENT_GROUP_ID'
     | 'SET_PAGE_VIEW'
-    | 'SET_REDACT_ALLOW_LIST'
+    | 'SET_REDACT_CONFIG'
     | 'FLUSH'
     | 'SHUTDOWN';
   payload?: {
@@ -52,7 +52,7 @@ export interface WorkerMessage {
     maxBatchSize?: number | undefined;
     maxRetries?: number | undefined;
     version?: string | undefined;
-    redactAllowList?: unknown;
+    redactConfig?: unknown;
   };
 }
 
@@ -110,8 +110,8 @@ class LoggerWorker {
         case 'SET_PAGE_VIEW':
           this.handleSetPageView(payload);
           break;
-        case 'SET_REDACT_ALLOW_LIST':
-          setRedactAllowList(payload?.redactAllowList);
+        case 'SET_REDACT_CONFIG':
+          setRedactConfig(payload?.redactConfig);
           break;
         case 'FLUSH':
           this.handleFlush();

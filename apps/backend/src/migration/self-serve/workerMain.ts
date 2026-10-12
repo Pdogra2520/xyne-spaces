@@ -12,7 +12,7 @@ import { logger } from '@/utils/logger';
 import { getStorageService } from '@/services/storage';
 import { vespaQueue, vespaBackfillQueue } from '@/queues/vespaQueue';
 import { superpositionClient } from '@/services/superpositionClient';
-import { startLogRedactAllowListSync } from '@/services/logRedactAllowList';
+import { startLogRedactConfigSync } from '@/services/logRedactConfig';
 import { MigrationStore } from './store';
 import { MigrationQueues } from './queues';
 import { SlackMigrationEngine } from './engine';
@@ -42,7 +42,7 @@ async function boot(): Promise<void> {
   await superpositionClient.initialize().catch((e: unknown) =>
     logger.warn('[SlackMigration] Superposition init failed — migration config will use defaults', { error: e instanceof Error ? e.message : String(e) }),
   );
-  startLogRedactAllowListSync();
+  startLogRedactConfigSync();
 
   const store = new MigrationStore();
   const queues = new MigrationQueues();

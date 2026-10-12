@@ -20,14 +20,6 @@ export {
   type ShredOptions,
 } from "./shredder.js";
 
-export {
-  REDACT_ALLOW_CONFIG_KEY,
-  parseRedactAllowList,
-  getRedactAllowList,
-  setRedactAllowList,
-  syncRedactAllowList,
-  type RedactAllowList,
-  type RedactAllowSyncOptions,
-} from "./policy.js";
+export { REDACT_CONFIG_KEY, getRedactConfig, setRedactConfig, syncRedactConfig, type RedactConfig } from "./policy.js";
 
 export { SetOnceContext, emptyContext } from "./context.js";

@@ -1,67 +1,151 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { shred, shredRecordInPlace } from "../src/shredder.js";
-import {
-  getRedactAllowList,
-  parseRedactAllowList,
-  setRedactAllowList,
-  syncRedactAllowList,
-} from "../src/policy.js";
+import { isSecretKey, shred, shredRecordInPlace } from "../src/shredder.js";
+import { FALLBACK_KEY_WORDS, getRedactConfig, parseRedactConfig, setRedactConfig, syncRedactConfig } from "../src/policy.js";
+
+const allow = (...allowPaths: string[]) => setRedactConfig({ allowPaths });
 
 afterEach(() => {
-  setRedactAllowList(undefined);
+  setRedactConfig(undefined);
   vi.useRealTimers();
 });
 
-describe("parseRedactAllowList", () => {
-  it("accepts module:path entries and trims whitespace", () => {
-    const l = parseRedactAllowList(" MobilePush:tokenPreview , UserSessionLogging:changes.fcmToken ");
-    expect(l.accepted).toEqual(["MobilePush:tokenPreview", "UserSessionLogging:changes.fcmToken"]);
-    expect(l.rejected).toEqual([]);
-    expect(l.byModule.get("UserSessionLogging")?.has("changes.fcmToken")).toBe(true);
+describe("parseRedactConfig", () => {
+  it("uses no exceptions and the fallback lists when unset, blank or not an object", () => {
+    for (const raw of [undefined, null, "", "not json", ["otp"], 42]) {
+      const c = parseRedactConfig(raw);
+      expect(c.accepted).toEqual([]);
+      expect(c.value).toBeNull();
+      expect(c.allowPaths.size).toBe(0);
+      expect([...c.secretWords]).toEqual(FALLBACK_KEY_WORDS.secretWords);
+    }
+    expect(parseRedactConfig("not json").rejected).toEqual(["not json"]);
   });
 
-  it("rejects wildcards, bare keys and empty halves", () => {
-    const l = parseRedactAllowList("token,*:token,MobilePush:*,MobilePush:changes.*,:token,MobilePush:,a b:token");
-    expect(l.accepted).toEqual([]);
-    expect(l.rejected).toHaveLength(7);
+  it("accepts allow paths and word lists from an object or JSON string", () => {
+    const value = { allowPaths: ["MobilePush:deviceToken"], secretWords: ["otp", " pin "], secretWordPairs: ["client secret"] };
+    for (const raw of [value, JSON.stringify(value)]) {
+      const c = parseRedactConfig(raw);
+      expect(c.accepted).toEqual(["allowPaths:MobilePush:deviceToken", "secretWordPairs:client secret", "secretWords:otp", "secretWords:pin"]);
+      expect(c.rejected).toEqual([]);
+      expect(c.value).toEqual({ allowPaths: ["MobilePush:deviceToken"], secretWords: ["otp", "pin"], secretWordPairs: ["client secret"] });
+    }
   });
 
-  it("is empty (strict) when unset or blank", () => {
-    expect(parseRedactAllowList(undefined).accepted).toEqual([]);
-    expect(parseRedactAllowList("  ,  ").accepted).toEqual([]);
+  it("rejects wildcards, regexes, wrong shapes and unknown fields; those lists keep the fallback", () => {
+    const c = parseRedactConfig({
+      allowPaths: ["token", "*:token", "MobilePush:*", ":token", "a b:token"],
+      secretWords: ["(a+)+$", "Token", "two words", 7],
+      secretWordPairs: ["single"],
+      safeLastWords: "hash",
+      valuePatterns: ["xyz"],
+    });
+    expect(c.accepted).toEqual([]);
+    expect(c.rejected).toHaveLength(12);
+    expect(c.value).toBeNull();
+    expect([...c.secretWords]).toEqual(FALLBACK_KEY_WORDS.secretWords);
   });
 });
 
-describe("setRedactAllowList", () => {
-  it("is strict until set, and accepts a JSON array value", () => {
-    expect(getRedactAllowList().accepted).toEqual([]);
-    expect(setRedactAllowList(["M:token", "token"]).rejected).toEqual(["token"]);
-    expect(getRedactAllowList().accepted).toEqual(["M:token"]);
-    setRedactAllowList({ not: "a list" });
-    expect(getRedactAllowList().accepted).toEqual([]);
+describe("word lists", () => {
+  it("the fallback reproduces the detector's documented behaviour", () => {
+    for (const k of ["password", "accessToken", "x-api-key", "privateKey", "pass_phrase", "setcookie", "clientsecret"]) expect(isSecretKey(k)).toBe(true);
+    for (const k of ["tokenPreview", "tokensIn", "cookieNames", "tokenCount", "fcmTokenSuffix"]) expect(isSecretKey(k)).toBe(false);
+  });
+
+  it("a list from config replaces its fallback; other lists keep theirs", () => {
+    setRedactConfig({ secretWords: ["otp"] });
+    expect(isSecretKey("otpCode")).toBe(true);
+    expect(isSecretKey("pwd")).toBe(false);
+    expect(isSecretKey("accesstoken")).toBe(true); // gluedSecretSuffixes: fallback
+    expect(isSecretKey("otpPreview")).toBe(false); // safeLastWords: fallback
+  });
+
+  it("an explicit empty list empties it", () => {
+    setRedactConfig({ safeLastWords: [] });
+    expect(isSecretKey("tokenPreview")).toBe(true);
+  });
+
+  it("covers pairs, glued suffixes, safe last words and boolean prefixes", () => {
+    setRedactConfig({
+      secretWords: ["token"],
+      secretWordPairs: ["session key"],
+      gluedSecretSuffixes: ["sessionkey"],
+      safeLastWords: ["hash"],
+      booleanFlagPrefixes: ["can"],
+    });
+    expect(isSecretKey("x-session-key")).toBe(true);
+    expect(isSecretKey("xsessionkey")).toBe(true);
+    expect(isSecretKey("accesstoken")).toBe(false);
+    expect(isSecretKey("tokenHash")).toBe(false);
+    expect(shred({ canUseToken: true, hasToken: true })).toEqual({ canUseToken: true, hasToken: "[REDACTED]" });
+  });
+
+  it("the value detector still runs on fields the word lists keep", () => {
+    setRedactConfig({ secretWords: ["otp"], safeLastWords: ["hash"] });
+    expect(shred({ otp: "123456", tokenHash: "Bearer zz1234567890abcdef" })).toEqual({ otp: "[REDACTED]", tokenHash: "Bearer [REDACTED]" });
   });
 });
 
-describe("syncRedactAllowList", () => {
-  it("applies changes, treats null as strict and keeps the last list on failure", async () => {
+describe("allow paths", () => {
+  it("keeps exactly the allowed path, only for the named module", () => {
+    allow("UserSessionLogging:changes.fcmToken");
+    expect(shred({ module: "UserSessionLogging", changes: { fcmToken: "ios:eN****", accessToken: "a1****" } })).toEqual({
+      module: "UserSessionLogging",
+      changes: { fcmToken: "ios:eN****", accessToken: "[REDACTED]" },
+    });
+    expect(shred({ module: "Other", changes: { fcmToken: "x" } })).toEqual({ module: "Other", changes: { fcmToken: "[REDACTED]" } });
+    expect(shred({ changes: { fcmToken: "x" } })).toEqual({ changes: { fcmToken: "[REDACTED]" } });
+  });
+
+  it("matches array elements, not other depths", () => {
+    allow("M:changes.fcmToken", "M:token");
+    expect(shred({ module: "M", changes: [{ fcmToken: "a" }, { fcmToken: "b" }], nested: { token: "c" } })).toEqual({
+      module: "M",
+      changes: [{ fcmToken: "a" }, { fcmToken: "b" }],
+      nested: { token: "[REDACTED]" },
+    });
+  });
+
+  it("still applies value patterns", () => {
+    allow("M:token");
+    const out = shred({ module: "M", token: "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmN" }) as Record<string, string>;
+    expect(out.token).not.toContain("eyJ");
+  });
+
+  it("applies to shredRecordInPlace", () => {
+    allow("M:token");
+    const rec: Record<string, unknown> = { level: "info", message: "m", module: "M", token: "abc123", password: "p" };
+    shredRecordInPlace(rec);
+    expect(rec).toMatchObject({ token: "abc123", password: "[REDACTED]" });
+  });
+
+  it("beats a configured secret word (the canary test)", () => {
+    setRedactConfig({ allowPaths: ["logger:redactCanary"], secretWords: [...FALLBACK_KEY_WORDS.secretWords, "canary"] });
+    expect(shred({ module: "logger", redactCanary: "visible" })).toEqual({ module: "logger", redactCanary: "visible" });
+    expect(shred({ module: "other", redactCanary: "visible" })).toEqual({ module: "other", redactCanary: "[REDACTED]" });
+  });
+});
+
+describe("syncRedactConfig", () => {
+  it("applies changes, treats null as the fallback and keeps the last value on failure", async () => {
     vi.useFakeTimers();
-    const values: Array<unknown> = ["M:token", "M:token", new Error("down"), undefined, null];
+    const v = { allowPaths: ["M:token"], secretWords: ["otp"] };
+    const values: Array<unknown> = [v, JSON.stringify(v), new Error("down"), undefined, null];
     const fetchRaw = vi.fn(async () => {
-      const v = values.shift();
-      if (v instanceof Error) throw v;
-      return v;
+      const next = values.shift();
+      if (next instanceof Error) throw next;
+      return next;
     });
     const onChange = vi.fn();
-    const stop = syncRedactAllowList(fetchRaw, { intervalMs: 1000, onChange });
+    const stop = syncRedactConfig(fetchRaw, { intervalMs: 1000, onChange });
 
     await vi.advanceTimersByTimeAsync(0);
-    expect(getRedactAllowList().accepted).toEqual(["M:token"]);
     for (let i = 0; i < 3; i++) await vi.advanceTimersByTimeAsync(1000);
-    expect(getRedactAllowList().accepted).toEqual(["M:token"]);
+    expect(getRedactConfig().accepted).toEqual(["allowPaths:M:token", "secretWords:otp"]);
     expect(onChange).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(getRedactAllowList().accepted).toEqual([]);
+    expect(getRedactConfig().value).toBeNull();
     expect(onChange).toHaveBeenCalledTimes(2);
 
     stop();
@@ -72,82 +156,16 @@ describe("syncRedactAllowList", () => {
   it("stays silent while the value stays empty", async () => {
     vi.useFakeTimers();
     const onChange = vi.fn();
-    const stop = syncRedactAllowList(async () => null, { intervalMs: 1000, onChange });
+    const stop = syncRedactConfig(async () => null, { intervalMs: 1000, onChange });
     await vi.advanceTimersByTimeAsync(3000);
     stop();
     expect(onChange).not.toHaveBeenCalled();
   });
 });
 
-describe("shred with an allow-list", () => {
-  it("strict by default: secret-named fields are redacted", () => {
-    const out = shred({ module: "UserSessionLogging", changes: { fcmToken: "ios:eN****" } });
-    expect(out).toEqual({ module: "UserSessionLogging", changes: { fcmToken: "[REDACTED]" } });
-  });
-
-  it("keeps exactly the allowed path, only for the named module", () => {
-    setRedactAllowList("UserSessionLogging:changes.fcmToken");
-    const rec = { module: "UserSessionLogging", changes: { fcmToken: "ios:eN****", accessToken: "abc123****" } };
-    expect(shred(rec)).toEqual({
-      module: "UserSessionLogging",
-      changes: { fcmToken: "ios:eN****", accessToken: "[REDACTED]" },
-    });
-    // Same path under another module stays redacted.
-    expect(shred({ module: "Other", changes: { fcmToken: "ios:eN****" } })).toEqual({
-      module: "Other",
-      changes: { fcmToken: "[REDACTED]" },
-    });
-    // No module => no exceptions.
-    expect(shred({ changes: { fcmToken: "ios:eN****" } })).toEqual({ changes: { fcmToken: "[REDACTED]" } });
-  });
-
-  it("matches array elements without indices in the path", () => {
-    setRedactAllowList("UserSessionLogging:changes.fcmToken");
-    const out = shred({ module: "UserSessionLogging", changes: [{ fcmToken: "ios:a1****" }, { fcmToken: "android:b2****" }] });
-    expect(out).toEqual({ module: "UserSessionLogging", changes: [{ fcmToken: "ios:a1****" }, { fcmToken: "android:b2****" }] });
-  });
-
-  it("does not allow the same key at a different depth", () => {
-    setRedactAllowList("MobilePush:token");
-    const out = shred({ module: "MobilePush", token: "abc123", nested: { token: "abc123" } });
-    expect(out).toEqual({ module: "MobilePush", token: "abc123", nested: { token: "[REDACTED]" } });
-  });
-
-  it("still applies value patterns to allowed fields", () => {
-    setRedactAllowList("MobilePush:token");
-    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
-    const out = shred({ module: "MobilePush", token: `Bearer ${jwt}` }) as Record<string, string>;
-    expect(out.token).not.toContain("eyJ");
-    expect(out.token).toContain("[REDACTED");
-  });
-
-  it("applies to shredRecordInPlace (winston path) at top level and nested", () => {
-    setRedactAllowList("UserSessionLogging:changes.voipToken,MobilePush:token");
-    const a: Record<string, unknown> = { level: "info", message: "m", module: "MobilePush", token: "abc123", password: "p" };
-    shredRecordInPlace(a);
-    expect(a.token).toBe("abc123");
-    expect(a.password).toBe("[REDACTED]");
-    const b: Record<string, unknown> = { level: "info", message: "m", module: "UserSessionLogging", changes: { voipToken: "f00ba1****" } };
-    shredRecordInPlace(b);
-    expect(b.changes).toEqual({ voipToken: "f00ba1****" });
-  });
-});
-
-describe("preview / suffix renames are kept without any allow-list", () => {
+describe("preview / suffix fields are kept without any allow path", () => {
   it("keeps *Preview and *Suffix fields", () => {
-    const out = shred({
-      changes: { fcmTokenPreview: "ios:eN****", voipTokenPreview: "f00ba1****", refreshTokenPreview: "r1****", accessTokenPreview: "a1****" },
-      tokenPreview: "abc123",
-      voipTokenPreview: "def456",
-      tokenSuffix: "zz9yy8",
-      mentionTarget: 'data-user-id="u1"',
-    });
-    expect(out).toEqual({
-      changes: { fcmTokenPreview: "ios:eN****", voipTokenPreview: "f00ba1****", refreshTokenPreview: "r1****", accessTokenPreview: "a1****" },
-      tokenPreview: "abc123",
-      voipTokenPreview: "def456",
-      tokenSuffix: "zz9yy8",
-      mentionTarget: 'data-user-id="u1"',
-    });
+    const rec = { changes: { fcmTokenPreview: "ios:eN****", accessTokenPreview: "a1****" }, tokenPreview: "abc123", tokenSuffix: "zz9yy8" };
+    expect(shred(rec)).toEqual(rec);
   });
 });

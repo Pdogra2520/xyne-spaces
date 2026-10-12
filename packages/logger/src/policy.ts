@@ -1,127 +1,137 @@
-// Redaction allow-list — config-driven exceptions to the KEY detector.
-//
-// The value lives in Superposition under REDACT_ALLOW_CONFIG_KEY, so no
-// exception is hardcoded in this package. Each service keeps it current with
-// syncRedactAllowList (or pushes it in with setRedactAllowList). Format:
-// comma-separated `<module>:<dotted.path>` entries (or a JSON array of them), e.g.
-//
-//   MobilePush:tokenPreview,UserSessionLogging:changes.fcmTokenPreview
-//
-// - `<module>` must equal the log record's `module` field exactly.
-// - `<dotted.path>` is the field path from the record root; array indices are
-//   skipped (`changes.fcmToken` matches every element of a `changes` array).
-// - Wildcards are rejected, as are entries without a module or a path.
-// - An allowed field only bypasses the KEY detector. Its string value still goes
-//   through every VALUE pattern (Bearer, JWT, xox*-, sk-, AKIA, PEM, …).
-// - Until a value arrives, or when it is empty / all-invalid, redaction is strict.
+// Redaction config from Superposition: per-field exceptions (`allowPaths`, `<module>:<dotted.path>`)
+// and the KEY detector's word lists. A list in the config replaces its fallback below.
 
-export const REDACT_ALLOW_CONFIG_KEY = "log_redact_allow_paths";
+export const REDACT_CONFIG_KEY = "log_redaction";
 
-export interface RedactAllowList {
-  /** module -> allowed dotted paths for that module. */
-  readonly byModule: ReadonlyMap<string, ReadonlySet<string>>;
-  /** Accepted entries, normalised `<module>:<path>`, sorted. */
+// Used until a config arrives (startup, services without Superposition, old desktop builds).
+export const FALLBACK_KEY_WORDS = Object.freeze({
+  secretWords: [
+    "password", "passwords", "passwd", "pwd", "token", "apikey", "secret", "secrets",
+    "authorization", "credential", "credentials", "cookie", "cookies", "privatekey", "jwt", "passphrase",
+  ],
+  secretWordPairs: ["api key", "private key", "pass phrase"],
+  gluedSecretSuffixes: [
+    "password", "passwd", "token", "apikey", "secret", "authorization",
+    "credential", "credentials", "cookie", "privatekey", "jwt", "passphrase",
+  ],
+  safeLastWords: [
+    "preview", "present", "source", "exp", "expiry", "expiresat", "expires", "tokens", "count", "length",
+    "type", "name", "names", "id", "ids", "in", "out", "tried", "email", "sub", "suffix",
+  ],
+  booleanFlagPrefixes: ["has", "is"],
+});
+type KeyWordList = keyof typeof FALLBACK_KEY_WORDS;
+
+export interface RedactConfig {
+  /** module -> allowed dotted paths. */
+  readonly allowPaths: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly secretWords: ReadonlySet<string>;
+  readonly secretWordPairs: ReadonlySet<string>;
+  readonly gluedSecretSuffixRe: RegExp | undefined;
+  readonly safeLastWords: ReadonlySet<string>;
+  readonly booleanFlagPrefixes: ReadonlySet<string>;
   readonly accepted: readonly string[];
-  /** Entries that were ignored (malformed or wildcard). */
   readonly rejected: readonly string[];
+  /** Accepted config in Superposition format, for relaying downstream; null when empty. */
+  readonly value: Readonly<Record<string, readonly string[]>> | null;
 }
 
-const ENTRY_RE = /^([A-Za-z0-9_.\-/[\]]+):([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)$/;
+const ALLOW_PATH_RE = /^([A-Za-z0-9_.\-/[\]]+):([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)$/;
+const WORD_RE = /^[a-z0-9]+$/;
+const PAIR_RE = /^[a-z0-9]+ [a-z0-9]+$/;
 
-export function parseRedactAllowList(raw: string | undefined | null): RedactAllowList {
-  const byModule = new Map<string, Set<string>>();
-  const accepted: string[] = [];
-  const rejected: string[] = [];
-  if (typeof raw === "string" && raw.trim() !== "") {
-    for (const part of raw.split(",")) {
-      const entry = part.trim();
-      if (entry === "") continue;
-      const m = entry.includes("*") ? null : ENTRY_RE.exec(entry);
-      if (!m) {
-        rejected.push(entry);
-        continue;
-      }
-      const mod = m[1] as string;
-      const path = m[2] as string;
-      let set = byModule.get(mod);
-      if (!set) {
-        set = new Set<string>();
-        byModule.set(mod, set);
-      }
-      if (!set.has(path)) {
-        set.add(path);
-        accepted.push(`${mod}:${path}`);
-      }
+function toObject(raw: unknown): Record<string, unknown> | undefined {
+  let v = raw;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return undefined;
     }
   }
-  accepted.sort();
-  return { byModule, accepted, rejected };
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
-function normalizeRaw(raw: unknown): string {
-  if (typeof raw === "string") return raw;
-  if (Array.isArray(raw)) return raw.filter((e): e is string => typeof e === "string").join(",");
-  return "";
+export function parseRedactConfig(raw: unknown): RedactConfig {
+  const obj = toObject(raw);
+  const value: Record<string, string[]> = {};
+  const rejected = obj || raw === undefined || raw === null || raw === "" ? [] : [String(raw).slice(0, 200)];
+  for (const [field, entries] of Object.entries(obj ?? {})) {
+    const re = field === "allowPaths" ? ALLOW_PATH_RE : field === "secretWordPairs" ? PAIR_RE : field in FALLBACK_KEY_WORDS ? WORD_RE : null;
+    if (!re || !Array.isArray(entries)) {
+      rejected.push(field);
+      continue;
+    }
+    const ok: string[] = [];
+    for (const entry of entries) {
+      const s = typeof entry === "string" ? entry.trim() : "";
+      if (!re.test(s)) rejected.push(`${field}:${String(entry)}`);
+      else if (!ok.includes(s)) ok.push(s);
+    }
+    // [] empties a list; a list whose entries were all invalid keeps the fallback.
+    if (ok.length > 0 || entries.length === 0) value[field] = ok;
+  }
+
+  const list = (name: KeyWordList): readonly string[] => value[name] ?? FALLBACK_KEY_WORDS[name];
+  const allowPaths = new Map<string, Set<string>>();
+  for (const entry of value.allowPaths ?? []) {
+    const [, mod = "", path = ""] = ALLOW_PATH_RE.exec(entry) ?? [];
+    allowPaths.set(mod, (allowPaths.get(mod) ?? new Set<string>()).add(path));
+  }
+  const suffixes = list("gluedSecretSuffixes");
+  return {
+    allowPaths,
+    secretWords: new Set(list("secretWords")),
+    secretWordPairs: new Set(list("secretWordPairs")),
+    gluedSecretSuffixRe: suffixes.length > 0 ? new RegExp(`(?:${suffixes.join("|")})$`) : undefined,
+    safeLastWords: new Set(list("safeLastWords")),
+    booleanFlagPrefixes: new Set(list("booleanFlagPrefixes")),
+    accepted: Object.entries(value).flatMap(([field, es]) => es.map((e) => `${field}:${e}`)).sort(),
+    rejected,
+    value: Object.keys(value).length > 0 ? value : null,
+  };
 }
 
-let active: RedactAllowList = parseRedactAllowList(undefined);
+let active = parseRedactConfig(undefined);
 
-/** The active allow-list (strict until a value is set). */
-export function getRedactAllowList(): RedactAllowList {
+export function getRedactConfig(): RedactConfig {
   return active;
 }
 
-/** Replace the active allow-list from a raw config value; anything unusable means strict. */
-export function setRedactAllowList(raw: unknown): RedactAllowList {
-  active = parseRedactAllowList(normalizeRaw(raw));
+export function setRedactConfig(raw: unknown): RedactConfig {
+  active = parseRedactConfig(raw);
   return active;
 }
 
-/** Allowed paths for a record's `module`, or undefined when none apply. */
 export function allowedPathsFor(module: unknown): ReadonlySet<string> | undefined {
-  if (typeof module !== "string" || module === "") return undefined;
-  if (active.byModule.size === 0) return undefined;
-  return active.byModule.get(module);
-}
-
-export interface RedactAllowSyncOptions {
-  /** Poll interval in ms. Default 60000. */
-  intervalMs?: number;
-  /** Called whenever the applied value changes, e.g. to log accepted/rejected. */
-  onChange?: (list: RedactAllowList) => void;
+  return typeof module === "string" ? active.allowPaths.get(module) : undefined;
 }
 
 /**
- * Poll `fetchRaw` and apply what it returns. `null` (key absent) means strict;
- * a throw or `undefined` (source unreachable) keeps the last applied list.
- * Returns a stop function.
+ * Poll `fetchRaw` and apply changes. `null` (key absent) means the fallback;
+ * a throw or `undefined` (source unreachable) keeps the last config.
  */
-export function syncRedactAllowList(
+export function syncRedactConfig(
   fetchRaw: () => Promise<unknown>,
-  opts: RedactAllowSyncOptions = {},
+  { intervalMs = 60_000, onChange }: { intervalMs?: number; onChange?: (config: RedactConfig) => void } = {},
 ): () => void {
   let applied = "";
   let stopped = false;
   const tick = async (): Promise<void> => {
-    let raw: unknown;
-    try {
-      raw = await fetchRaw();
-    } catch {
-      return;
-    }
+    const raw = await fetchRaw().catch(() => undefined);
     if (stopped || raw === undefined) return;
-    const next = normalizeRaw(raw);
+    const next = raw === null ? "" : JSON.stringify(toObject(raw) ?? raw);
     if (next === applied) return;
     applied = next;
-    const list = setRedactAllowList(next);
+    const config = setRedactConfig(raw);
     try {
-      opts.onChange?.(list);
+      onChange?.(config);
     } catch {
       // A failing reporter must not stop the sync.
     }
   };
   void tick();
-  const timer = setInterval(() => void tick(), opts.intervalMs ?? 60_000);
+  const timer = setInterval(() => void tick(), intervalMs);
   (timer as { unref?: () => void }).unref?.();
   return () => {
     stopped = true;

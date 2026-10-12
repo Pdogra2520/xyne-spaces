@@ -2,10 +2,9 @@
 // Redacts secret VALUES only (field names kept => frozen Grafana contract intact)
 // via two detectors: by KEY (secret-named field) and by VALUE (secret-shaped
 // string). Cycle-safe, size-capped, control-char scrubbed, and never throws.
-// Exceptions to the KEY detector come from the Superposition allow-list
-// (see policy.ts); nothing is allow-listed in code.
+// The KEY detector's word lists and exceptions come from Superposition (see policy.ts).
 
-import { allowedPathsFor } from "./policy.js";
+import { allowedPathsFor, getRedactConfig } from "./policy.js";
 
 export interface ShredOptions {
   /**
@@ -45,36 +44,6 @@ const REDACTED = "[REDACTED]";
 // ACRONYMCase, snake_case, kebab-case, dotted) and matched WORD BY WORD, not as
 // a substring — so `tokensIn`, `tokenEmail`, `cookieNames` are not mistaken for
 // secrets while `accessToken`, `x-api-key`, `REFRESH_TOKEN`, `clientSecret` are.
-
-// A single word that on its own names a secret.
-const SECRET_WORDS = new Set([
-  "password", "passwords", "passwd", "pwd",
-  "token", "apikey", "secret", "secrets",
-  "authorization", "credential", "credentials",
-  "cookie", "cookies", "privatekey", "jwt", "passphrase",
-]);
-
-// Two adjacent words that together name a secret (`api_key`, `privateKey`, `pass_phrase`).
-const SECRET_WORD_PAIRS = new Set(["api key", "private key", "pass phrase"]);
-
-// A glued all-lowercase word that ENDS in one of these is still a secret
-// (`accesstoken`, `xapikey`, `setcookie`, `clientsecret`) — HTTP headers and
-// some SDKs emit keys without separators.
-const GLUED_SECRET_SUFFIX_RE =
-  /(password|passwd|token|apikey|secret|authorization|credentials?|cookie|privatekey|jwt|passphrase)$/;
-
-// Last word (or last two words glued) that makes the field a safe sibling of a
-// secret stem: masked preview, presence flag, source, expiry, count, the owner's
-// identity from a decoded token, etc. Checked first and wins.
-const SAFE_LAST_WORDS = new Set([
-  "preview", "present", "source", "exp", "expiry", "expiresat", "expires",
-  "tokens", "count", "length", "type", "name", "names", "id", "ids",
-  "in", "out", "tried", "email", "sub", "suffix",
-]);
-
-// A boolean flag named `has*` / `is*` (`hasBroadcastToken`, `has_private_key`,
-// `isTokenValid`) can never carry a secret, whatever the rest of the name says.
-const BOOLEAN_FLAG_PREFIXES = new Set(["has", "is"]);
 
 /** Split a field name into lowercase words. */
 function keyWords(key: string): string[] {
@@ -143,20 +112,21 @@ export function isSecretKey(key: string): boolean {
   const last = words[words.length - 1];
   if (last === undefined) return false;
   const prev = words[words.length - 2];
-  if (SAFE_LAST_WORDS.has(last) || (prev !== undefined && SAFE_LAST_WORDS.has(prev + last))) return false;
+  const kw = getRedactConfig();
+  if (kw.safeLastWords.has(last) || (prev !== undefined && kw.safeLastWords.has(prev + last))) return false;
   for (let i = 0; i < words.length; i++) {
     const w = words[i] as string;
-    if (SECRET_WORDS.has(w)) return true;
+    if (kw.secretWords.has(w)) return true;
     const next = words[i + 1];
-    if (next !== undefined && SECRET_WORD_PAIRS.has(`${w} ${next}`)) return true;
+    if (next !== undefined && kw.secretWordPairs.has(`${w} ${next}`)) return true;
   }
   // Separator-less keys (`accesstoken`, `x-apikey`): only the final word may be glued.
-  return last.length > 3 && GLUED_SECRET_SUFFIX_RE.test(last);
+  return last.length > 3 && kw.gluedSecretSuffixRe?.test(last) === true;
 }
 
 /** Key detector applied to an actual field: boolean `has*`/`is*` flags are always kept. */
 function isSecretField(key: string, value: unknown): boolean {
-  if (typeof value === "boolean" && BOOLEAN_FLAG_PREFIXES.has(keyWords(key)[0] ?? "")) return false;
+  if (typeof value === "boolean" && getRedactConfig().booleanFlagPrefixes.has(keyWords(key)[0] ?? "")) return false;
   return isSecretKey(key);
 }
 

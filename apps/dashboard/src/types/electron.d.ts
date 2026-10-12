@@ -90,6 +90,7 @@ export interface ElectronAPI {
   checkKeys: (commonName: string) => Promise<boolean>;
   getDeviceInfo: () => Promise<unknown>;
   setUserEmail: (email: string) => void;
+  setLogRedactConfig?: (value: unknown) => void;
   getClientSessionId: () => Promise<string>;
   toggleCompactMode: () => void;
   getBrowserSettings: () => Promise<{ popups: boolean; openLinksExternally: boolean }>;

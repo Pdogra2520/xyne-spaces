@@ -52,7 +52,7 @@ import { configSyncService } from '@/services/configSyncService';
 import { websocketService } from '@/services/websocketService';
 import { redisService } from '@/services/redisService';
 import { superpositionClient } from '@/services/superpositionClient';
-import { fetchLogRedactAllowList, startLogRedactAllowListSync } from '@/services/logRedactAllowList';
+import { fetchLogRedactConfig, startLogRedactConfigSync } from '@/services/logRedactConfig';
 import { metricsMiddleware } from '@/middleware/metricsMiddleware';
 import { initializeOpenTelemetry, shutdownOpenTelemetry } from '@/services/otel';
 import { externalSourceSyncRoutes } from '@/integrations';
@@ -550,10 +550,10 @@ export class App {
       next();
     };
 
-    // Log redaction allow-list for services without a Superposition client (claw-auth, claw).
-    this.app.get('/api/internal/log-redact-allow-paths', validateS2SKey, async (_req: Request, res: Response) => {
+    // Log redaction config for services without a Superposition client (claw-auth, claw).
+    this.app.get('/api/internal/log-redact-config', validateS2SKey, async (_req: Request, res: Response) => {
       try {
-        res.json({ value: (await fetchLogRedactAllowList()) ?? null });
+        res.json({ value: (await fetchLogRedactConfig()) ?? null });
       } catch {
         res.status(503).json({ error: 'Superposition unavailable' });
       }
@@ -1031,7 +1031,7 @@ export class App {
       logger.error('Failed to initialize Superposition client:', error);
       logger.warn('Continuing startup without Superposition client...');
     }
-    startLogRedactAllowListSync();
+    startLogRedactConfigSync();
 
     // Y_SWEET_SERVER_TOKEN gates /api/ysweet/validate (requireYSweetServerToken
     // fails closed with 401 if it's empty). A missing token here is silent at

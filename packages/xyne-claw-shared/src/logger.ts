@@ -1,7 +1,7 @@
 import winston from "winston";
 import { AsyncLocalStorage } from "node:async_hooks";
 import crypto from "node:crypto";
-import { getRedactAllowList, shredRecordInPlace, syncRedactAllowList } from "@xyne/logger";
+import { getRedactConfig, shredRecordInPlace, syncRedactConfig } from "@xyne/logger";
 
 /**
  * Structured JSON logger shared across the claw backend services
@@ -132,27 +132,28 @@ export const logger = winston.createLogger({
 });
 
 /**
- * Keep the log redaction allow-list in sync from an upstream S2S endpoint that
- * returns `{ value }` (Spaces for claw-auth, claw-auth for claw). No key = strict.
+ * Keep the log redaction config in sync from an upstream S2S endpoint that
+ * returns `{ value }` (Spaces for claw-auth, claw-auth for claw). No value = defaults.
  */
-export function startLogRedactAllowListSync(url: string, s2sKey: string): () => void {
+export function startLogRedactConfigSync(url: string, s2sKey: string): () => void {
   if (!s2sKey) return () => {};
-  return syncRedactAllowList(
+  return syncRedactConfig(
     async () => {
       const res = await fetch(url, { headers: { "x-s2s-key": s2sKey }, signal: AbortSignal.timeout(5_000) });
       if (!res.ok) return undefined;
       return ((await res.json()) as { value?: unknown }).value ?? null;
     },
     {
+      // redactCanary prints [REDACTED] while `canary` is in secretWords (end-to-end check).
       onChange: ({ accepted, rejected }) =>
-        logger.info("Log redaction allow-list updated", { module: "logger", accepted, rejected }),
+        logger.info("Log redaction config updated", { module: "logger", accepted, rejected, redactCanary: "visible" }),
     },
   );
 }
 
-/** The active allow-list in its config format, for serving to downstream services. */
-export function logRedactAllowListValue(): string {
-  return getRedactAllowList().accepted.join(",");
+/** The active redaction config in its upstream format, for serving to downstream services. */
+export function logRedactConfigValue(): { value: unknown } {
+  return { value: getRedactConfig().value };
 }
 
 export type Logger = winston.Logger;

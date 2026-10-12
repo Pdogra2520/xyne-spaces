@@ -16,7 +16,7 @@ export {
   createTraceId,
   withLogContext,
   setLogContext,
-  startLogRedactAllowListSync,
-  logRedactAllowListValue,
+  startLogRedactConfigSync,
+  logRedactConfigValue,
 } from "xyne-claw-shared";
 export type { LogContext, Logger } from "xyne-claw-shared";

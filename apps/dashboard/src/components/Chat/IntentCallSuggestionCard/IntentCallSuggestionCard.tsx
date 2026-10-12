@@ -63,37 +63,42 @@ export const IntentCallSuggestionCard: React.FC<IntentCallSuggestionCardProps> =
     { enabled: !!conversationId },
   );
 
+  const channel = useChannel(channelId);
+  const trackable = channel?.visibility === ChannelVisibility.PUBLIC;
   const [shownAt] = useState(() => Date.now());
   useEffect(() => {
-    if (impressed.has(messageId)) return;
+    if (!trackable || impressed.has(messageId)) return;
     impressed.add(messageId);
     globalClickTracker.trackManualEvent(TRACK_CATEGORY, 'SUGGESTION_SHOWN', undefined, {
       intentKey,
       surface,
       hasAction: true,
     });
-  }, [messageId, intentKey, surface]);
-  const trackAction = (action: string): void =>
+  }, [trackable, messageId, intentKey, surface]);
+  const trackAction = (action: string): void => {
+    if (!trackable) return;
     globalClickTracker.trackManualEvent(TRACK_CATEGORY, 'ACT_ON_INTENT_SUGGESTION', action, {
       intentKey,
       action,
       surface,
       msShown: Date.now() - shownAt,
     });
+  };
   const dismiss = (): void => {
-    globalClickTracker.trackManualEvent(TRACK_CATEGORY, 'SUGGESTION_DISMISSED', undefined, {
-      intentKey,
-      reason: 'closed',
-      surface,
-      msShown: Date.now() - shownAt,
-    });
+    if (trackable) {
+      globalClickTracker.trackManualEvent(TRACK_CATEGORY, 'SUGGESTION_DISMISSED', undefined, {
+        intentKey,
+        reason: 'closed',
+        surface,
+        msShown: Date.now() - shownAt,
+      });
+    }
     removeIntentCallSuggestion(messageId);
   };
 
   // A channel message calls the whole channel; a thread or group DM calls its people.
   // `sentWith` covers the sender's own @mentions before the server row lands.
   const isThread = !!conversationId;
-  const channel = useChannel(channelId);
   const isGroupDm = channel?.scopeType === ChannelScopeType.GROUP_DM;
   const ChannelGlyph = isGroupDm
     ? UserTwo
@@ -118,7 +123,10 @@ export const IntentCallSuggestionCard: React.FC<IntentCallSuggestionCardProps> =
     .filter(id => id !== user?.id)
     .map(id => users.find(u => u.id === id))
     // Participant rows can carry ids with no profile; those render as a nameless avatar.
-    .filter(u => u !== undefined && u.userType === UserType.USER && !isUserDeactivated(u));
+    .filter(
+      (u): u is NonNullable<typeof u> =>
+        u !== undefined && u.userType === UserType.USER && !isUserDeactivated(u),
+    );
   const participantIds = people.map(u => u.id);
   const prefill = showPeople ? participantIds : [`channel:${channelId}`];
 
@@ -204,8 +212,6 @@ export const IntentCallSuggestionCard: React.FC<IntentCallSuggestionCardProps> =
           size='inline'
           onClick={() => setOpen(o => !o)}
           aria-expanded={open}
-          data-track-category='INTENT_SUGGESTION'
-          data-track-name='ToggleCallSuggestionCard'
           className={cn(
             'rounded-lg px-3 py-1 text-sm font-normal text-muted-foreground',
             open && 'bg-accent',

@@ -12,6 +12,8 @@ export type IntentCallSurface = 'channel' | 'thread';
 interface PendingCall {
   participantIds: string[];
   surface: IntentCallSurface;
+  /** The thread or channel it was sent in; a room keeps one live card. */
+  room: string;
 }
 
 export interface IntentCallSuggestion extends PendingCall {
@@ -28,8 +30,9 @@ export const rememberCallParticipants = (
   messageId: string,
   participantIds: string[],
   surface: IntentCallSurface,
+  room: string,
 ): void => {
-  pending.set(messageId, { participantIds, surface });
+  pending.set(messageId, { participantIds, surface, room });
   while (pending.size > PENDING_MAX) pending.delete(pending.keys().next().value as string);
 };
 
@@ -39,6 +42,8 @@ export const promoteIntentCallSuggestion = (messageId: string, intentKey: string
   if (suggestions.has(messageId) || !sent) return;
   pending.delete(messageId);
   trace('main', '8. call card', { messageId, surface: sent.surface });
+  // Newest wins: a chatty room shows one card, under its latest call message.
+  for (const [id, s] of suggestions) if (s.room === sent.room) suggestions.delete(id);
   suggestions.set(messageId, { ...sent, intentKey });
   notify();
 };

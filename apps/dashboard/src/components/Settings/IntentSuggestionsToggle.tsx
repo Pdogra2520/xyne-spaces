@@ -31,8 +31,8 @@ export function IntentSuggestionsToggle(): ReactElement {
           <p className='text-sm font-medium text-foreground'>Intent suggestions</p>
           <p className='mt-0.5 text-xs text-muted-foreground'>
             Suggests starting a call, creating a ticket, or adding people when a message in a
-            channel or group chat reads that way. Runs entirely on your device — nothing is sent to
-            a server. Downloads a one-time ~23MB model when enabled.
+            channel or group chat reads that way. Detection runs entirely on your device — nothing
+            is sent to a server. Downloads a one-time ~23MB model when enabled.
           </p>
         </div>
         <Switch

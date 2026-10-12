@@ -923,6 +923,7 @@ const ChatInputInner = forwardRef<InputBoxHandle, ChatInputProps>(
             sentMessageId,
             [...participantIds],
             conversationId ? 'thread' : 'channel',
+            conversationId ? `thread:${conversationId}` : `channel:${channelId}`,
           );
         };
 

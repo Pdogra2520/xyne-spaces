@@ -1,5 +1,6 @@
 // Redaction config from Superposition: per-field exceptions (`allowPaths`, `<module>:<dotted.path>`)
 // and the KEY detector's word lists. A list in the config replaces its fallback below.
+// `"enabled": false` is a kill switch: only main's legacy patterns run (see shredder.ts).
 
 export const REDACT_CONFIG_KEY = "log_redaction";
 
@@ -23,6 +24,7 @@ export const FALLBACK_KEY_WORDS = Object.freeze({
 type KeyWordList = keyof typeof FALLBACK_KEY_WORDS;
 
 export interface RedactConfig {
+  readonly enabled: boolean;
   /** module -> allowed dotted paths. */
   readonly allowPaths: ReadonlyMap<string, ReadonlySet<string>>;
   readonly secretWords: ReadonlySet<string>;
@@ -33,7 +35,7 @@ export interface RedactConfig {
   readonly accepted: readonly string[];
   readonly rejected: readonly string[];
   /** Accepted config in Superposition format, for relaying downstream; null when empty. */
-  readonly value: Readonly<Record<string, readonly string[]>> | null;
+  readonly value: Readonly<Record<string, unknown>> | null;
 }
 
 const ALLOW_PATH_RE = /^([A-Za-z0-9_.\-/[\]]+):([A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)*)$/;
@@ -54,9 +56,12 @@ function toObject(raw: unknown): Record<string, unknown> | undefined {
 
 export function parseRedactConfig(raw: unknown): RedactConfig {
   const obj = toObject(raw);
+  const { enabled = true, ...lists } = obj ?? {};
   const value: Record<string, string[]> = {};
   const rejected = obj || raw === undefined || raw === null || raw === "" ? [] : [String(raw).slice(0, 200)];
-  for (const [field, entries] of Object.entries(obj ?? {})) {
+  // Anything but a boolean is rejected and keeps redaction on.
+  if (typeof enabled !== "boolean") rejected.push(`enabled:${JSON.stringify(enabled)}`);
+  for (const [field, entries] of Object.entries(lists)) {
     const re = field === "allowPaths" ? ALLOW_PATH_RE : field === "secretWordPairs" ? PAIR_RE : field in FALLBACK_KEY_WORDS ? WORD_RE : null;
     if (!re || !Array.isArray(entries)) {
       rejected.push(field);
@@ -79,16 +84,18 @@ export function parseRedactConfig(raw: unknown): RedactConfig {
     allowPaths.set(mod, (allowPaths.get(mod) ?? new Set<string>()).add(path));
   }
   const suffixes = list("gluedSecretSuffixes");
+  const disabled = enabled === false;
   return {
+    enabled: !disabled,
     allowPaths,
     secretWords: new Set(list("secretWords")),
     secretWordPairs: new Set(list("secretWordPairs")),
     gluedSecretSuffixRe: suffixes.length > 0 ? new RegExp(`(?:${suffixes.join("|")})$`) : undefined,
     safeLastWords: new Set(list("safeLastWords")),
     booleanFlagPrefixes: new Set(list("booleanFlagPrefixes")),
-    accepted: Object.entries(value).flatMap(([field, es]) => es.map((e) => `${field}:${e}`)).sort(),
+    accepted: [...(disabled ? ["enabled:false"] : []), ...Object.entries(value).flatMap(([field, es]) => es.map((e) => `${field}:${e}`))].sort(),
     rejected,
-    value: Object.keys(value).length > 0 ? value : null,
+    value: disabled ? { enabled: false, ...value } : Object.keys(value).length > 0 ? value : null,
   };
 }
 

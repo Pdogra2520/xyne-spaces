@@ -81,6 +81,21 @@ const VALUE_PATTERNS: Array<[RegExp, string]> = [
   [/\b(password|passwd|pwd|token|secret|api[_-]?key)\b(\s*[:=]\s*)("?)([^\s,;"']{4,})\3/gi, "$1$2[REDACTED]"],
 ];
 
+// What main redacted before @xyne/logger (backend errors, claw strings). While `enabled` is false
+// only these run, on strings and top-level fields — no traversal.
+const LEGACY_PATTERNS: Array<[RegExp, string]> = [
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]"],
+  [/\b(authorization|token|password|secret|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]"],
+  [/(\bapi[_-]?key\b["'\s]*[:=]\s*["']?)([A-Za-z0-9_-]{12,})/gi, "$1[REDACTED]"],
+  [/\bsk-[A-Za-z0-9]{16,}\b/g, "[REDACTED]"],
+];
+
+function legacyRedact(s: string): string {
+  let out = s;
+  for (const [re, rep] of LEGACY_PATTERNS) out = out.replace(re, rep);
+  return out;
+}
+
 // Neutralise newlines/tabs (→ space) so a user value can't forge extra log
 // lines on a plain-text sink (log injection), and drop other C0/DEL control
 // chars entirely. On JSON sinks this is belt-and-suspenders; on console/stdout
@@ -236,6 +251,7 @@ function shredAt(value: unknown, o: Required<ShredOptions>, path: string, allow:
  * a record with a string `module`, that module's allow-list entries apply.
  */
 export function shred(value: unknown, opts?: ShredOptions): LogValueOut {
+  if (!getRedactConfig().enabled) return (typeof value === "string" ? legacyRedact(value) : value) as LogValueOut;
   const o = { ...DEFAULTS, ...opts };
   let allow: ReadonlySet<string> | undefined;
   try {
@@ -253,6 +269,7 @@ export function shred(value: unknown, opts?: ShredOptions): LogValueOut {
  * sinks that print Errors natively. Own enumerable fields are shredded too.
  */
 export function shredError(err: Error, opts?: ShredOptions): Error {
+  if (!getRedactConfig().enabled) return err;
   const o = { ...DEFAULTS, ...opts };
   try {
     const copy = new Error(redactKeepingLines(err.message, o.maxStringLength));
@@ -269,6 +286,7 @@ export function shredError(err: Error, opts?: ShredOptions): Error {
 
 /** Redact secrets from a plain string (a message/log line). Returns a string. Never throws. */
 export function shredText(text: string, opts?: ShredOptions): string {
+  if (!getRedactConfig().enabled) return legacyRedact(text);
   try {
     return redactString(text, { ...DEFAULTS, ...opts }.maxStringLength);
   } catch {
@@ -288,6 +306,13 @@ export function shredRecordInPlace<T extends Record<string, unknown>>(
   // Mutable alias: we write back to string keys in place (a generic T can only
   // be indexed for reading). Symbol keys are untouched since we iterate Object.keys.
   const rec = record as Record<string, unknown>;
+  if (!getRedactConfig().enabled) {
+    for (const key of Object.keys(rec)) {
+      const v = rec[key];
+      if (key !== "level" && key !== "timestamp" && typeof v === "string") rec[key] = legacyRedact(v);
+    }
+    return record;
+  }
   try {
     const allow = allowedPathsFor(rec.module);
     for (const key of Object.keys(rec)) {

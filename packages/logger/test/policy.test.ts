@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isSecretKey, shred, shredRecordInPlace } from "../src/shredder.js";
+import { isSecretKey, shred, shredError, shredRecordInPlace, shredText } from "../src/shredder.js";
 import { FALLBACK_KEY_WORDS, getRedactConfig, parseRedactConfig, setRedactConfig, syncRedactConfig } from "../src/policy.js";
 
 const allow = (...allowPaths: string[]) => setRedactConfig({ allowPaths });
@@ -125,6 +125,36 @@ describe("allow paths", () => {
     setRedactConfig({ allowPaths: ["logger:redactCanary"], secretWords: [...FALLBACK_KEY_WORDS.secretWords, "canary"] });
     expect(shred({ module: "logger", redactCanary: "visible" })).toEqual({ module: "logger", redactCanary: "visible" });
     expect(shred({ module: "other", redactCanary: "visible" })).toEqual({ module: "other", redactCanary: "[REDACTED]" });
+  });
+});
+
+describe("enabled kill switch", () => {
+  it("false runs only main's legacy patterns, on strings and top-level fields", () => {
+    setRedactConfig({ enabled: false });
+    const bearer = ["Bearer", "zz1234567890abcdef"].join(" ");
+    const obj = { password: "hunter2", nested: { auth: bearer } };
+    expect(shred(obj)).toBe(obj); // objects untouched: no traversal
+    expect(shred(`x ${bearer}`)).toBe("x Bearer [REDACTED]");
+    expect(shredText("call token=abcd1234 done")).toBe("call token=[REDACTED] done");
+    const err = new Error(bearer);
+    expect(shredError(err)).toBe(err);
+    const rec: Record<string, unknown> = { level: "info", message: `m ${bearer}`, password: "hunter2", key: "api_key=abcdefabcdef12", nested: { auth: bearer } };
+    shredRecordInPlace(rec);
+    expect(rec).toEqual({ level: "info", message: "m Bearer [REDACTED]", password: "hunter2", key: "api_key=[REDACTED]", nested: { auth: bearer } });
+  });
+
+  it("is relayed downstream and shows in accepted", () => {
+    const c = parseRedactConfig({ enabled: false, secretWords: ["otp"] });
+    expect(c.value).toEqual({ enabled: false, secretWords: ["otp"] });
+    expect(c.accepted).toEqual(["enabled:false", "secretWords:otp"]);
+  });
+
+  it("true, absent or a non-boolean keeps redaction on", () => {
+    for (const raw of [{ enabled: true }, {}, { enabled: "false" }, { enabled: 0 }]) {
+      setRedactConfig(raw);
+      expect(shred({ password: "hunter2" })).toEqual({ password: "[REDACTED]" });
+    }
+    expect(parseRedactConfig({ enabled: "false" }).rejected).toEqual(['enabled:"false"']);
   });
 });
 

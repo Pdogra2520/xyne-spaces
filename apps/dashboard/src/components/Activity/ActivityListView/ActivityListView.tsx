@@ -400,6 +400,9 @@ const ActivityListView = (): ReactElement => {
   const [hasMore, setHasMore] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const activityLoadStartTimeRef = useRef<number | null>(null);
+  // Per-row, because `useCachedQuery` only reports meta while the first page is the
+  // active query — a single list-level value would mislabel every other row.
+  const rowSourceRef = useRef<Map<string, 'cache' | 'fresh' | 'unknown'>>(new Map());
 
   // Reset pagination when tab or unread mode changes
   useEffect(() => {
@@ -408,6 +411,7 @@ const ActivityListView = (): ReactElement => {
     setNextCursor(null);
     setHasMore(true);
     setIsLoading(true);
+    rowSourceRef.current.clear();
     activityLoadStartTimeRef.current = Date.now();
   }, [activeTab, showUnreadOnly, actorFilter, actorUserId]);
 
@@ -459,6 +463,12 @@ const ActivityListView = (): ReactElement => {
     }
 
     setIsLoading(false);
+
+    // Stamp while the source is still known for this page.
+    const pageSource = activitiesMeta?.source ?? 'unknown';
+    for (const row of activitiesPage) {
+      if (row?.id) rowSourceRef.current.set(row.id, pageSource);
+    }
 
     const canAdvancePagination = fetchCursor !== null || activitiesMeta?.source !== 'cache';
 
@@ -893,7 +903,9 @@ const ActivityListView = (): ReactElement => {
                         item.type === 'single' ? item.activity.actorAction : 'ticket_group'
                       }
                       activity={item.type === 'single' ? item.activity : item.activities[0]!}
-                      dataSource={activitiesMeta?.source}
+                      dataSource={rowSourceRef.current.get(
+                        item.type === 'single' ? item.activity.id : item.activities[0]!.id,
+                      )}
                     >
                       {item.type === 'single' ? (
                         <ActivityItem activity={item.activity} isExpanded={isExpanded} />

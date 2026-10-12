@@ -8,9 +8,16 @@ interface ActivityRowBoundaryProps {
   /** The row's activity, read only to describe a malformed one in the log. */
   activity?: ActivityWithRelated | undefined;
   /** Where this row's data came from — `cache` implicates the persisted store. */
-  dataSource?: 'cache' | 'fresh' | undefined;
+  dataSource?: 'cache' | 'fresh' | 'unknown' | undefined;
   children: ReactNode;
 }
+
+// Keyed on the row's data, not the render, so a row that stays broken settles
+// instead of retrying in a loop.
+const dataSignature = (activity: ActivityWithRelated | undefined): string =>
+  activity
+    ? `${activity.updatedAt ?? ''}|${activity.message?.messageId ?? ''}|${typeof activity.message?.content}`
+    : '';
 
 interface ActivityRowBoundaryState {
   hasError: boolean;
@@ -19,18 +26,11 @@ interface ActivityRowBoundaryState {
 /**
  * Last-resort isolation for a single Activity feed row.
  *
- * This is a net, not a fix. Row-level errors in this feed came from malformed
- * data reaching render, and the fixes for that live upstream — a version stamp
- * on persisted cache entries, a field-wise conversation merge, and nullable
- * contracts on the preview helpers. What this adds is the diagnosis the original
- * crash reports lacked: the router boundary swallowed every stack trace, so
- * there was no record of *which* field was missing or where the row came from.
- *
- * It logs the shape of the offending row — the key sets of the activity and its
- * message relation, plus whether the row was served from the persisted cache —
- * which is exactly what identifies the producer of a partial row. Keep it until
- * `activity_row_render_error` goes quiet in production; a silent feed would hide
- * the next regression of this class rather than surfacing it.
+ * A net, not a fix — the real fixes are the cache version stamp and the nullable
+ * preview helpers. What this adds is the diagnosis the crash reports lacked: the
+ * router boundary swallowed every stack trace, so there was no record of which
+ * field was missing or where the row came from. It logs the row's shape, never
+ * its content.
  */
 export class ActivityRowBoundary extends Component<
   ActivityRowBoundaryProps,
@@ -66,8 +66,14 @@ export class ActivityRowBoundary extends Component<
   }
 
   override componentDidUpdate(prevProps: ActivityRowBoundaryProps): void {
+    if (!this.state.hasError) return;
     // Virtuoso recycles row containers; reset when the row now holds a different activity.
-    if (this.state.hasError && prevProps.activityId !== this.props.activityId) {
+    if (prevProps.activityId !== this.props.activityId) {
+      this.setState({ hasError: false });
+      return;
+    }
+    // Same row, new data — usually the missing field arriving. Retry once.
+    if (dataSignature(prevProps.activity) !== dataSignature(this.props.activity)) {
       this.setState({ hasError: false });
     }
   }

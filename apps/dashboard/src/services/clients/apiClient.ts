@@ -126,7 +126,7 @@ apiConfig.interceptors.request.use(
       }
       const clientSessionId = logger.clientSessionId;
       if (clientSessionId) {
-        config.headers['x-client-session-id'] = clientSessionId;
+        config.headers['x-device-id'] = clientSessionId;
       }
       for (const [name, value] of Object.entries(getDynamicHeaders())) {
         config.headers[name] = value;

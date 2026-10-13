@@ -540,6 +540,34 @@ export class Logger implements LoggerConfig {
 
 let loggerInstance: Logger | null = null;
 
+/**
+ * Persistent web device key, stored in localStorage under `xd`.
+ * Must survive logout — storage-clearing flows have to restore it
+ * (see preserveWebDeviceKey).
+ */
+export const WEB_DEVICE_KEY_STORAGE_KEY = 'xd';
+
+export const getWebDeviceKey = (): string => {
+  try {
+    const existing = localStorage.getItem(WEB_DEVICE_KEY_STORAGE_KEY);
+    if (existing) return existing;
+    const deviceKey = uuidv4();
+    localStorage.setItem(WEB_DEVICE_KEY_STORAGE_KEY, deviceKey);
+    return deviceKey;
+  } catch {
+    return uuidv4();
+  }
+};
+
+/** Run a storage-clearing action without losing the persistent device key. */
+export const preserveWebDeviceKey = (clearAction: () => void): void => {
+  const deviceKey = localStorage.getItem(WEB_DEVICE_KEY_STORAGE_KEY);
+  clearAction();
+  if (deviceKey) {
+    localStorage.setItem(WEB_DEVICE_KEY_STORAGE_KEY, deviceKey);
+  }
+};
+
 const getClientSessionId = async (): Promise<string | null> => {
   try {
     if (window.electronAPI?.getClientSessionId) {
@@ -557,7 +585,7 @@ export const getLogger = async (): Promise<Logger> => {
   if (!loggerInstance) {
     const clientSessionId = await getClientSessionId();
     loggerInstance = new Logger({
-      clientSessionId: clientSessionId ?? uuidv4(),
+      clientSessionId: clientSessionId ?? getWebDeviceKey(),
       platform_name: detectPlatform(),
     });
     window.addEventListener('beforeunload', () => {

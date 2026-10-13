@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { logger } from '../utils/logger';
 import { UserService } from '../services/userService';
 import { UserSessionService } from '../services/userSessionService';
+import { authSessionService } from '../services/authSessionService';
 import { jwtService } from '../services/jwtService';
 import { oauthStateServiceV2 } from '../services/oauthStateServiceV2';
 import { pkceServiceV2 } from '../services/pkceServiceV2';
@@ -1745,6 +1746,11 @@ export class AuthV2Controller {
         });
       }
 
+      // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+      await authSessionService.issueOnLogin(req, res, {
+        orgMemberId: workspaceUser.orgMemberId,
+      });
+
       setOnboardingCookie(res, isNewUser, {
         secure: isProduction,
         sameSite: 'strict' as const,
@@ -1919,11 +1925,17 @@ export class AuthV2Controller {
           maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
         });
       }
-      
+
       // Set last workspace pointer
       res.cookie('xyne_last_workspace', targetWorkspaceId, {
         ...cookieOptions,
         maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
+      });
+
+      // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+      await authSessionService.issueOnLogin(req, res, {
+        orgMemberId: workspaceUser.orgMemberId,
+        orgId: organization.orgId,
       });
 
       setOnboardingCookie(res, isNewUser, {
@@ -2298,6 +2310,12 @@ export class AuthV2Controller {
           maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
         });
 
+        // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+        await authSessionService.issueOnLogin(req, res, {
+          orgMemberId: workspaceUser.orgMemberId,
+          orgId: organization.orgId,
+        });
+
         const isNewUser = !(await this.userService.hasCompletedOnboarding(userData.email));
 
         setOnboardingCookie(res, isNewUser, {
@@ -2442,6 +2460,12 @@ export class AuthV2Controller {
         res.cookie('user_session_id', newSessionId, { ...cookieBase, maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000 });
       }
       res.cookie('xyne_last_workspace', targetWorkspaceId, { ...cookieBase, maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000 });
+
+      // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+      await authSessionService.issueOnLogin(req, res, {
+        orgMemberId: workspaceUser.orgMemberId,
+        orgId: organization.orgId,
+      });
       const isNewUser = !(await this.userService.hasCompletedOnboarding(fullUser.email));
       setOnboardingCookie(res, isNewUser, {
         secure: isProduction,

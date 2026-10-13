@@ -872,6 +872,33 @@ model UserSession {
   @@schema("workflow")
 }
 
+// Org-scoped device session: one row per (orgMemberId, deviceKey) login.
+// tokenHash is the sha256 of the refresh token held by the client in the `xs` cookie.
+// NOTE (hand-written migration): add a partial unique index enforcing one ACTIVE
+// row per device — CREATE UNIQUE INDEX ... ON non_zero.auth_sessions ("orgMemberId", "deviceKey") WHERE status = 'active'
+model AuthSession {
+  id          String    @id @default(cuid())
+  orgMemberId String
+  orgId       String
+  tokenHash   String    @unique
+  deviceKey   String    // persistent client device key (localStorage `xd` on web, native stores elsewhere)
+  status      String    @default("active") // active | revoked
+  platform    String    // web | electron | android | ios
+  absExpiry   DateTime  // absolute session expiry; never extended on rotation
+  deviceInfo  String?   // JSON: { appVersion, userAgent, acceptLanguage }
+  fcmToken    String?
+  voipToken   String?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([orgMemberId, deviceKey, status])
+  @@index([deviceKey])
+  @@index([orgId])
+  @@map("auth_sessions")
+  @@schema("non_zero")
+}
+
 model User {
   id             String       @id @default(cuid())
   name           String

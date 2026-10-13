@@ -3404,6 +3404,17 @@ router.get("/:slug/chat/:convId/live", async (req: Request<{ slug: string; convI
     // that's already been generated, before the first live `delta` arrives.
     const runningMsg = visible.find((m) => m.role === "assistant" && m.status === "running");
 
+    // The caller's OWN in-flight run, so a reattached tab can Stop it
+    // (XYNE-66347). Prefer the run linked to the streaming placeholder, else
+    // the newest not-yet-linked run on this agent. Never another user's run.
+    const ownRunning = agentRuns.filter(
+      (r) => r.status === "running" && !r.completedAt && liveUserAliases.includes(r.userId),
+    );
+    const runSessionId = (
+      ownRunning.find((r) => runningMsg && r.chatMessageId === runningMsg.id) ??
+      ownRunning.find((r) => !r.chatMessageId && r.agentSlug === slug)
+    )?.sessionId;
+
     // Redis pub/sub has no replay, so a mid-run joiner would otherwise miss
     // every card emitted before it connected.
     const uiFlowsByMsgId: Record<string, unknown[]> = {};
@@ -3418,6 +3429,7 @@ router.get("/:slug/chat/:convId/live", async (req: Request<{ slug: string; convI
         agentSlug: slug,
         invocationsByMsgId,
         inProgress,
+        ...(runSessionId ? { runSessionId } : {}),
         ...(Object.keys(uiFlowsByMsgId).length > 0 ? { uiFlowsByMsgId } : {}),
         ...(runningMsg
           ? {

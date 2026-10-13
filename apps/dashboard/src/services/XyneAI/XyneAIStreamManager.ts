@@ -2280,14 +2280,22 @@ class XyneAIStreamManager {
               }
             | undefined;
           const inProgress = (data['inProgress'] as ToolInvocation[] | undefined) ?? [];
+          const wasStarted = started;
           if (!started) {
             if (!partial && inProgress.length === 0) {
               close(); // run already finished — the fetched transcript stands
               return;
             }
             ensureViewerStream(partial, inProgress);
-            break;
           }
+          // A reattached viewer never sees the `run` event, so take the run id
+          // from the snapshot — without it Stop only detaches (XYNE-66347).
+          const runSessionId = data['runSessionId'];
+          const st = this.activeStreams.get(threadId);
+          if (typeof runSessionId === 'string' && st?.streamId === streamId && !st.traceId) {
+            st.traceId = runSessionId;
+          }
+          if (!wasStarted) break;
           // RECONNECT re-snapshot. If the run finished while we were
           // disconnected, finalize via the done path; else heal the missed
           // window from the persisted partial (authoritative accumulated text —
@@ -2297,7 +2305,6 @@ class XyneAIStreamManager {
             return;
           }
           const sd = this.streamDataMap.get(streamId);
-          const st = this.activeStreams.get(threadId);
           if (
             partial &&
             sd &&

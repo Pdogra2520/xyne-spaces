@@ -208,7 +208,11 @@ class AutoAssignSweepQueue {
         distinct: ['conversationId'],
       });
       const firstEmailByConversation = new Map(emails.map(e => [e.conversationId, e.id] as const));
-      const jobs: Array<{ name: string; data: EmailClassificationJobData; opts: { delay: number } }> = [];
+      const jobs: Array<{
+        name: string;
+        data: EmailClassificationJobData;
+        opts: { delay: number; jobId: string; removeOnFail: boolean };
+      }> = [];
 
       for (const ticket of page) {
         if (totalJobs >= MAX_JOBS_PER_SWEEP) break;
@@ -240,7 +244,11 @@ class AutoAssignSweepQueue {
             runPriority: false,
             runAssignment: true,
           },
-          opts: { delay: totalJobs * STAGGER_MS },
+          opts: {
+            delay: totalJobs * STAGGER_MS,
+            jobId: `sweep-assign:${ticket.id}`,
+            removeOnFail: true,
+          },
         });
         totalJobs++;
       }

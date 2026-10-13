@@ -1,5 +1,5 @@
 import Bull from 'bull';
-import { ActivityClassification, ActivityType, EmailType } from '@xyne/shared';
+import { ActivityClassification, ActivityType, EmailType, TicketStatusV2 } from '@xyne/shared';
 import { logger } from '@/utils/logger';
 import { emailClassificationQueue, type EmailClassificationJobData } from '@/queues/emailClassificationQueue';
 import { EmailClassificationService } from '@/services/emailClassificationService';
@@ -26,7 +26,12 @@ function shouldAssignTicketPerson(
   groupChanged: boolean,
   ticketIsUnassigned: boolean,
   effectiveGroupId: string | null,
+  assignmentOnly: boolean = false,
 ): boolean {
+  if (boardId === null) return false;
+  if (assignmentOnly) {
+    return ticketIsUnassigned && effectiveGroupId !== null;
+  }
   // ASSIGN RULE:
   // 1. Group changed → assign to someone in the new group
   // 2. Ticket is unassigned + classification yielded a group → assign
@@ -169,6 +174,8 @@ export class EmailClassificationWorker {
         channelId: true,
         conversationId: true,
         priority: true,
+        statusV2: true,
+        isArchived: true,
       },
     });
     if (!ticket) {
@@ -177,6 +184,21 @@ export class EmailClassificationWorker {
     }
 
     const assignmentOnly = runAssignment && !runClassification;
+
+    // An assignment-only run is a retry queued by a sweep, and sits in that sweep's
+    // stagger window before it runs. The ticket may have been resolved, cancelled or
+    // archived in between; assigning it then would resurrect it in someone's queue.
+    if (
+      assignmentOnly &&
+      (ticket.isArchived ||
+        ticket.statusV2 === TicketStatusV2.COMPLETED ||
+        ticket.statusV2 === TicketStatusV2.CANCELLED)
+    ) {
+      logger.info(
+        `[EMAIL-CLASSIFICATION-WORKER] Ticket ${ticketId} is ${ticket.isArchived ? 'archived' : ticket.statusV2} since the sweep selected it; skipping assignment`,
+      );
+      return;
+    }
     if (assignmentOnly && ticket.userGroupId) {
       effectiveGroupId = ticket.userGroupId;
     }
@@ -194,6 +216,7 @@ export class EmailClassificationWorker {
       groupChanged,
       ticketIsUnassigned,
       effectiveGroupId,
+      assignmentOnly,
     );
 
     const updatePayload: Record<string, unknown> = {
@@ -340,11 +363,11 @@ export class EmailClassificationWorker {
     // Activity logging
 
     if (newAssignedTo && assignmentSucceeded) {
-      const assignReason = resolvedGroupId
-        ? 'AI classification'
-        : groupChanged
-          ? 'Default channel group'
-          : 'Existing ticket group';
+      const assignReason = assignmentOnly
+        ? 'Auto-assign retry'
+        : resolvedGroupId
+          ? 'AI classification'
+          : 'Default channel group';
 
       try {
         // 1. Ticket activity row (appears in the ticket's activity log)

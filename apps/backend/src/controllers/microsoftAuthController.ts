@@ -636,8 +636,8 @@ export class MicrosoftAuthController {
           email: user.email,
           name: user.name,
           picture: user.picture ?? undefined,
-          workspaceId: user.workspaceId ?? undefined,
-          memberId: user.orgMemberId ?? undefined,
+          workspaceId: user.workspaceId,
+          memberId: user.orgMemberId,
         });
 
         // Handle mobile platform: relay to app deep link with the token (no server session needed).
@@ -1096,8 +1096,8 @@ export class MicrosoftAuthController {
           email: user.email,
           name: user.name,
           picture: user.picture ?? undefined,
-          workspaceId: user.workspaceId ?? undefined,
-          memberId: user.orgMemberId ?? undefined,
+          workspaceId: user.workspaceId,
+          memberId: user.orgMemberId,
         });
 
         // Always create a session (fall back to a generated refresh token if Microsoft omitted one)
@@ -1156,11 +1156,9 @@ export class MicrosoftAuthController {
         }
 
         // Org-scoped device auth session (xs cookie); no-op without x-device-id.
-        if (user.orgMemberId) {
-          await authSessionService.issueOnLogin(req, res, {
-            orgMemberId: user.orgMemberId,
-          });
-        }
+        await authSessionService.issueOnLogin(req, res, {
+          orgMemberId: user.orgMemberId,
+        });
 
         setOnboardingCookie(res, isNewUser, {
           secure: isProduction,
@@ -1453,8 +1451,8 @@ export class MicrosoftAuthController {
           email: user.email,
           name: user.name,
           picture: user.picture ?? undefined,
-          workspaceId: user.workspaceId ?? undefined,
-          memberId: user.orgMemberId ?? undefined,
+          workspaceId: user.workspaceId,
+          memberId: user.orgMemberId,
         });
         
         let sessionId: string | null = null;
@@ -1497,11 +1495,9 @@ export class MicrosoftAuthController {
         }
 
         // Org-scoped device auth session (xs cookie); no-op without x-device-id.
-        if (user.orgMemberId) {
-          await authSessionService.issueOnLogin(req, res, {
-            orgMemberId: user.orgMemberId,
-          });
-        }
+        await authSessionService.issueOnLogin(req, res, {
+          orgMemberId: user.orgMemberId,
+        });
 
         setOnboardingCookie(res, isNewUser, {
           secure: isProduction,

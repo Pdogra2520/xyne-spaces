@@ -5,9 +5,13 @@ import { appSchema, callSchema, channelSchema, InsertDocument, mailSchema, messa
 import { NAMESPACE } from '@/vespa/vespaConfig';
 import type { InsertValue } from '@rocicorp/zero';
 import {
+  CallType,
+  CallVisibility,
   CanvasVisibility,
   ChannelScopeType,
   ChannelVisibility,
+  EntityUserAccess,
+  ShareableEntityType,
   TicketStatus,
   TicketStatusV2,
   type Schema,
@@ -919,6 +923,41 @@ export const computeCanvasPermissions = async (canvasId: string): Promise<string
   ].filter((id): id is string => Boolean(id))));
 };
 
+/**
+ * Everyone a recording's live NOTE_TAKER shares reach: direct users plus the members of
+ * every group/channel it is shared to. Mirrors CallShareService.listActiveGrants, so
+ * Vespa's view of who may find a recording matches who may open it.
+ */
+export const computeRecordingPermissions = async (callId: string): Promise<string[]> => {
+  const shares = await db.entityAccess.findMany({
+    where: {
+      shareableEntityType: ShareableEntityType.NOTE_TAKER,
+      entityId: callId,
+      entityUserAccess: { not: EntityUserAccess.REVOKED },
+    },
+    select: { userId: true, userGroupId: true, channelId: true },
+  });
+
+  const directUserIds = shares.map(s => s.userId).filter((id): id is string => Boolean(id));
+  const channelIds = shares.map(s => s.channelId).filter((id): id is string => Boolean(id));
+  const groupIds = shares.map(s => s.userGroupId).filter((id): id is string => Boolean(id));
+
+  const [channelMembers, groupMembers] = await Promise.all([
+    channelIds.length
+      ? db.channelParticipant.findMany({ where: { channelId: { in: channelIds } }, select: { userId: true } })
+      : Promise.resolve([] as { userId: string }[]),
+    groupIds.length
+      ? db.userGroupMapping.findMany({ where: { userGroupId: { in: groupIds } }, select: { userId: true } })
+      : Promise.resolve([] as { userId: string }[]),
+  ]);
+
+  return Array.from(new Set([
+    ...directUserIds,
+    ...channelMembers.map(m => m.userId),
+    ...groupMembers.map(m => m.userId),
+  ].filter((id): id is string => Boolean(id))));
+};
+
 export const mapCanvas = async (args: InsertValue<CanvasesSchema>, workspaceId?: string, orgId?: string): Promise<VespaFileDocument> => {
   // Get channel info if channelId exists
   let channelRef: string | undefined;
@@ -1055,12 +1094,12 @@ export const mapTranscript = async (args: InsertValue<TranscriptsSchema>, worksp
     // Continue with empty chunks - don't fail the entire operation
   }
 
-  // Get call participants for permissions using call ID
-  let permissions: string[] = [];
-  const callParticipants = await db.callParticipant.findMany({
-    where: { callId: args.id, isExternal: false }
-  });
-  permissions = callParticipants.map(p => p.userId);
+  // A recording is opened through its shares, never by having been in it, so its ACL is
+  // the share recipients; a regular call's transcript stays with its participants.
+  const isRecordingCall = args.callType === CallType.HEADLESS;
+  const permissions = isRecordingCall
+    ? await computeRecordingPermissions(args.id)
+    : (await db.callParticipant.findMany({ where: { callId: args.id, isExternal: false } })).map(p => p.userId);
 
   return {
     docId: args.id,
@@ -1087,7 +1126,8 @@ export const mapTranscript = async (args: InsertValue<TranscriptsSchema>, worksp
     urlInternal: args.transcript || '',
     urlOriginal: args.transcript || '',
     fileSize: fileSize,
-    isPrivate: true,
+    // A public recording link opens it to the whole workspace.
+    isPrivate: !(isRecordingCall && args.visibility === CallVisibility.PUBLIC),
     mimeType: 'text/plain',
     subApp: SubApp.TRANSCRIPT,
     channelRef,

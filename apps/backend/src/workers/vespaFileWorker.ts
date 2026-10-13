@@ -1,12 +1,12 @@
 import Bull from 'bull';
-import { IngestionStatus, VespaInsertionStatus } from '@xyne/shared';
+import { CallType, CallVisibility, IngestionStatus, VespaInsertionStatus } from '@xyne/shared';
 import vespaClient from '@/vespa/client';
 import { logger } from '@/utils/logger';
 import { InsertDocument, fileSchema, VespaSchema } from '@/vespa/src/types';
 import { VespaJob, VespaJobType } from '@/zero/vespa-injection/core/types';
 import { db } from '@/database/client';
 import { NAMESPACE } from '@/vespa/vespaConfig';
-import { fetchAndMapBySchema, fetchDataBySchema, mapBySchema, computeCanvasPermissions, VespaOperationType } from '@/zero/vespa-injection/core/mapper';
+import { fetchAndMapBySchema, fetchDataBySchema, mapBySchema, computeCanvasPermissions, computeRecordingPermissions, VespaOperationType } from '@/zero/vespa-injection/core/mapper';
 import { vespaPostIngestHooks } from './vespaPostIngestHooks';
 import { superpositionClient } from '@/services/superpositionClient';
 import { routePdfToScheduler } from '@/services/ingestion/docling/scheduler/intake';
@@ -271,6 +271,27 @@ export class VespaFileWorker {
 					// Fast path: canvas ACL refresh — recompute just permissions, skip the
 					// content extraction/embedding a full mapCanvas would do.
 					mappedData = { permissions: await computeCanvasPermissions(docId) } as Partial<InsertDocument>;
+				} else if (
+					app === SubApp.TRANSCRIPT &&
+					fields.every((field) => field === 'permissions' || field === 'isPrivate')
+				) {
+					// Fast path: recording ACL refresh — skip the transcript download a full
+					// mapTranscript would do. Same derivation as mapTranscript.
+					const call = await db.call.findUnique({
+						where: { id: docId },
+						select: { callType: true, visibility: true },
+					});
+					if (!call) {
+						throw new Error(`Data not found for ${schema}/${docId}`);
+					}
+					if (call.callType !== CallType.HEADLESS) {
+						logger.info(`[VESPA_FILE_WORKER] Skipping recording ACL refresh for non-recording call ${docId}`);
+						return;
+					}
+					mappedData = {
+						...(fields.includes('permissions') ? { permissions: await computeRecordingPermissions(docId) } : {}),
+						...(fields.includes('isPrivate') ? { isPrivate: call.visibility !== CallVisibility.PUBLIC } : {}),
+					} as Partial<InsertDocument>;
 				} else {
 					const rawData = await fetchDataBySchema(schema, docId, app);
 					if (!rawData) {

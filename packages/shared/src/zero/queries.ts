@@ -3139,6 +3139,31 @@ export const queries = defineQueries({
         .one(),
   ),
 
+  // HEADLESS recordings by row id — the recordings screen's search resolves Vespa hits
+  // (docId = call id) to full rows with this. Carries the same `shares` as
+  // sharedOatsRecordings so a hit renders and behaves exactly like a list row; the
+  // calls read ACL still decides which of the ids come back.
+  oatsRecordingsByIds: defineQuery(
+    z.object({ ids: z.array(z.string()).max(100) }),
+    ({ ctx, args: { ids } }) =>
+      zql.calls
+        .where('workspaceId', ctx.workspaceId)
+        .where('callType', CallType.HEADLESS)
+        .where('id', 'IN', ids)
+        .related('shares', shares =>
+          shares
+            .where('shareableEntityType', ShareableEntityType.NOTE_TAKER)
+            .where('entityUserAccess', '!=', EntityUserAccess.REVOKED)
+            .where(({ or, cmp, exists }) =>
+              or(
+                cmp('userId', ctx.userID),
+                exists('userGroupMemberships', m => m.where('userId', ctx.userID)),
+                exists('channelMembers', m => m.where('userId', ctx.userID)),
+              ),
+            ),
+        ),
+  ),
+
   // Fetches the HEADLESS recording (+ shares) by its public
   // externalId (what's in the URL / RecordingDetail.externalId) — used by
   // the Share modal and the detail screen alike.

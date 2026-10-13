@@ -1,6 +1,6 @@
 import { vespaQueue } from '@/queues/vespaQueue';
 import { logger } from '@/utils/logger';
-import { callSchema } from '@/vespa/src/types';
+import { callSchema, fileSchema, SubApp } from '@/vespa/src/types';
 
 export enum CallVespaFeedSource {
   CallControllerCancelOtherActiveJoinRequests = 'CallController.cancelOtherActiveJoinRequests',
@@ -80,6 +80,32 @@ export const queueCallVespaDelete = (
     logger.error('[CallVespaQueue] Failed to queue call Vespa delete:', {
       callId,
       context,
+      errorMessage: error,
+    });
+  });
+};
+
+/**
+ * A recording's transcript is a separate Vespa file doc (docId = call.id) whose
+ * `fileName` is the recording title. Renaming only re-feeds the call doc, so push the
+ * new title to the transcript doc too — field-scoped, so the transcript isn't re-embedded.
+ */
+export const queueTranscriptTitleUpdate = (
+  call: { id: string; transcript?: string | null; workspaceId?: string | null },
+): void => {
+  // No transcript means no transcript doc to update.
+  if (!call.transcript) return;
+
+  vespaQueue.addJob({
+    schema: fileSchema,
+    jobType: 'update',
+    docId: call.id,
+    app: SubApp.TRANSCRIPT,
+    fields: ['fileName'],
+    ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
+  }).catch((error) => {
+    logger.error('[CallVespaQueue] Failed to queue transcript title update:', {
+      callId: call.id,
       errorMessage: error,
     });
   });

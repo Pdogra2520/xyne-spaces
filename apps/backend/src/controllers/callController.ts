@@ -51,7 +51,7 @@ import {
   ORIGINAL_TRANSCRIPT_LANGUAGE,
 } from '@xyne/shared';
 import { storageService } from '@/services/storage';
-import { CallVespaFeedSource, queueCallVespaFeed } from '@/services/callVespaQueue';
+import { CallVespaFeedSource, queueCallVespaFeed, queueTranscriptTitleUpdate } from '@/services/callVespaQueue';
 import { callShareService } from '@/services/callShareService';
 import { callNotesCanvasService } from '@/services/callNotesCanvasService';
 import { noteTakerTranscriptService } from '@/services/noteTakerTranscriptService';
@@ -1713,6 +1713,8 @@ export class CallController {
 
       // For headless recordings, update the system message content
       if (input.title) {
+        queueTranscriptTitleUpdate(call);
+
         try {
           // Find the message associated with this call using repository method
           const callMessage = await repositories.messages.findHeadMessageByCallId(callId);

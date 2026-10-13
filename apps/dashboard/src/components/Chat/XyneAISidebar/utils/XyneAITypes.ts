@@ -558,7 +558,7 @@ export function requirePendingActionIndex(
 export interface PlanTodo {
   id?: string;
   title: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'stopped';
 }
 
 export interface Message {

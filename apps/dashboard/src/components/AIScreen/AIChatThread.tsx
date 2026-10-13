@@ -30,6 +30,7 @@ import {
   Clock,
   MoreHorizontal,
   Quote,
+  Square,
 } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -565,12 +566,14 @@ const PLAN_STATUS_CLASSES: Record<PlanTodo['status'], string> = {
   in_progress: 'text-primary',
   completed: 'text-emerald-600 dark:text-emerald-400',
   failed: 'text-destructive',
+  stopped: 'text-muted-foreground',
 };
 
 function PlanStatusIcon({ status }: { status: PlanTodo['status'] }): ReactElement {
   if (status === 'completed') return <Check className='h-3.5 w-3.5' aria-hidden='true' />;
   if (status === 'failed') return <X className='h-3.5 w-3.5' aria-hidden='true' />;
   if (status === 'in_progress') return <Clock className='h-3.5 w-3.5' aria-hidden='true' />;
+  if (status === 'stopped') return <Square className='h-3 w-3' aria-hidden='true' />;
   return <MoreHorizontal className='h-3.5 w-3.5' aria-hidden='true' />;
 }
 
@@ -583,12 +586,14 @@ function PlanCard({
 }): ReactElement {
   const done = todos.filter(todo => todo.status === 'completed').length;
   const failed = todos.filter(todo => todo.status === 'failed').length;
+  const stopped = todos.filter(todo => todo.status === 'stopped').length;
   return (
     <div className='w-full max-w-[520px] rounded-lg border border-border bg-card px-3 py-2.5 text-[13px] text-foreground'>
       <div className='mb-2 flex items-center justify-between gap-3'>
         <span className='truncate font-medium'>{title || 'Plan'}</span>
         <span className='shrink-0 text-[11px] text-muted-foreground'>
           {done}/{todos.length} done{failed ? `, ${failed} failed` : ''}
+          {stopped ? `, ${stopped} stopped` : ''}
         </span>
       </div>
       <div className='space-y-1.5'>

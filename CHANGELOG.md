@@ -1,3 +1,11 @@
+## [1.475.0-release-20261008.1](https://github.com/juspay/xyne-spaces/compare/v1.474.5-release-20261008.4...v1.475.0-release-20261008.1) (2026-10-13)
+
+
+### Features
+
+* add RESOLVE_CONVERSATION automation step that hydrat… ([#2915](https://github.com/juspay/xyne-spaces/issues/2915)) ([63ab3d2](https://github.com/juspay/xyne-spaces/commit/63ab3d2e56e1f18d125c4b8300386c751483096d))
+* Removed Release Manager Navigation ([#2921](https://github.com/juspay/xyne-spaces/issues/2921)) ([0c031a3](https://github.com/juspay/xyne-spaces/commit/0c031a3e06300450b1103e81351e9dbf9ebc90b5))
+
 ## [1.474.5-release-20261008.4](https://github.com/juspay/xyne-spaces/compare/v1.474.5-release-20261008.3...v1.474.5-release-20261008.4) (2026-10-09)
 
 

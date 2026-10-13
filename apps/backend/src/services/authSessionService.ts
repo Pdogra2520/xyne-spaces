@@ -63,11 +63,15 @@ const mintToken = (): { token: string; tokenHash: string } => {
 };
 
 export class AuthSessionService {
-  private setAuthSessionCookie(res: Response, token: string, absExpiry: Date): void {
+  // Native mobile cookies follow the existing mobile-exchange convention
+  // (sameSite none + secure); everything else matches the login-workspace cookies.
+  private setAuthSessionCookie(req: Request, res: Response, token: string, absExpiry: Date): void {
+    const platform = resolveDevicePlatform(req);
+    const isMobileNative = platform === 'android' || platform === 'ios';
     res.cookie(AUTH_SESSION_COOKIE, token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: process.env.NODE_ENV === 'production' || isMobileNative,
+      sameSite: isMobileNative ? 'none' : 'strict',
       path: '/',
       maxAge: absExpiry.getTime() - Date.now(),
     });
@@ -110,7 +114,7 @@ export class AuthSessionService {
       });
     });
 
-    this.setAuthSessionCookie(res, token, absExpiry);
+    this.setAuthSessionCookie(req, res, token, absExpiry);
     return session.id;
   }
 
@@ -195,7 +199,7 @@ export class AuthSessionService {
       if (active) {
         const { token, tokenHash } = mintToken();
         await db.authSession.update({ where: { id: active.id }, data: { tokenHash } });
-        this.setAuthSessionCookie(res, token, active.absExpiry);
+        this.setAuthSessionCookie(req, res, token, active.absExpiry);
         logger.info('[AUTH-SESSION] Rotated auth session token during refresh (xs cookie was missing)', {
           authSessionId: active.id,
           orgId,

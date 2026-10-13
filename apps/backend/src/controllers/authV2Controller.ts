@@ -1038,7 +1038,7 @@ export class AuthV2Controller {
         const workspaceId = workspaces[0]!.id;
         logger.info(`${tag()} Single workspace detected - auto-logging in to ${workspaceId}`);
 
-        const { sessionId, jwtToken, isNewUser } = await this.performSingleWorkspaceAutoLogin(
+        const { workspaceUser, sessionId, jwtToken, isNewUser } = await this.performSingleWorkspaceAutoLogin(
           googleUserData,
           workspaceId,
           refresh_token,
@@ -1073,6 +1073,11 @@ export class AuthV2Controller {
         res.cookie('user_session_id', sessionId, {
           ...cookieBase,
           maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
+        });
+
+        // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+        await authSessionService.issueOnLogin(req, res, {
+          orgMemberId: workspaceUser.orgMemberId,
         });
 
         logger.info(`${tag()} Google OAuth login succeeded (platform=electron, outcome=${workspaceOutcome(workspaces.length)}, count=${workspaces.length})`);
@@ -1413,6 +1418,11 @@ export class AuthV2Controller {
             maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
           });
         }
+
+        // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+        await authSessionService.issueOnLogin(req, res, {
+          orgMemberId: workspaceUser.orgMemberId,
+        });
 
         logger.info(`${tag()} Google OAuth login succeeded (platform=mobile, outcome=${workspaceOutcome(workspaces.length)}, count=${workspaces.length})`);
 

@@ -3,6 +3,7 @@ import { AuthorizationCode } from 'simple-oauth2';
 import { logger } from '../utils/logger';
 import { UserService } from '../services/userService';
 import { UserSessionService } from '../services/userSessionService';
+import { authSessionService } from '../services/authSessionService';
 import { oauthStateServiceV2 } from '../services/oauthStateServiceV2';
 import { pkceServiceV2 } from '../services/pkceServiceV2';
 
@@ -1154,6 +1155,13 @@ export class MicrosoftAuthController {
           });
         }
 
+        // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+        if (user.orgMemberId) {
+          await authSessionService.issueOnLogin(req, res, {
+            orgMemberId: user.orgMemberId,
+          });
+        }
+
         setOnboardingCookie(res, isNewUser, {
           secure: isProduction,
           sameSite: 'strict' as const,
@@ -1487,6 +1495,14 @@ export class MicrosoftAuthController {
             maxAge: config.session.expiryDays * 24 * 60 * 60 * 1000,
           });
         }
+
+        // Org-scoped device auth session (xs cookie); no-op without x-device-id.
+        if (user.orgMemberId) {
+          await authSessionService.issueOnLogin(req, res, {
+            orgMemberId: user.orgMemberId,
+          });
+        }
+
         setOnboardingCookie(res, isNewUser, {
           secure: isProduction,
           sameSite: 'lax' as const,

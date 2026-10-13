@@ -243,22 +243,6 @@ export function provisionOrgApp(input: ProvisionOrgAppInput) {
   );
 }
 
-/** Relocated from appsInternal GET /:appId/installations/:workspaceId. */
-export function isAppInstalledInWorkspace(appId: string, workspaceId: string): Promise<boolean> {
-  return asService(
-    ['InstalledApps'],
-    'S2S install-presence check for the caller-named workspace',
-    SYSTEM_USER_ID,
-    workspaceId,
-    async () =>
-      Boolean(
-        await repositories.installedApps.findFirst({
-          where: { appId, user: { workspaceId } },
-        }),
-      ),
-  );
-}
-
 /** Relocated from appsInternal's post-install #general join (caller treats it as best-effort). */
 export function joinAppBotToGeneralChannel(appId: string, workspaceId: string): Promise<string | null> {
   return asService(

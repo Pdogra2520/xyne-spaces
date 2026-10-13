@@ -34,9 +34,9 @@ interface TableFilterWidgetProps {
   wrapper: HTMLElement;
 }
 
-/** A canvas table read as bulk ticket input: row one is the parent ticket. */
+/** A canvas table read as bulk ticket input: one ticket per visible row. */
 export interface CanvasTableTicketDraft {
-  /** Row titles in table order, the first of which is the parent's. */
+  /** Row titles in table order. */
   titles: string[];
   /** Descriptions aligned with `titles`; an empty one falls back to the title. */
   descriptions: string[];

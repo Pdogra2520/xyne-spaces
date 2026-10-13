@@ -283,18 +283,12 @@ export class TicketController {
     projectId: string;
     boardId: string;
     assignedTo?: string;
-    userGroupId?: string;
-    eta?: Date;
-    tags?: string[];
-    ticketType?: string;
-    stageName?: string;
     priority?: string;
     statusV2?: string;
     metadata?: Record<string, any>;
     messageContent?: string;
     messageSubtype?: string;
     entityLinkContext?: EntityLinkOwner;
-    creationMessageId?: string;
   }): Promise<Ticket> {
     const {
       title,
@@ -305,21 +299,15 @@ export class TicketController {
       projectId,
       boardId,
       assignedTo,
-      userGroupId,
-      eta,
-      tags,
-      ticketType,
-      stageName,
       priority = 'MEDIUM',
       statusV2 = 'TODO',
       metadata = {},
       messageContent,
       messageSubtype = 'ai_ticket',
       entityLinkContext,
-      creationMessageId: requestedCreationMessageId,
     } = params;
 
-    const ticket = await createTicketWithConversationTx(this, conversationId, projectId, title, description, createdBy, updatedBy, assignedTo, boardId, statusV2, priority, messageContent, messageSubtype, metadata, entityLinkContext, { userGroupId, eta, tags, ticketType, stageName, creationMessageId: requestedCreationMessageId });
+    const ticket = await createTicketWithConversationTx(this, conversationId, projectId, title, description, createdBy, updatedBy, assignedTo, boardId, statusV2, priority, messageContent, messageSubtype, metadata, entityLinkContext);
 
     // Ticket committed on its initial stage — auto-create the on-entry approval
     // request if that stage's single outgoing transition is configured for it.

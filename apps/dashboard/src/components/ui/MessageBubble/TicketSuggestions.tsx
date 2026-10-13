@@ -27,6 +27,7 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
   messageId,
   conversationId,
 }) => {
+  // Queue-based state management (single source of truth)
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [creationQueue, setCreationQueue] = useState<string[]>([]);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -56,8 +57,10 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
     [suggestions],
   );
 
+  // Store snapshot of suggestions at creation time to survive WebSocket updates
   const queuedSuggestionsRef = React.useRef<Map<string, TicketSuggestion>>(new Map());
 
+  // Derived state - modal visibility is determined purely by queue state
   const activeId = creationQueue[0] ?? null;
   const activeSuggestion = activeId ? queuedSuggestionsRef.current.get(activeId) : null;
   const shouldShowModal = creationQueue.length > 0 && activeSuggestion !== null;
@@ -68,6 +71,7 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
 
   const startCreation = () => {
     if (selectedIds.length > 0) {
+      // Snapshot the suggestions at creation time
       queuedSuggestionsRef.current.clear();
       selectedIds.forEach(id => {
         const suggestion = suggestionMap.get(id);
@@ -143,6 +147,7 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
 
   return (
     <div className='mt-3 pl-2 -ml-8'>
+      {/* Render created tickets (read-only links) */}
       {ticketsCreated.map(created => (
         <div key={created.ticketId} className='flex items-start gap-2 py-2'>
           <div className='flex-1 min-w-0'>
@@ -160,6 +165,7 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
         </div>
       ))}
 
+      {/* Ticket rows (uncreated suggestions) */}
       {suggestions.map(suggestion => {
         const isSelected = selectedIds.includes(suggestion.suggestionId);
         const checkboxId = `ticket-suggestion-${suggestion.suggestionId}`;
@@ -187,8 +193,9 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
         );
       })}
 
-      <div className='pt-1 flex items-center gap-3'>
-        {selectedIds.length > 0 && (
+      {/* Create button */}
+      {selectedIds.length > 0 && (
+        <div className='pt-1'>
           <button
             onClick={startCreation}
             data-track-category='MESSAGE'
@@ -198,8 +205,8 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
           >
             {isUpdating ? 'Creating...' : `Create Tickets (${selectedIds.length})`}
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {suggestions.length >= 2 && (
         <div className='pt-1'>
@@ -266,6 +273,7 @@ export const TicketSuggestions: React.FC<TicketSuggestionsProps> = ({
         />
       )}
 
+      {/* Create Ticket Modal - driven by derived state */}
       {shouldShowModal && currentChannel && (
         <CreateTicketModal
           key={activeId}

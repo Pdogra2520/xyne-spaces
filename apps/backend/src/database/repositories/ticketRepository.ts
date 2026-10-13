@@ -77,12 +77,7 @@ async function upsertTicketDescription(
   });
 }
 
-/**
- * Base counts snapshot for a ticket whose related rows are known to be empty.
- * Exported so bulk creation emits the identical shape instead of hand-rolling
- * one — the counts client dereferences these fields unguarded.
- */
-export const makeFallbackCountsSnapshot = (ticket: {
+const makeFallbackCountsSnapshot = (ticket: {
   id: string;
   workspaceId: string;
   boardId: string | null;

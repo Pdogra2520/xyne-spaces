@@ -273,7 +273,7 @@ export const InputBox = forwardRef<InputBoxHandle, InputBoxProps>(
         emojiPicker: true,
       },
       blockedExtensions,
-      maxFiles = 10,
+      maxFiles = 15, // keep in sync with MAX_DRAFT_ATTACHMENTS (draftAttachmentController.ts) and multer maxCount (middleware/upload.ts)
       onAlsoSendToChannelChange,
       alsoSendToChannelChecked = false,
       preserveThreadRoute = false,

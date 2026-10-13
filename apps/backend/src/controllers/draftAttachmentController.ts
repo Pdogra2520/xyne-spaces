@@ -13,7 +13,7 @@ import { config } from '@/config/env';
  * Enforced here as well: the multipart `maxCount` only caps a single request,
  * while a draft accumulates attachments across requests.
  */
-export const MAX_DRAFT_ATTACHMENTS = 10;
+export const MAX_DRAFT_ATTACHMENTS = 15;
 
 export class DraftAttachmentController {
   private db = DatabaseClient.getInstance();
@@ -175,8 +175,8 @@ export class DraftAttachmentController {
         }
       }
 
-      // Per-draft attachment limit, counted server-side. The UI refuses the 11th file
-      // (InputBox addFilesWithLimit) and multer caps one request at 10, but a scripted
+      // Per-draft attachment limit, counted server-side. The UI refuses the 16th file
+      // (InputBox addFilesWithLimit) and multer caps one request at 15, but a scripted
       // client could otherwise accumulate unlimited attachments across requests.
       // Zero's optimistic mutator may have pre-created this request's rows already, so
       // the count is read after the draft is resolved and includes them.

@@ -1601,6 +1601,7 @@ const BoardStageConfigScreen = ({
   const handleCloseEdgeConditionModal = useCallback(() => {
     setIsEdgeConditionModalOpen(false);
     setSelectedEdgeForCondition(null);
+    setEditingEdgeCondition(null);
   }, []);
 
   const handleDeleteEdgeCondition = useCallback((conditionId: string) => {
@@ -1767,13 +1768,12 @@ const BoardStageConfigScreen = ({
     [boardId, stages, transitionsByTempId, transitionsMeta, zero],
   );
 
+  // Edge forms are staged locally and persisted by handleSave, like every other
+  // stage/transition edit. Syncing + reloading here replaced the local graph
+  // with the server copy, dropping unsaved edges (and edges to unsaved stages)
+  // and bypassing Cancel.
   const persistEdgeTransitionForm = useCallback(
-    async (fromTempId: number, toTempId: number, formId: string): Promise<void> => {
-      const edgeKey = `${fromTempId}->${toTempId}`;
-      const metaOverride = new Map<string, Partial<TransitionMeta>>([
-        [edgeKey, { formId, ...transitionsMeta.get(edgeKey) }],
-      ]);
-
+    (fromTempId: number, toTempId: number, formId: string): void => {
       updateTransitionMeta(fromTempId, toTempId, { formId });
       setTransitionsByTempId(prev => {
         const next = new Map(prev);
@@ -1783,32 +1783,11 @@ const BoardStageConfigScreen = ({
         return next;
       });
 
-      const fromStage = stages.find(s => s.tempId === fromTempId);
-      const toStage = stages.find(s => s.tempId === toTempId);
-      if (!fromStage?.id || !toStage?.id) {
-        toast.info(
-          'Form saved. Click Save on the board configuration to link it to this transition.',
-        );
-        return;
-      }
-
-      const edgeTransitions = new Map(transitionsByTempId);
-      const targets = new Set(edgeTransitions.get(fromTempId) ?? []);
-      targets.add(toTempId);
-      edgeTransitions.set(fromTempId, targets);
-
-      await syncStageTransitions({}, metaOverride, edgeTransitions);
-      hasLoadedTransitions.current = false;
-      await reloadTransitionsFromServer();
+      toast.info(
+        'Form saved. Click Save on the board configuration to link it to this transition.',
+      );
     },
-    [
-      reloadTransitionsFromServer,
-      stages,
-      syncStageTransitions,
-      transitionsByTempId,
-      transitionsMeta,
-      updateTransitionMeta,
-    ],
+    [updateTransitionMeta],
   );
 
   const handleEdgeCreateFormSave = useCallback(
@@ -1820,7 +1799,7 @@ const BoardStageConfigScreen = ({
         setIsEdgeCreateFormOpen(false);
         setPendingEdgeFormCondition(null);
         const { fromTempId, toTempId } = selectedEdgeForCondition;
-        await persistEdgeTransitionForm(fromTempId, toTempId, createdForm.id);
+        persistEdgeTransitionForm(fromTempId, toTempId, createdForm.id);
         handleCloseEdgeConditionModal();
       } catch (error) {
         toast.error('Failed to create form', {
@@ -2002,45 +1981,14 @@ const BoardStageConfigScreen = ({
       allPairs?: Array<{ fromTempId: number; toTempId: number }>,
     ) => {
       const pairs = allPairs && allPairs.length > 0 ? allPairs : [{ fromTempId, toTempId }];
-      const metaOverrides = new Map<string, Partial<TransitionMeta>>();
       pairs.forEach(pair => {
         updateTransitionMeta(pair.fromTempId, pair.toTempId, { formId });
-        metaOverrides.set(`${pair.fromTempId}->${pair.toTempId}`, { formId });
       });
-      const allSaved = pairs.every(pair => {
-        const fromStage = stages.find(s => s.tempId === pair.fromTempId);
-        const toStage = stages.find(s => s.tempId === pair.toTempId);
-        return !!fromStage?.id && !!toStage?.id;
-      });
-      if (!allSaved) {
-        toast.info(
-          'Form saved. Click Save on the board configuration to link it to this transition.',
-        );
-        return;
-      }
-
-      const allEdgeTransitions = new Map(transitionsByTempId);
-      pairs.forEach(pair => {
-        const targets = new Set(allEdgeTransitions.get(pair.fromTempId) ?? []);
-        targets.add(pair.toTempId);
-        allEdgeTransitions.set(pair.fromTempId, targets);
-      });
-      void syncStageTransitions({}, metaOverrides, allEdgeTransitions)
-        .then(async () => {
-          hasLoadedTransitions.current = false;
-          await reloadTransitionsFromServer();
-          toast.success(`Form "${formMap.get(formId) ?? 'Form'}" attached`);
-        })
-        .catch(() => toast.error('Failed to attach form'));
+      toast.success(
+        `Form "${formMap.get(formId) ?? 'Form'}" attached. Click Save on the board configuration to apply it.`,
+      );
     },
-    [
-      updateTransitionMeta,
-      formMap,
-      syncStageTransitions,
-      transitionsByTempId,
-      reloadTransitionsFromServer,
-      stages,
-    ],
+    [updateTransitionMeta, formMap],
   );
 
   const handleCloseEdgeForm = useCallback(() => {
@@ -2069,40 +2017,17 @@ const BoardStageConfigScreen = ({
           formId = created.id;
           toast.success(`Form "${formData.formName}" added`);
         }
+        // Stage the link locally; handleSave persists it with the rest of the
+        // graph. A sync + reload here would replace unsaved local edges.
         const pairs = edgeFormAllPairs ?? [{ fromTempId, toTempId }];
-        // One sync for ALL pairs: a per-pair syncStageTransitions loop wipes
-        // earlier pairs' formIds (each full-replace reload leaves only the last).
-        const metaOverrides = new Map<string, Partial<TransitionMeta>>();
         pairs.forEach(pair => {
           updateTransitionMeta(pair.fromTempId, pair.toTempId, { formId });
-          metaOverrides.set(`${pair.fromTempId}->${pair.toTempId}`, { formId });
         });
-        const allSaved = pairs.every(pair => {
-          const fromStage = stages.find(s => s.tempId === pair.fromTempId);
-          const toStage = stages.find(s => s.tempId === pair.toTempId);
-          return !!fromStage?.id && !!toStage?.id;
-        });
-        if (!allSaved) {
+        if (!edgeEditFormId) {
           toast.info(
             'Form saved. Click Save on the board configuration to link it to this transition.',
           );
-          setIsEdgeFormOpen(false);
-          setEdgeFormTarget(null);
-          setEdgeFormAllPairs(null);
-          setEdgeEditFormId(null);
-          setEdgeEditFormData(null);
-          return;
         }
-
-        const allEdgeTransitions = new Map(transitionsByTempId);
-        pairs.forEach(pair => {
-          const targets = new Set(allEdgeTransitions.get(pair.fromTempId) ?? []);
-          targets.add(pair.toTempId);
-          allEdgeTransitions.set(pair.fromTempId, targets);
-        });
-        await syncStageTransitions({}, metaOverrides, allEdgeTransitions);
-        hasLoadedTransitions.current = false;
-        await reloadTransitionsFromServer();
         setIsEdgeFormOpen(false);
         setEdgeFormTarget(null);
         setEdgeFormAllPairs(null);
@@ -2121,10 +2046,6 @@ const BoardStageConfigScreen = ({
       edgeEditFormId,
       buildStageFormRequest,
       updateTransitionMeta,
-      syncStageTransitions,
-      transitionsByTempId,
-      reloadTransitionsFromServer,
-      stages,
     ],
   );
 

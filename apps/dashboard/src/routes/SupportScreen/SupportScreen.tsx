@@ -88,7 +88,6 @@ import {
   BarchartDefault as BarChart3,
   UserPlus,
   InformationCircle as InfoIcon,
-  File02Text,
   File02Plus,
 } from '@xyne/icons';
 import ChannelIcon from '../../components/Chat/ChannelIcon/ChannelIcon';
@@ -301,8 +300,6 @@ import {
   setCloudAgentOpenTicket,
 } from '../../components/xyne-desk/CloudAgentDock/CloudAgentDock';
 import { getOzonetelToolbar, getPhoneFieldNames } from '../../services/clients/telephonyApi';
-import CanvasScreen from '../../components/Canvas/CanvasScreen';
-import DeskCanvasList from '../../components/xyne-desk/DeskCanvasList';
 import { AddThreadToCanvasDialog } from '../../components/xyne-desk/AddThreadToCanvasDialog';
 
 // Unified type for tickets from the supportTicketsFiltered query
@@ -731,8 +728,6 @@ const SupportScreen = (): ReactElement => {
       params.delete('metrics');
       params.delete('topics');
       params.delete('settings');
-      params.delete('view');
-      params.delete('canvasId');
       const qs = params.toString();
       const path = next ? `${supportBase}/${next}` : supportBase;
       void navigate(qs ? `${path}?${qs}` : path, { replace: true });
@@ -2016,24 +2011,6 @@ const SupportScreen = (): ReactElement => {
   useEffect(() => {
     setIsReportOpen(searchParams.get('report') === 'open');
   }, [searchParams]);
-
-  // A search param, not a path segment: `canvases` would collide with :ticketId.
-  const isCanvasesView = searchParams.get('view') === 'canvases';
-  const openCanvasId = isCanvasesView ? searchParams.get('canvasId') : null;
-
-  // Steps back one level: canvas → list → tickets.
-  const stepBackFromCanvas = useCallback((): void => {
-    setSearchParams(
-      prev => {
-        const p = new URLSearchParams(prev);
-        const hadCanvas = p.has('canvasId');
-        p.delete('canvasId');
-        if (!hadCanvas) p.delete('view');
-        return p;
-      },
-      { replace: true },
-    );
-  }, [setSearchParams]);
 
   useEffect(() => {
     localStorage.setItem('support-view-mode', viewMode);
@@ -3751,42 +3728,6 @@ const SupportScreen = (): ReactElement => {
                           </button>
                         </Tooltip>
                       )}
-                      {isSelectedChannelJoined &&
-                        selectedChannelId &&
-                        selectedChannelId !== ALL_CHANNELS_ID && (
-                          <Tooltip
-                            content={isCanvasesView ? 'Back to tickets' : 'Canvases'}
-                            side='bottom'
-                          >
-                            <button
-                              // Enters and leaves the canvases area outright; the
-                              // back row inside it is what steps one level.
-                              onClick={() =>
-                                setSearchParams(
-                                  prev => {
-                                    const p = new URLSearchParams(prev);
-                                    p.delete('canvasId');
-                                    if (isCanvasesView) p.delete('view');
-                                    else p.set('view', 'canvases');
-                                    return p;
-                                  },
-                                  { replace: true },
-                                )
-                              }
-                              className={cn(
-                                'p-1.5 rounded transition-colors',
-                                isCanvasesView
-                                  ? 'bg-muted text-foreground'
-                                  : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-                              )}
-                              data-track-category='Support'
-                              data-track-name='ToggleDeskCanvases'
-                              data-track-metadata={JSON.stringify({ channelId: selectedChannelId })}
-                            >
-                              <File02Text size={16} />
-                            </button>
-                          </Tooltip>
-                        )}
                       {isSelectedChannelJoined && (
                         <button
                           onClick={() => {
@@ -3820,8 +3761,6 @@ const SupportScreen = (): ReactElement => {
                       'relative flex h-14 shrink-0 items-center justify-between gap-2 px-4 min-w-0',
                       // Ticket filters mean nothing while a desk app stands in for the list.
                       openDeskAppId && 'hidden',
-                      // Ticket-list chrome — nothing in it applies to canvases.
-                      isCanvasesView && 'hidden',
                     )}
                   >
                     {isSelectedChannelJoined && (
@@ -4672,44 +4611,6 @@ const SupportScreen = (): ReactElement => {
                           ? { channelTitle: selectedChannelName }
                           : {})}
                       />
-                    </div>
-                  ) : isCanvasesView ? (
-                    <div className='flex h-full min-h-0 flex-col'>
-                      {/* One row for both levels: canvas → canvases, list → tickets. */}
-                      <div className='flex shrink-0 items-center gap-2 px-4 pt-3'>
-                        <button
-                          onClick={stepBackFromCanvas}
-                          className='p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors shrink-0'
-                          aria-label={openCanvasId ? 'Back to canvases' : 'Back to tickets'}
-                          data-track-category='Support'
-                          data-track-name='BackFromDeskCanvases'
-                        >
-                          <ArrowLeft size={18} />
-                        </button>
-                        <span className='text-sm text-muted-foreground'>
-                          {openCanvasId ? 'Canvases' : 'Tickets'}
-                        </span>
-                      </div>
-                      <div className='min-h-0 flex-1'>
-                        {/* Same split as the chat panel's canvas tab: list, then editor. */}
-                        {openCanvasId ? (
-                          <CanvasScreen canvasId={openCanvasId} />
-                        ) : (
-                          <DeskCanvasList
-                            channelId={selectedChannelId}
-                            onSelect={canvasId =>
-                              setSearchParams(
-                                prev => {
-                                  const p = new URLSearchParams(prev);
-                                  p.set('canvasId', canvasId);
-                                  return p;
-                                },
-                                { replace: true },
-                              )
-                            }
-                          />
-                        )}
-                      </div>
                     </div>
                   ) : (
                     <>
@@ -6941,9 +6842,7 @@ export const SupportTicketDetail = ({
                     ticket={ticket}
                     onSuccess={canvasId => {
                       toast.success('Building canvas from this thread');
-                      void navigate(
-                        `${supportBase}/${channelId}?view=canvases&canvasId=${canvasId}`,
-                      );
+                      void navigate(`/chat/canvas/${canvasId}`);
                     }}
                   />
                 )}

@@ -4,31 +4,14 @@ import { db } from '@/database/client';
 import { runAsServiceActor } from '@/database/tenant/context';
 import { convertMarkdownToBlockNote } from '@/services/canvasService';
 import { readFromYSweetStrict, syncToYSweet } from '@/utils/ysweetUtils';
-import type { BlockNoteBlock } from '@/types/blockNoteTypes';
-import type { CanvasMetadata } from '@/services/deskThreadCanvasService';
-import { randomUUID } from 'crypto';
+import { paragraphBlocks, type CanvasMetadata } from '@/services/deskThreadCanvasService';
 
 const FALLBACK_AUTHOR = 'desk-thread-canvas';
 const FAILURE_REASON = 'Unexpected persistence failure';
 
 /** Replaces the "Generating canvas from thread…" placeholder seeded at dispatch. */
-function buildFailureBlocks(reason: string): BlockNoteBlock[] {
-  return [
-    {
-      id: randomUUID(),
-      type: 'paragraph',
-      props: { textColor: 'default', backgroundColor: 'default', textAlignment: 'left' },
-      content: [
-        {
-          type: 'text',
-          text: `Couldn't generate this canvas from the ticket thread: ${reason}`,
-          styles: {},
-        },
-      ],
-      children: [],
-    } as BlockNoteBlock,
-  ];
-}
+const buildFailureBlocks = (reason: string) =>
+  paragraphBlocks(`Couldn't generate this canvas from the ticket thread: ${reason}`);
 
 // The agent is asked for {"markdown": "..."} but may wrap it in a fence. Sliced,
 // not matched: the obvious fence regex backtracks quadratically on agent-

@@ -1,11 +1,10 @@
 import { randomUUID } from 'crypto';
 import type { Canvas, Ticket } from '@prisma/client';
-import { CanvasRole, TagMethod, TicketReferenceRelation } from '@xyne/shared';
+import { CanvasRole, TicketReferenceRelation } from '@xyne/shared';
 import { db } from '@/database/client';
 import { logger } from '@/utils/logger';
 import { config } from '@/config/env';
 import { runScopedClawAgent, ClawAgentNotAvailableError } from '@/services/clawAgentService';
-import { tagRepository } from '@/database/repositories/tagRepository';
 import { initializeYSweetDoc } from '@/utils/ysweetUtils';
 import { newConnectId } from '@/database/connectGroup';
 import { createCanvasWithConnectGroupTx } from '@/bypassAcl/transactions/connectGroupEntities';
@@ -49,9 +48,6 @@ function isGenerationStuck(metadata: CanvasMetadata): boolean {
   return Date.now() - startedAt > STUCK_GENERATION_MS;
 }
 
-const CANVAS_LABEL_SOURCE_TYPE = 'canvas';
-const CANVAS_LABEL_CATEGORY = 'generic';
-
 interface DeskThreadCanvasDispatchInput {
   ticket: Ticket;
   user: { id: string; name: string | null; email: string; workspaceId: string };
@@ -62,6 +58,19 @@ interface DeskThreadCanvasDispatchInput {
    *  the acting user (its priority-1 path) rather than relying on the shared
    *  S2S key. Mirrors clawIdentity in api/sdk/direct.ts. */
   cookie?: string | undefined;
+}
+
+/** Single-paragraph canvas body: the generating placeholder and the failure notice. */
+export function paragraphBlocks(text: string): BlockNoteBlock[] {
+  return [
+    {
+      id: randomUUID(),
+      type: 'paragraph',
+      props: { textColor: 'default', backgroundColor: 'default', textAlignment: 'left' },
+      content: [{ type: 'text', text, styles: {} }],
+      children: [],
+    } as BlockNoteBlock,
+  ];
 }
 
 /** One canvas per ticket: found by its (indexed) home channel + metadata.ticketId. */
@@ -152,16 +161,7 @@ async function findOrCreateTicketCanvas(args: {
   );
   await ensureChannelParticipant(canvasId, ticket.channelId, workspaceId);
 
-  const placeholder: BlockNoteBlock[] = [
-    {
-      id: randomUUID(),
-      type: 'paragraph',
-      props: { textColor: 'default', backgroundColor: 'default', textAlignment: 'left' },
-      content: [{ type: 'text', text: 'Generating canvas from thread…', styles: {} }],
-      children: [],
-    } as BlockNoteBlock,
-  ];
-  const initialized = await initializeYSweetDoc(canvasId, placeholder, userId);
+  const initialized = await initializeYSweetDoc(canvasId, paragraphBlocks('Generating canvas from thread…'), userId);
   if (!initialized) {
     // Non-fatal: the callback syncs real content over syncToYSweet either way.
     logger.warn('[DeskThreadCanvas] placeholder seed failed — canvas row created empty', { canvasId });
@@ -193,32 +193,6 @@ async function resolveConversationIds(ticket: Ticket, includeMerged: boolean): P
     if (mapping.sourceTicket.conversationId) ids.push(mapping.sourceTicket.conversationId);
   }
   return [...new Set(ids)];
-}
-
-/** Mirrors canvasController.addCanvasLabel — dedupe first, insertTagRow throws
- *  on the tag unique constraint otherwise. */
-async function applyLabels(canvasId: string, labels: string[], userId: string, workspaceId: string): Promise<void> {
-  const names = [...new Set(labels.map((label) => label.trim()).filter(Boolean))];
-  if (names.length === 0) return;
-
-  const existingRows = await tagRepository.findActiveTags(canvasId, CANVAS_LABEL_SOURCE_TYPE, CANVAS_LABEL_CATEGORY);
-  const existing = new Set(existingRows.map((row) => row.tag.toLowerCase()));
-
-  for (const name of names) {
-    if (existing.has(name.toLowerCase())) continue;
-    await tagRepository.insertTagRow({
-      sourceId: canvasId,
-      sourceType: CANVAS_LABEL_SOURCE_TYPE,
-      workspaceId,
-      configKey: null,
-      tagCategory: CANVAS_LABEL_CATEGORY,
-      tag: name,
-      method: TagMethod.MANUAL,
-      reason: null,
-      createdBy: userId,
-      updatedBy: userId,
-    });
-  }
 }
 
 /** Inlined into the prompt because no MCP tool covers Message rows. `visibleTo
@@ -306,13 +280,6 @@ async function dispatch(input: DeskThreadCanvasDispatchInput): Promise<{ canvasI
     workspaceId: user.workspaceId,
     sessionId,
   });
-
-  try {
-    await applyLabels(canvas.id, labels, user.id, user.workspaceId);
-  } catch (err) {
-    // Labels are best-effort — never block generation on them.
-    logger.warn('[DeskThreadCanvas] applying labels failed — continuing', { canvasId: canvas.id, error: err });
-  }
 
   // Without orgId the same slug can surface once per org, and the dispatch may
   // pick an agent whose Spaces app lives elsewhere (see ScopedClawIdentity).

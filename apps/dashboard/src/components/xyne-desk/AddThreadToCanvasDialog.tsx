@@ -118,6 +118,10 @@ export const AddThreadToCanvasDialog = ({
         `/tickets/${ticket.id}/canvas`,
         { scope, labels, includeMerged },
       );
+      // Existing label endpoint; best-effort so a label failure never blocks the canvas.
+      await Promise.allSettled(
+        labels.map(label => canvasLabelsApi.addCanvasLabel(response.data.canvasId, label)),
+      );
       onOpenChange(false);
       onSuccess(response.data.canvasId);
     } catch (err) {

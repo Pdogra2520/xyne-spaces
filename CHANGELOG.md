@@ -1,3 +1,18 @@
+## [1.495.0](https://github.com/juspay/xyne-spaces/compare/v1.494.0...v1.495.0) (2026-10-13)
+
+
+### Features
+
+* Xyne AI/Agents Enhancements ([#2228](https://github.com/juspay/xyne-spaces/issues/2228)) ([f4cd41e](https://github.com/juspay/xyne-spaces/commit/f4cd41e4fc4718a217aab3e9fbede6e94a542585))
+
+
+### Bug Fixes
+
+* ignore enter while an IME is composing in message edit and claw composer ([#2934](https://github.com/juspay/xyne-spaces/issues/2934)) ([7f614e4](https://github.com/juspay/xyne-spaces/commit/7f614e4dedbfd99190f9ea3dc9f9fff36db58629))
+* kata-sdk delete SandboxClaim when createSession ready-wait fails ([#2985](https://github.com/juspay/xyne-spaces/issues/2985)) ([7e97274](https://github.com/juspay/xyne-spaces/commit/7e9727471c107616702d3e091dbea74a1aabc468))
+* release all stream buffers on abort and live-viewer close ([#2936](https://github.com/juspay/xyne-spaces/issues/2936)) ([4de0fcb](https://github.com/juspay/xyne-spaces/commit/4de0fcbd4a928d7e337f8e0e8403c821f801c310))
+* stop title polling for chats opened from xyne ai history ([#2939](https://github.com/juspay/xyne-spaces/issues/2939)) ([242def8](https://github.com/juspay/xyne-spaces/commit/242def83db4aeded5c1884e15eb9f2a8e8f27428))
+
 ## [1.494.0](https://github.com/juspay/xyne-spaces/compare/v1.493.0...v1.494.0) (2026-10-13)
 
 

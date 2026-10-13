@@ -42,7 +42,9 @@ export const resolveDevicePlatform = (req: Request): DevicePlatform => {
 
   if (platformHeader === 'electron' || userAgent.includes('electron')) return 'electron';
   if (platformHeader === 'native' || platformHeader === 'mobile') {
-    return userAgent.includes('android') ? 'android' : 'ios';
+    // The native mTLS clients send no custom user agent: Android's default is
+    // okhttp, iOS's is CFNetwork/Darwin.
+    return userAgent.includes('android') || userAgent.includes('okhttp') ? 'android' : 'ios';
   }
   return 'web';
 };

@@ -2027,7 +2027,10 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
               detach: xyneAIStreamManager.attachLiveViewer(
                 threadId,
                 sessionId,
-                effectiveAgentSlugRef.current || 'ask-ai',
+                // Attach as the in-flight turn's agent, not the selected one (XYNE-66346).
+                [...loadedMessages].reverse().find(m => m.agentSlug)?.agentSlug ||
+                  effectiveAgentSlugRef.current ||
+                  'ask-ai',
                 loadedMessages,
               ),
             };
@@ -2633,7 +2636,7 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
                             detach: xyneAIStreamManager.attachLiveViewer(
                               threadId,
                               conversationId,
-                              effectiveAgentSlug || 'ask-ai',
+                              message.agentSlug || effectiveAgentSlug || 'ask-ai',
                               xyneAIStreamManager.getActiveStream(threadId)?.messages ?? messages,
                             ),
                           };

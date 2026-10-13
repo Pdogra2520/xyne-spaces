@@ -6,7 +6,7 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { isValidUrl } from '@/utils/urlUtils';
 import { db } from '@/database/client';
-import { withWorkspaceScope } from '@/database/tenant/context';
+import { withWorkspaceScope, isRequestContext } from '@/database/tenant/context';
 import { claimAppSigningSecret, findOrgAppTemplate } from '@/bypassAcl/appServices';
 import { syncInstalledCommandsTx } from '@/bypassAcl/transactions/appUtils';
 
@@ -34,9 +34,12 @@ async function syncInstalledCommands(installedAppId: string, appId: string, work
  */
 export async function installApp(appId: string, workspaceId: string) {
   try {
-    // Template may be tenant-keyed to a sibling workspace (its creator's): the lookup is
-    // relocated to findOrgAppTemplate; callers check org eligibility beforehand.
-    const app = await findOrgAppTemplate(appId);
+    // User requests go through AppsACL (org-wide visibility) so findById works cross-workspace.
+    // Service actors skip AppsACL and fall back to { workspaceId: ws }, so they need the
+    // unscoped lookup. Org eligibility is checked by the caller in both paths.
+    const app = isRequestContext()
+      ? await repositories.apps.findById(appId)
+      : await findOrgAppTemplate(appId);
     if (!app) {
       throw new Error(`[INSTALL-APP] App with ID ${appId} not found`);
     }

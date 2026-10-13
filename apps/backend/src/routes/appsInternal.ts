@@ -84,7 +84,7 @@ async function ensureOrgApp(input: z.infer<typeof ensureInstalledSchema>): Promi
     return { appId: created.id, signingSecretEnc: created.signingSecret, appCreated: true };
   } catch (err) {
     // Lost a concurrent create race — adopt whatever the winner created.
-    if (err instanceof Error && err.message.includes('already exists')) {
+    if (err instanceof Error && err.message.includes(`App with name '${input.name}' already exists`)) {
       const winner = (await findOrgAppsByName(input.orgId, input.name))[0];
       if (winner) {
         await ensureOrgAppConfig(winner.id, winner.workspaceId, {

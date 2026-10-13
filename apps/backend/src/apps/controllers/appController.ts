@@ -3,13 +3,11 @@ import { AccessType } from '@xyne/shared';
 import { z } from 'zod';
 import { repositories } from '@/database/repositories';
 import { db } from '@/database/client';
-import { CreateAppInput } from '@/database/repositories/appsRepository';
 import { logger } from '@/utils/logger';
 import { installApp, configureWebhook, regenerateJwt, getSigningSecret } from '../core/appUtils';
+import { createOrgApp } from '../core/appCreate';
 import { isValidUrl } from '@/utils/urlUtils';
 import { UserManagementService } from '@/services/userManagementService';
-import { vespaQueue } from '@/queues/vespaQueue';
-import { appSchema } from '@/vespa/src/types';
 import { withWorkspaceScope } from '@/database/tenant/context';
 import { promoteAppToGlobal } from '@/bypassAcl/appServices';
 
@@ -95,22 +93,7 @@ export class AppController {
         return;
       }
 
-      // Create app data
-      const appData: CreateAppInput = {
-        name,
-        description,
-        createdBy: userId,
-        orgId: workspace.orgId,
-      };
-
-      // Create the app
-      const app = await repositories.apps.createApp(appData);
-
-      // Queue Vespa indexing for the new app (worker fetches + maps by docId).
-      vespaQueue
-        .addJob({ schema: appSchema, jobType: 'feed', docId: app.id })
-        .catch((err) => logger.error(`Failed to queue Vespa feed for app ${app.id}:`, err));
-
+      const app = await createOrgApp({ name, description, createdBy: userId, orgId: workspace.orgId });
       res.status(201).json(app);
     } catch (error) {
       logger.error('Error creating external app:', error);

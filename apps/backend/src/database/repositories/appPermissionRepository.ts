@@ -1,6 +1,6 @@
 import { setAppPermissionsTx } from '@/bypassAcl/transactions/appPermissionRepository';
 import { BaseRepository } from './base';
-import { currentWorkspaceId } from '@/database/tenant/context';
+import { currentWorkspaceId, isRequestContext } from '@/database/tenant/context';
 import { listAppTemplatePermissionRefs } from '@/bypassAcl/appServices';
 import { type Prisma, type AvailableAppPermission } from '@prisma/client';
 
@@ -192,9 +192,12 @@ export class AppPermissionRepository extends BaseRepository<
 
 
   async copyFromApp(appId: string, installedAppId: string): Promise<void> {
-    // Template rows are creator-workspace stamped, not necessarily the install workspace:
-    // the cross-tenant read is relocated to listAppTemplatePermissionRefs (bypassAcl).
-    const grants = await listAppTemplatePermissionRefs(appId);
+    // User requests go through AppPermissionACL (org-wide visibility) so the ACL'd findMany
+    // works cross-workspace. Service actors skip AppPermissionACL and fall back to
+    // { workspaceId: ws }, missing permissions stamped with the creator's workspace.
+    const grants = isRequestContext()
+      ? await this.db.appPermission.findMany({ where: { appId }, select: { permissionId: true } })
+      : await listAppTemplatePermissionRefs(appId);
     if (grants.length === 0) return;
 
     const workspaceId = currentWorkspaceId();

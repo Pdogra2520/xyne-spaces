@@ -33,8 +33,7 @@ import { db } from '@/database/client';
 import { AppError } from '@/middleware/errorHandler';
 import { SYSTEM_USER_ID } from '@/database/tenant/context';
 import { ensureUserInGeneralChannel } from '@/utils/workspaceGeneralChannel';
-import { vespaQueue } from '@/queues/vespaQueue';
-import { appSchema } from '@/vespa/src/types';
+import { createOrgApp, setAppTemplatePermissions } from '@/apps/core/appCreate';
 import { asSystem, asService, rawQuery } from './base';
 
 /**
@@ -183,7 +182,16 @@ export function ensureOrgAppConfig(appId: string, appWorkspaceId: string, config
         const available = new Set(registry.map((p) => `${p.name}:${String(p.type).toLowerCase()}`));
         const grantable = config.permissions.filter((s) => available.has(s));
         if (grantable.length > 0) {
-          await repositories.appPermissions.setAppPermissions(appId, grantable);
+          // Only write (and bump) when the set actually changed — claw-auth calls this on every
+          // workspace sync, so an unconditional bump would show "Update" on every restart.
+          const current = await repositories.appPermissions.getAppPermissions(appId);
+          const currentSet = new Set(current);
+          const grantableSet = new Set(grantable);
+          const changed =
+            grantable.some((s) => !currentSet.has(s)) || current.some((s) => !grantableSet.has(s));
+          if (changed) {
+            await setAppTemplatePermissions(appId, grantable);
+          }
         }
       }
     },
@@ -227,18 +235,7 @@ export function provisionOrgApp(input: ProvisionOrgAppInput) {
         throw new AppError('No active user available to own the app in this workspace', 409);
       }
 
-      const app = await repositories.apps.createApp({
-        name: input.name,
-        description: input.description,
-        createdBy: creator.id,
-        orgId: input.orgId,
-      });
-
-      vespaQueue
-        .addJob({ schema: appSchema, jobType: 'feed', docId: app.id })
-        .catch((err) => logger.error(`Failed to queue Vespa feed for app ${app.id}:`, err));
-
-      return app;
+      return createOrgApp({ name: input.name, description: input.description, createdBy: creator.id, orgId: input.orgId });
     },
   );
 }

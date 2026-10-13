@@ -1,6 +1,7 @@
 import { type Request, type Response } from 'express';
 import { AppPermissionStatus } from '@xyne/shared';
 import { repositories } from '@/database/repositories';
+import { setAppTemplatePermissions } from '@/apps/core/appCreate';
 
 export class PermissionController {
   /**
@@ -68,9 +69,7 @@ export class PermissionController {
         res.status(403).json({ error: 'Only the app creator can modify this app', code: 'FORBIDDEN' });
         return;
       }
-      await repositories.appPermissions.setAppPermissions(appId, permissions);
-      // Template permissions changed -> bump version so installs surface the Update prompt.
-      await repositories.apps.bumpVersion(appId);
+      await setAppTemplatePermissions(appId, permissions);
       res.status(200).json({ ok: true });
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Internal server error';

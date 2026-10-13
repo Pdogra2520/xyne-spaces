@@ -59,7 +59,6 @@ type UserPreferenceRow = {
   threadReplyNotificationsEnabled: boolean;
   channelWideMentionsEnabled: boolean;
   notificationKeywords?: string[];
-  /** Parsed working-hours schedule; null/undefined = always notify. */
   notificationSchedule?: NotificationSchedule | null;
 };
 
@@ -467,11 +466,7 @@ async function filterUsersInner(
       continue;
     }
 
-    // ─── Working-hours gate (regular channels only) ───────────────────────
-    // Placed AFTER the 1:1 DM path, and skipped for group DMs (which arrive
-    // with isDMChannel=false, isGroupDM=true), so both kinds of DM still
-    // notify outside working hours. Calls never pass through this filter.
-    // The manual pause (Layer 1) still wins over everything.
+    // ─── Working-hours gate (skipped for 1:1 and group DMs) ───────────────
     if (!isGroupDM && isOutsideWorkingHours(pref?.notificationSchedule ?? null)) {
       emitDecisionTrace(userId, {
         channelId, context, isDMChannel, isGroupDM,
@@ -651,9 +646,6 @@ async function filterGlobalUsersInner(
     const pref = userPrefMap.get(userId);
 
     // ─── Working-hours gate ───────────────────────────────────────────────
-    // Global (non-channel) notifications — ticket updates, canvas mentions
-    // outside a channel, etc. — are not DMs, so they are muted outside the
-    // user's working hours just like channel notifications.
     const schedule = parseNotificationSchedule(pref?.notificationSchedule);
     if (isOutsideWorkingHours(schedule)) {
       emitDecisionTrace(userId, {

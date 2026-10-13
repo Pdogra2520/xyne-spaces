@@ -1,33 +1,15 @@
-// Working-hours notification schedule ("Availability").
-//
-// A user can set the days and hours they want to be notified. Outside those
-// hours, channel notifications are muted until the next window starts; 1:1 DMs,
-// group DMs and incoming calls are NOT gated by this schedule (the caller
-// decides which paths to apply it to — see notificationFilterService).
-//
-// Shared between the client and server Zero mutators (validation) and the
-// backend notification filter (evaluation), so all sides agree on the rules.
-//
-// All wall-clock math is done in the user's own saved IANA time zone via
-// Intl.DateTimeFormat. Nothing here assumes a fixed zone, and daylight-saving
-// changes are handled because we always compare local wall-clock time.
-
 export const NOTIFICATION_SCHEDULE_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const MAX_NOTIFICATION_SCHEDULE_TIMEZONE_LENGTH = 100;
 
-/** One working window. `day` is 0 = Sunday … 6 = Saturday, in the user's zone. */
 export interface NotificationScheduleDay {
   day: number;
-  /** "HH:mm", 24-hour, inclusive. */
   start: string;
-  /** "HH:mm", 24-hour, exclusive. If end < start the window runs overnight into the next day. */
   end: string;
 }
 
 export interface NotificationSchedule {
   enabled: boolean;
   days: NotificationScheduleDay[];
-  /** IANA time zone the user configured, e.g. "America/New_York". */
   timeZone: string;
 }
 
@@ -47,11 +29,6 @@ function toMinutes(hhmm: string): number {
   return h * 60 + m;
 }
 
-/**
- * Validate and normalise a schedule. Throws a descriptive Error on invalid
- * input — the mutators rely on this to reject bad writes on both client and
- * server. Days are de-duplicated (one window per day) and sorted.
- */
 export function normalizeNotificationSchedule(raw: NotificationSchedule): NotificationSchedule {
   if (!raw || typeof raw !== 'object') throw new Error('Invalid notification schedule');
   if (typeof raw.enabled !== 'boolean') throw new Error('Notification schedule "enabled" must be a boolean');
@@ -81,11 +58,6 @@ export function normalizeNotificationSchedule(raw: NotificationSchedule): Notifi
   return { enabled: raw.enabled, days, timeZone: raw.timeZone };
 }
 
-/**
- * Parse the stored stringified-JSON schedule. Returns null for empty,
- * malformed or invalid values — callers treat null as "always notify", so a
- * corrupt row can never silently mute someone.
- */
 export function parseNotificationSchedule(
   value: string | null | undefined,
 ): NotificationSchedule | null {
@@ -100,8 +72,6 @@ export function parseNotificationSchedule(
 const WEEKDAY_INDEX: Record<string, number> = {
   Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
 };
-
-/** Day of week (0–6) and minute of day (0–1439) for `now` in `timeZone`. */
 export function getZonedDayAndMinute(now: Date, timeZone: string): { day: number; minute: number } {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
@@ -117,12 +87,6 @@ export function getZonedDayAndMinute(now: Date, timeZone: string): { day: number
   return { day, minute: hour * 60 + minute };
 }
 
-/**
- * True when `now` falls outside every working window of an ACTIVE schedule.
- * A missing, disabled or empty schedule always returns false (= notify).
- * Windows where end < start run overnight: e.g. Mon 22:00–06:00 covers
- * Monday from 22:00 and Tuesday until 06:00.
- */
 export function isOutsideWorkingHours(
   schedule: NotificationSchedule | null | undefined,
   now: Date = new Date(),
@@ -139,7 +103,6 @@ export function isOutsideWorkingHours(
     if (start < end) {
       if (window.day === day && minute >= start && minute < end) return false;
     } else {
-      // Overnight window.
       if (window.day === day && minute >= start) return false;
       if (window.day === previousDay && minute < end) return false;
     }
@@ -147,11 +110,6 @@ export function isOutsideWorkingHours(
   return true;
 }
 
-/**
- * The next working-window start after `now`, in the user's zone — used by the
- * UI for "Channel notifications muted until 09:00". Returns null when the
- * schedule is inactive.
- */
 export function getNextWorkingHoursStart(
   schedule: NotificationSchedule | null | undefined,
   now: Date = new Date(),

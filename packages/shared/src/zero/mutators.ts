@@ -10722,9 +10722,6 @@ export const mutators = defineMutators({
         }
       },
     ),
-    // Working-hours ("Availability") schedule. Outside these hours channel
-    // notifications are muted; 1:1 DMs, group DMs and calls still notify.
-    // Pass schedule: null to clear it. Only ever writes the caller's own row.
     setNotificationSchedule: defineMutator(
       z.object({
         id: z.string(),

@@ -206,9 +206,12 @@ export const getActivityDescription = (
       const newUser = users?.find(u => u.id === value?.newValue);
       const updatedByUser = users?.find(u => u.id === activity.updatedBy);
 
-      // Auto-assigned by the system (email classification worker)
+      // Auto-assigned by the system (email classification worker). 'Existing ticket group'
+      // comes from an assignment-only retry, where the ticket already had its group.
       const isAutoAssigned =
-        value?.reason === 'AI classification' || value?.reason === 'Default channel group';
+        value?.reason === 'AI classification' ||
+        value?.reason === 'Default channel group' ||
+        value?.reason === 'Existing ticket group';
       if (isAutoAssigned) {
         return {
           description: 'Auto-assigned',

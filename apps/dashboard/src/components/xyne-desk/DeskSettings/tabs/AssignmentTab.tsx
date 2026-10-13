@@ -6,6 +6,7 @@ import { useUserGroups } from '../../../../hooks/useUserGroup';
 import { useConfirmDialog } from '../../../../hooks/useConfirmDialog';
 import { autoAssignUnassignedTickets } from '../../../../services/clients/deskAutoAssignApi';
 import Button from '../../../ui/Button';
+import { DateRangeFilter, type DateRangeValue } from '../../../ui/DateRangeFilter/DateRangeFilter';
 import type { useDeskSettingsForm } from '../useDeskSettingsForm';
 
 type DeskSettingsForm = ReturnType<typeof useDeskSettingsForm>;
@@ -18,14 +19,15 @@ export const AssignmentTab: React.FC<AssignmentTabProps> = ({ form }) => {
   const allUserGroups = useUserGroups();
   const { defaultAssigneeGroupId, setAssigneeGroup, canManage, channelId } = form;
   const [isAutoAssigning, setIsAutoAssigning] = useState(false);
+  const [dateRange, setDateRange] = useState<DateRangeValue | null>(null);
   const { confirm, ConfirmDialog } = useConfirmDialog();
 
   const handleAutoAssign = async (): Promise<void> => {
-    if (!channelId || !canManage) return;
+    if (!channelId || !canManage || !dateRange) return;
+    const formatted = `${dateRange.startDate.toLocaleDateString()} – ${dateRange.endDate.toLocaleDateString()}`;
     const confirmed = await confirm({
       title: 'Auto-assign unassigned tickets?',
-      description:
-        'Every ticket in this desk without an assignee will be assigned using the same rules as new tickets. Tickets that already have an assignee are not touched.',
+      description: `Every ticket in this desk created between ${formatted} without an assignee will be assigned using the same rules as new tickets. Tickets that already have an assignee are not touched.`,
       confirmLabel: 'Auto-assign',
     });
     if (!confirmed) return;
@@ -34,7 +36,10 @@ export const AssignmentTab: React.FC<AssignmentTabProps> = ({ form }) => {
     try {
       // Fire-and-forget by design: the sweep runs in the background and tickets
       // update live as they are assigned, so there are no final counts to report.
-      const { status } = await autoAssignUnassignedTickets(channelId);
+      const { status } = await autoAssignUnassignedTickets(channelId, {
+        from: dateRange.startDate,
+        to: dateRange.endDate,
+      });
       if (status === 'already_running') {
         toast.info('Auto-assignment is already running for this desk', {
           description: 'Tickets will update as they are assigned.',
@@ -79,25 +84,33 @@ export const AssignmentTab: React.FC<AssignmentTabProps> = ({ form }) => {
         <div>
           <div className='text-sm font-medium text-foreground'>Auto-assign unassigned tickets</div>
           <div className='text-desk-helper w-full max-w-[400px]'>
-            Assigns every ticket without an assignee in this desk using the same rules as new
-            tickets. Runs in the background.
+            Assigns tickets without an assignee in this desk. Pick the creation date range to cover;
+            the assignment runs in the background.
           </div>
         </div>
-        <div>
+        <div className='flex flex-wrap items-center gap-[8px]'>
+          <DateRangeFilter
+            dateRange={dateRange}
+            onChange={setDateRange}
+            {...(!canManage ? { className: 'pointer-events-none opacity-50' } : {})}
+          />
           <Button
             type='button'
             variant='outline'
             size='sm'
             loading={isAutoAssigning}
-            disabled={!canManage || isAutoAssigning || !channelId}
+            disabled={!canManage || isAutoAssigning || !channelId || !dateRange}
             onClick={() => void handleAutoAssign()}
             data-track-category='DeskSettings'
             data-track-name='AutoAssignUnassignedTickets'
           >
             <UserPlus size={14} />
-            Auto-assign now
+            Auto-assign
           </Button>
         </div>
+        {!dateRange && (
+          <p className='text-desk-helper'>Select a date range to enable auto-assignment.</p>
+        )}
       </div>
 
       <ConfirmDialog />

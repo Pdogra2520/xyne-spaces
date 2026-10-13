@@ -26,22 +26,14 @@ function shouldAssignTicketPerson(
   groupChanged: boolean,
   ticketIsUnassigned: boolean,
   effectiveGroupId: string | null,
-  assignmentOnly: boolean,
 ): boolean {
-  if (boardId === null) return false;
-
-  // An assignment-only run is a retry for a ticket nobody picked up — the desk sweep, or a
-  // member becoming available again. Supplying the desk's default group makes groupChanged
-  // true for any ticket that never got a group, so honouring rule 1 here would let a retry
-  // overwrite whoever assigned the ticket by hand in the meantime.
-  if (assignmentOnly) {
-    return ticketIsUnassigned && effectiveGroupId !== null;
-  }
-
   // ASSIGN RULE:
   // 1. Group changed → assign to someone in the new group
   // 2. Ticket is unassigned + classification yielded a group → assign
-  return groupChanged || (ticketIsUnassigned && effectiveGroupId !== null);
+  return boardId !== null && (
+    groupChanged ||
+    (ticketIsUnassigned && effectiveGroupId !== null)
+  );
 }
 
 export class EmailClassificationWorker {
@@ -184,6 +176,11 @@ export class EmailClassificationWorker {
       return;
     }
 
+    const assignmentOnly = runAssignment && !runClassification;
+    if (assignmentOnly && ticket.userGroupId) {
+      effectiveGroupId = ticket.userGroupId;
+    }
+
     const groupChanged = effectiveGroupId !== null && effectiveGroupId !== ticket.userGroupId;
     const ticketIsUnassigned = !ticket.assignedTo;
 
@@ -197,7 +194,6 @@ export class EmailClassificationWorker {
       groupChanged,
       ticketIsUnassigned,
       effectiveGroupId,
-      runAssignment && !runClassification,
     );
 
     const updatePayload: Record<string, unknown> = {
@@ -248,9 +244,6 @@ export class EmailClassificationWorker {
               `[EMAIL-CLASSIFICATION-WORKER] Full-role assigned ticket ${ticketId}: primary=${primaryUserId}`,
             );
           } else {
-            // Without this the full-role path fails silently — the branch below logs a
-            // warn, so the desk flow that actually uses roles was the one saying nothing.
-            // The ticket stays unassigned and nothing retries it.
             logger.warn(
               `[EMAIL-CLASSIFICATION-WORKER] No primary assignee for ticket ${ticketId} (group ${effectiveGroupId}, board ${ticket.boardId}) — ticket left unassigned; see [Assignment] evaluateRoleSlots results for the reason`,
             );
@@ -290,10 +283,25 @@ export class EmailClassificationWorker {
     }
 
     if (hasMeaningfulUpdates) {
-      const updatedTicket = await prisma.ticket.update({
-        where: { id: ticketId },
-        data: updatePayload,
-      });
+      let updatedTicket;
+      if (assignmentOnly && updatePayload.assignedTo) {
+        const { count } = await prisma.ticket.updateMany({
+          where: { id: ticketId, assignedTo: null },
+          data: updatePayload,
+        });
+        if (count === 0) {
+          logger.info(
+            `[EMAIL-CLASSIFICATION-WORKER] Ticket ${ticketId} was claimed by someone else while this retry was queued; leaving it as is`,
+          );
+          return;
+        }
+        updatedTicket = await prisma.ticket.findUniqueOrThrow({ where: { id: ticketId } });
+      } else {
+        updatedTicket = await prisma.ticket.update({
+          where: { id: ticketId },
+          data: updatePayload,
+        });
+      }
 
       try {
         await syncConversationTicketMdFromPrismaTicket(prisma, updatedTicket);

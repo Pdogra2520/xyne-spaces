@@ -57,7 +57,12 @@ import { useTranscript } from '../Assistant/useTranscript';
 import type { AssistantActions } from '../Assistant/useAssistantActions';
 import { AIComposer, type AIComposerAttachment, type AIComposerHandle } from './AIComposer';
 import { ReadonlyContextPills, useSentMentions } from './ReadonlyContextPills';
-import { type ComposerContext, toStreamOverrides, withoutPickedContext } from './composerContext';
+import {
+  type ComposerContext,
+  toStreamOverrides,
+  toTurnStreamOverrides,
+  withoutPickedContext,
+} from './composerContext';
 import { AgentByline, AgentRecipient } from './ConversationAgents';
 import { FollowUpSuggestions } from './FollowUpSuggestions';
 import {
@@ -1479,6 +1484,16 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
   const [composerSeed] = useState(() =>
     initialQuery && initialExtras ? withoutPickedContext(initialExtras) : initialExtras,
   );
+  // The composer's latest snapshot, so regenerate/edit can re-run a turn with
+  // the toggles (web search, model, …) the user currently has on.
+  const latestComposerContextRef = useRef<ComposerContext | null>(composerSeed ?? null);
+  const handleComposerContextChange = useCallback(
+    (context: ComposerContext): void => {
+      latestComposerContextRef.current = context;
+      onContextChange?.(context);
+    },
+    [onContextChange],
+  );
   const dropZoneRef = useRef<HTMLDivElement | null>(null);
   const dragCounterRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -1809,13 +1824,17 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
       lastUserMessage.attachments ?? [],
       lastUserMessage.selectionContexts,
       lastUserMessage.content,
-      undefined, // userTags
+      lastUserMessage.userTags,
       lastUserMessage.id, // parentMessageId
       true, // isRegenerate
       undefined, // isEditUserMessage
       undefined, // editedUserMessageId
       undefined, // parentAssistantMessageId
-      turnAgentSlug ? { agentSlug: turnAgentSlug } : undefined,
+      {
+        // Same context the turn was sent with, plus the current toggles.
+        ...toTurnStreamOverrides(lastUserMessage.attachedContext, latestComposerContextRef.current),
+        ...(turnAgentSlug ? { agentSlug: turnAgentSlug } : {}),
+      },
     );
   }, [isActiveSessionStreaming, displayMessages, abortCurrentRequest, submitQuery]);
 
@@ -1839,14 +1858,18 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
         messageToEdit.attachments ?? [],
         messageToEdit.selectionContexts,
         newContent,
-        undefined, // userTags
+        messageToEdit.userTags,
         editedParentAssistant, // parentMessageId → sibling under same parent
         undefined, // isRegenerate
         true, // isEditUserMessage
         messageToEdit.id, // editedUserMessageId
         editedParentAssistant, // parentAssistantMessageId
-        // Editing re-asks that turn, so it goes to the agent it was sent to.
-        messageToEdit.agentSlug ? { agentSlug: messageToEdit.agentSlug } : undefined,
+        {
+          // Editing re-asks that turn: same context and agent it was sent
+          // with, plus the current toggles.
+          ...toTurnStreamOverrides(messageToEdit.attachedContext, latestComposerContextRef.current),
+          ...(messageToEdit.agentSlug ? { agentSlug: messageToEdit.agentSlug } : {}),
+        },
       );
     },
     [isActiveSessionStreaming, messages, abortCurrentRequest, submitQuery],
@@ -2737,7 +2760,7 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
               onAgentChange={conversationId ? undefined : onAgentChange}
               showAgentSelector={isV2}
               initialExtras={composerSeed}
-              onContextChange={onContextChange}
+              onContextChange={handleComposerContextChange}
               pending={isAnyMessageStreaming || (assistant?.isRouting ?? false)}
               onStop={handleStop}
               assistant={assistant && assistant.actions.length > 0 ? assistant : undefined}

@@ -208,3 +208,31 @@ export function toStreamOverrides(ctx: ComposerContext): StreamOverrides {
     researchContext: ctx.research,
   };
 }
+
+/**
+ * Overrides for re-running a past turn (regenerate, edit). The context comes
+ * from what that turn was actually sent with — its persisted attachedContext
+ * pills — not from whatever the composer holds now. The toggles (web search,
+ * deep research, canvas, instant, model, thinking, sandbox) are not stored
+ * per message, so they come from the composer's current state, the same
+ * values a normal send would use. Without this the run falls back to the
+ * hook's empty defaults and silently drops both.
+ */
+export function toTurnStreamOverrides(
+  turnContext: AttachedContextItem[] | undefined,
+  composer: ComposerContext | null,
+): StreamOverrides {
+  const items = turnContext ?? [];
+  const idsOf = (type: AttachedContextItem['type']): string[] =>
+    items.filter(item => item.type === type).map(item => item.id);
+  const toggles = toStreamOverrides(withoutPickedContext(composer ?? EMPTY_COMPOSER_CONTEXT));
+  return {
+    ...toggles,
+    channelIds: idsOf('channel'),
+    ticketIds: idsOf('ticket'),
+    canvasIds: idsOf('canvas'),
+    callIds: idsOf('call'),
+    attachedContext: items,
+    displayAttachedContext: items,
+  };
+}

@@ -7,6 +7,8 @@ import { config } from '@/config/env';
 import { runScopedClawAgent, ClawAgentNotAvailableError } from '@/services/clawAgentService';
 import { tagRepository } from '@/database/repositories/tagRepository';
 import { initializeYSweetDoc } from '@/utils/ysweetUtils';
+import { newConnectId } from '@/database/connectGroup';
+import { createCanvasWithConnectGroupTx } from '@/bypassAcl/transactions/connectGroupEntities';
 import type { BlockNoteBlock } from '@/types/blockNoteTypes';
 
 // Seeded with the spaces-emails tool (seed.ts) — slug behind a constant so a
@@ -106,8 +108,11 @@ async function findOrCreateTicketCanvas(args: {
 
   const now = new Date();
   const canvasId = randomUUID();
-  const canvas = await db.canvas.create({
-    data: {
+  // Same atomic canvas + connect_group create every other canvas path uses
+  // (canvasController.createCanvas, release notes, commit analysis).
+  const connectId = newConnectId();
+  const canvas = await createCanvasWithConnectGroupTx(
+    {
       id: canvasId,
       title: ticket.title,
       content: [],
@@ -129,11 +134,22 @@ async function findOrCreateTicketCanvas(args: {
         generationStartedAt: now.toISOString(),
         sessionId,
       },
+      connectId,
       participants: {
-        create: { id: randomUUID(), workspaceId, userId, role: CanvasRole.OWNER, joinedAt: now, updatedAt: now },
+        create: {
+          id: randomUUID(),
+          workspaceId,
+          userId,
+          role: CanvasRole.OWNER,
+          joinedAt: now,
+          updatedAt: now,
+          canvasConnectId: connectId,
+        },
       },
     },
-  });
+    workspaceId,
+    connectId,
+  );
   await ensureChannelParticipant(canvasId, ticket.channelId, workspaceId);
 
   const placeholder: BlockNoteBlock[] = [

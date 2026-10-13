@@ -3,7 +3,7 @@ import { logger } from '@/utils/logger';
 import { db } from '@/database/client';
 import { runAsServiceActor } from '@/database/tenant/context';
 import { convertMarkdownToBlockNote } from '@/services/canvasService';
-import { readFromYSweet, syncToYSweet } from '@/utils/ysweetUtils';
+import { readFromYSweetStrict, syncToYSweet } from '@/utils/ysweetUtils';
 import type { BlockNoteBlock } from '@/types/blockNoteTypes';
 import type { CanvasMetadata } from '@/services/deskThreadCanvasService';
 import { randomUUID } from 'crypto';
@@ -120,7 +120,12 @@ export async function handleDeskThreadCanvasCallback(
         status,
         error: errorMessage,
       });
-      await fail(errorMessage ?? 'No canvas content produced');
+      // claw tags a blank run (`emptyReason`) and a non-completed one (`status`).
+      const emptyReason = typeof payload['emptyReason'] === 'string' ? payload['emptyReason'] : undefined;
+      await fail(
+        errorMessage ??
+          (failed ? `Agent run ${status}` : `The agent returned no canvas content${emptyReason ? ` (${emptyReason})` : ''}`),
+      );
       res.json({ success: true, persisted: false });
       return;
     }
@@ -128,7 +133,10 @@ export async function handleDeskThreadCanvasCallback(
     // Read before writing, as canvasController does: syncToYSweet clears the
     // document, so a regenerate would lose a whiteboard drawn on the canvas.
     const author = canvas.createdBy || FALLBACK_AUTHOR;
-    const existingBlocks = await readFromYSweet(canvasId, author).catch(() => []);
+    // Strict, as canvasController.updateCanvas: a failed read taken as "empty"
+    // would restore nothing and the whiteboard would be lost. A throw lands in
+    // the catch below, which marks the run FAILED.
+    const existingBlocks = await readFromYSweetStrict(canvasId, author);
     const blocks = await convertMarkdownToBlockNote(markdown, existingBlocks);
     if (blocks.length === 0) {
       await fail('Markdown produced no blocks');

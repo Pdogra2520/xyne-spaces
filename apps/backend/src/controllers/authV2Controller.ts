@@ -45,7 +45,7 @@ type AutoLoginResult = {
     name: string;
     picture: string | null;
     workspaceId: string | null;
-    orgMemberId: string | null;
+    orgMemberId: string;
     providerUserId: string;
     role: string;
   };

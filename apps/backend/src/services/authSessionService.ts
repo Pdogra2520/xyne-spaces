@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'crypto';
 import { Request, Response } from 'express';
 import { config } from '@/config/env';
 import { db } from '@/database/client';
+import { replaceActiveAuthSessionTx } from '@/bypassAcl/transactions/authSessionStore';
 import { logger as baseLogger } from '../utils/logger';
 
 const logger = baseLogger.child({ module: 'AuthSessionService' });
@@ -97,23 +98,16 @@ export class AuthSessionService {
     const absExpiry = new Date(Date.now() + config.session.expiryDays * 24 * 60 * 60 * 1000);
     const platform = resolveDevicePlatform(req);
 
-    const session = await db.$transaction(async tx => {
-      await tx.authSession.updateMany({
-        where: { orgMemberId, deviceKey, status: AuthSessionStatus.ACTIVE },
-        data: { status: AuthSessionStatus.REVOKED, revokedAt: new Date() },
-      });
-      return tx.authSession.create({
-        data: {
-          orgMemberId,
-          orgId,
-          tokenHash,
-          deviceKey,
-          status: AuthSessionStatus.ACTIVE,
-          platform,
-          absExpiry,
-          deviceInfo: buildDeviceInfo(req),
-        },
-      });
+    const session = await replaceActiveAuthSessionTx({
+      orgMemberId,
+      orgId,
+      deviceKey,
+      tokenHash,
+      status: AuthSessionStatus.ACTIVE,
+      revokedStatus: AuthSessionStatus.REVOKED,
+      platform,
+      absExpiry,
+      deviceInfo: buildDeviceInfo(req),
     });
 
     this.setAuthSessionCookie(req, res, token, absExpiry);

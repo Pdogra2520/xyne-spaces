@@ -1,3 +1,10 @@
+## [1.492.0-release-20261013.1](https://github.com/juspay/xyne-spaces/compare/v1.491.0...v1.492.0-release-20261013.1) (2026-10-13)
+
+
+### Features
+
+* Apps Marketplace ([#2948](https://github.com/juspay/xyne-spaces/issues/2948)) ([eba6d5e](https://github.com/juspay/xyne-spaces/commit/eba6d5eb7e9f77ad247d1da93a497a79a0cf354f))
+
 ## [1.491.0](https://github.com/juspay/xyne-spaces/compare/v1.490.0...v1.491.0) (2026-10-12)
 
 

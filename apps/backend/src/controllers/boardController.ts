@@ -12,14 +12,6 @@ import { BoardRepository } from '../database/repositories/boardRepository';
 import { ProjectRepository } from '../database/repositories/projectRepository';
 import { logger } from '@/utils/logger';
 
-/** Mirrors the default template in the dashboard's BoardStageConfigScreen. */
-const DEFAULT_BOARD_STAGES = [
-  { name: 'BACKLOG', sequenceNumber: 1, defaultTicketStatusV2: TicketStatusV2.TODO },
-  { name: 'IN PROGRESS', sequenceNumber: 2, defaultTicketStatusV2: TicketStatusV2.STARTED },
-  { name: 'COMPLETED', sequenceNumber: 3, defaultTicketStatusV2: TicketStatusV2.COMPLETED },
-  { name: 'NOT REQUIRED', sequenceNumber: 4, defaultTicketStatusV2: TicketStatusV2.CANCELLED },
-] as const;
-
 export class BoardController {
   private boardRepository: BoardRepository;
   private projectRepository: ProjectRepository;
@@ -107,16 +99,6 @@ export class BoardController {
         ];
       }
 
-      // A board with zero stages can't hold tickets (ticket create needs a stage), and
-      // the dashboard's two-step "Create board" flow POSTs here without stages and only
-      // writes them when the user finishes the stage-config step. Abandoning the wizard
-      // used to leave a stage-less board that broke ticket creation with a 500. Seed the
-      // same template the stage-config screen shows so every board is usable on creation;
-      // the stage-config save reconciles these rows by id.
-      if (!effectiveStages || effectiveStages.length === 0) {
-        effectiveStages = DEFAULT_BOARD_STAGES.map(stage => ({ ...stage }));
-      }
-
       // Check for duplicate name within the project
       const isDuplicate = await this.boardRepository.checkDuplicateName(name.trim(), projectId.trim());
       if (isDuplicate) {
@@ -154,7 +136,6 @@ export class BoardController {
             name: stage.name,
             eta: stage.eta,
             sequenceNumber: stage.sequenceNumber,
-            defaultTicketStatusV2: stage.defaultTicketStatusV2,
             prStatuses: stage.prStatuses || [],
             createdAt: stage.createdAt,
           })),

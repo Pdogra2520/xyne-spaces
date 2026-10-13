@@ -24,7 +24,7 @@ import { UploadedFileResult } from '@/services/fileUploadService';
 import { messageMetadataService } from '@/services/messageMetadataService';
 import { logger } from '@/utils/logger';
 import { generateTicketId } from '@/bypassAcl/transactions/ticketIdService';
-import { lockTicketMetadataAndEta } from '@/bypassAcl/rowLockServices';
+import { lockTicketMetadataAndEta, lockTicketStatusV2 } from '@/bypassAcl/rowLockServices';
 import { createTicketWithConversation as createTransferredTicket } from '@/apps/core/ticketutils';
 
 
@@ -816,6 +816,8 @@ export function transferTicketAcrossNamespacesTx(
   relationType: TicketReferenceRelation,
 ) {
   return transaction(['Board', 'Conversation', 'FormEntityValues', 'Project', 'Stage', 'StageTransition', 'Ticket', 'TicketActivity', 'TicketDescription', 'TicketNamespace', 'TicketReferenceMapping', 'TicketStageEta', 'TicketTag', 'TicketTagMapping'], 'transferTicketAcrossNamespaces: claiming/closing the original, creating the new ticket, linking it and copying labels must commit atomically so a failure leaves no unlinked duplicate; tx is not ACL-wrapped', prisma, async (tx) => {
+    // Lock first: Prisma's updateMany doesn't re-check its filter after a lock wait
+    await lockTicketStatusV2(tx, source.id);
     // Conditional update: only one concurrent transfer can claim the original
     const claimed = await tx.ticket.updateMany({
       where: { id: source.id, isArchived: false, statusV2: { not: TicketStatusV2.CANCELLED } },

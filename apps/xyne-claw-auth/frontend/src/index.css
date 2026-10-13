@@ -170,3 +170,25 @@
     animation: none !important;
   }
 }
+
+/* ================================================================
+   GENERATIVE UI
+   The ```ui renderer styles itself from --gui-* variables. Map them
+   to the semantic tokens once; those already switch under .dark.
+   Status colours use the -fg variants, which are the readable text
+   shade in each mode.
+================================================================ */
+.gui {
+  --gui-fg: var(--color-xyne-fg-primary);
+  --gui-fg-muted: var(--color-xyne-fg-muted);
+  --gui-surface: var(--color-xyne-surface);
+  --gui-surface-muted: var(--color-xyne-surface-sunken);
+  --gui-border: var(--color-xyne-border);
+  --gui-accent: var(--color-xyne-brand);
+  --gui-accent-fg: var(--color-xyne-fg-inverse);
+  --gui-positive: var(--color-xyne-success-fg);
+  --gui-warning: var(--color-xyne-warning-fg);
+  --gui-danger: var(--color-xyne-error-fg);
+  --gui-link: var(--color-xyne-fg-link);
+  --gui-focus: var(--color-xyne-border-focus);
+}

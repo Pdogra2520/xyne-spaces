@@ -62,6 +62,7 @@ import {
   getStreamSlotKeyFromThreadId,
 } from '../../utils/xyneAIStreamThreadId';
 import { resolveMessagePendingAction } from '../../components/Claw/claw.utils';
+import { uiFencesAsText } from '../../components/Markdown/GenerativeUi/genUiCore';
 
 // Prompt-only follow-ups run concurrently with the main answer and may finish
 // after its SSE has closed. Keep reconciliation bounded but long enough to
@@ -130,6 +131,9 @@ export interface StreamRequest {
   tab?: string;
   /** Per-run thinking level (composer dropdown). Absent = agent default. */
   thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high';
+  /** Opt in to the ```ui generative-interface instructions. Only the AI screen
+   *  and the AI sidebar set it; every other caller leaves it off. */
+  generativeUi?: boolean;
   researchContext?: ResearchContext | null | undefined;
   attachments: MessageAttachment[];
   sandboxMode?: 'remote' | 'local' | 'container' | undefined;
@@ -1268,6 +1272,7 @@ class XyneAIStreamManager {
           instant: request.instant ?? false,
           ...(request.tab && { tab: request.tab }),
           ...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+          ...(request.generativeUi === true ? { generativeUi: true } : {}),
           researchContext: request.researchContext
             ? request.researchContext.id
               ? {
@@ -2968,7 +2973,7 @@ class XyneAIStreamManager {
     const title = question
       ? `Ask AI · ${truncateForToast(question, 60)}`
       : 'Ask AI finished replying';
-    const preview = truncateForToast(response, 140);
+    const preview = truncateForToast(uiFencesAsText(response), 140);
 
     const sessionId = state.sessionId?.trim() ?? '';
     const openThread = this.completionToastNavigator;

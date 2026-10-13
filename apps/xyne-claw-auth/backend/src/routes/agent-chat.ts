@@ -1289,6 +1289,7 @@ router.post("/:slug/chat", async (req: Request<{ slug: string }>, res: Response)
       speed: rawSpeed,
       thinkingLevel: rawThinkingLevel,
       sandboxMode,
+      generativeUi: rawGenerativeUi,
     } = req.body as {
       message?: string;
       conversationId?: string;
@@ -1323,6 +1324,9 @@ router.post("/:slug/chat", async (req: Request<{ slug: string }>, res: Response)
        *  agent's modelSettings.thinkingLevel for this run only. */
       thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
       sandboxMode?: "local" | "remote" | "container";
+      /** Opt-in for the ```ui block primer; strictly `true`. Only the plain
+       *  claw v3 chat sets it (see forwardBody). */
+      generativeUi?: unknown;
     };
     const userId = getRequesterId(req) ?? (req.body as { userId?: string }).userId;
     const speedOverride: "standard" | "fast" | undefined =
@@ -2007,6 +2011,11 @@ router.post("/:slug/chat", async (req: Request<{ slug: string }>, res: Response)
     const fastModeEnabled = await resolveFastMode(conversationId, slug, effectiveAgentConfig);
 
     const aiScreenCommand = applyAiScreenCommand(message);
+    const evalSwitches = evalRunSwitches(req, requestedOptimizations, requestedJudgeBackend);
+    // Regenerate and edit-message replay through this route (isRegenerate /
+    // isEditUserMessage), so they inherit it. Design Studio and eval runs are
+    // not the plain chat, so the flag is dropped there.
+    const generativeUi = rawGenerativeUi === true && studioMode === undefined && Object.keys(evalSwitches).length === 0;
     const forwardBody: Record<string, unknown> = {
       // Pre-minted above and already persisted as an AgentRun row. prepareRun
       // honours it because this is an internal run, so the row, the dispatch and
@@ -2052,7 +2061,8 @@ router.post("/:slug/chat", async (req: Request<{ slug: string }>, res: Response)
       fastMode: fastModeEnabled,
       // /compact shrinks the session before answering, not just summarises it.
       ...(studioMode !== "design" && aiScreenCommand.compactBeforeRun ? { compactBeforeRun: true } : {}),
-      ...evalRunSwitches(req, requestedOptimizations, requestedJudgeBackend),
+      ...evalSwitches,
+      ...(generativeUi ? { generativeUi: true } : {}),
     };
 
     const forwardedTask = typeof forwardBody["task"] === "string" ? forwardBody["task"] as string : "";

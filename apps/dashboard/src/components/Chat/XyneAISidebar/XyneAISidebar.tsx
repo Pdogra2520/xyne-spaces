@@ -27,6 +27,7 @@ import { apiInstance } from '../../../services/clients/apiClient';
 import { useChannel, useAllVisibleChannels } from '../../../hooks/useChannels';
 import { useXyneAIStream } from '../../../hooks/useXyneAIStream';
 import { ChannelScopeType } from '@xyne/shared';
+import { findGenUiImage } from '../../../services/claw/clawRequest';
 import { BASE_URL } from '../../../services/clients/apiClient';
 import type { ConversationHistory as ConversationHistoryType } from './utils/XyneAITypes';
 import { resolveActivePath, getSiblings, BRANCH_ROOT_KEY } from './utils/XyneAIUtils';
@@ -77,6 +78,7 @@ import {
   ConversationToolInvocationsContext,
   type EditedMessageContext,
 } from './components/MessageItem';
+import { GenerativeUiHostContext } from '../../Markdown/GenerativeUi/GenerativeUi';
 import { ConversationHistory } from './components/ConversationHistory';
 import { XyneAIHeader } from './components/XyneAIHeader';
 import { XyneAIOnboardingHeader } from './components/XyneAIOnboardingHeader';
@@ -973,6 +975,9 @@ const XyneAISidebar = ({
   };
 
   // Use the streaming hook with selected channel IDs, research context, and active thread info
+  // Declared before the stream hook: a voice reply is read aloud, so voice turns
+  // never opt in to ```ui blocks (they would be spoken as JSON).
+  const [voiceMode, setVoiceMode] = useState(false);
   const { submitQuery, abortCurrentRequest } = useXyneAIStream({
     surface: 'panel',
     contextType: xyneAIActor.getSnapshot().context.contextType,
@@ -995,6 +1000,9 @@ const XyneAISidebar = ({
     createCanvasEnabled,
     isV2,
     suppressCompletionToast: isAgentForced,
+    // One of the two chats whose agent may answer with a ```ui block. A forced
+    // agent (the desk auto-draft preview) is a fixed pipeline, not a chat.
+    generativeUi: !isAgentForced && !voiceMode,
     channelId: channelId || undefined, // Pass channelId for thread ID construction
     ticketIds: selectedTickets.map(t => t.id),
     canvasIds: selectedCanvases.map(c => c.id),
@@ -1929,6 +1937,39 @@ const XyneAISidebar = ({
   );
   const deskAutoDraftRef = useRef<{ conversationId: string; channelId: string } | null>(null);
 
+  const clearAddedContext = useCallback((): void => {
+    // Context the user ADDED belongs to the message it was sent with, not
+    // to the conversation: the sent message carries its own copy of
+    // attachedContext (persisted server-side — it is what the history pills
+    // and edit/regenerate read), so clearing the composer changes nothing
+    // already said. Context the sidebar was OPENED with — the channel,
+    // thread, canvas, recording, KB file or the canvas selection it was
+    // asked about — is what the whole conversation is about, so it stays
+    // until the user removes it.
+    //
+    // In a finally: a send that throws is exactly when the context must not
+    // be left behind, since the turn it belonged to never happened.
+    const openedWith = openedWithRef.current;
+    const keep =
+      (kind: string) =>
+      (item: { id: string }): boolean =>
+        openedWith.has(`${kind}:${item.id}`);
+    // An SDLC hub chat keeps its hub: the hub is where the chat happens, and
+    // a follow-up sent without it runs with no hub context at all.
+    const hubId = window.location.pathname.match(/\/sdlc\/([^/]+)/)?.[1];
+    setSelectedChannels(prev => prev.filter(ch => ch.id === hubId || keep('channel')(ch)));
+    setSelectedTickets(prev => prev.filter(keep('ticket')));
+    setSelectedCanvases(prev => prev.filter(keep('canvas')));
+    setSelectedTranscripts(prev => prev.filter(keep('call')));
+    setSelectedRecordings(prev => prev.filter(keep('call')));
+    setSelectedMessages([]);
+    setSelectedPeople([]);
+    setSelectedSharedFiles([]);
+    setSelectedApps([]);
+    setFileScopes(prev => prev.filter(f => f.id === kbDocIdProp));
+    setFolderScopes(prev => prev.filter(f => f.id === kbFolderIdProp));
+  }, [kbDocIdProp, kbFolderIdProp]);
+
   const handleSubmit = useCallback(
     async (trigger?: XyneAiSendTrigger): Promise<void> => {
       // Allow submission if there's input, activities, OR selection contexts
@@ -2078,40 +2119,12 @@ const XyneAISidebar = ({
           sendTrigger ? { trigger: sendTrigger } : undefined,
         );
       } finally {
-        // Context the user ADDED belongs to the message it was sent with, not
-        // to the conversation: the sent message carries its own copy of
-        // attachedContext (persisted server-side — it is what the history pills
-        // and edit/regenerate read), so clearing the composer changes nothing
-        // already said. Context the sidebar was OPENED with — the channel,
-        // thread, canvas, recording, KB file or the canvas selection it was
-        // asked about — is what the whole conversation is about, so it stays
-        // until the user removes it.
-        //
-        // In a finally: a send that throws is exactly when the context must not
-        // be left behind, since the turn it belonged to never happened.
-        const openedWith = openedWithRef.current;
-        const keep =
-          (kind: string) =>
-          (item: { id: string }): boolean =>
-            openedWith.has(`${kind}:${item.id}`);
-        // An SDLC hub chat keeps its hub: the hub is where the chat happens, and
-        // a follow-up sent without it runs with no hub context at all.
-        const hubId = window.location.pathname.match(/\/sdlc\/([^/]+)/)?.[1];
-        setSelectedChannels(prev => prev.filter(ch => ch.id === hubId || keep('channel')(ch)));
-        setSelectedTickets(prev => prev.filter(keep('ticket')));
-        setSelectedCanvases(prev => prev.filter(keep('canvas')));
-        setSelectedTranscripts(prev => prev.filter(keep('call')));
-        setSelectedRecordings(prev => prev.filter(keep('call')));
-        setSelectedMessages([]);
-        setSelectedPeople([]);
-        setSelectedSharedFiles([]);
-        setSelectedApps([]);
-        setFileScopes(prev => prev.filter(f => f.id === kbDocIdProp));
-        setFolderScopes(prev => prev.filter(f => f.id === kbFolderIdProp));
+        clearAddedContext();
         setSentNonce(n => n + 1);
       }
     },
     [
+      clearAddedContext,
       kbDocIdProp,
       kbFolderIdProp,
       inputValue,
@@ -2147,6 +2160,71 @@ const XyneAISidebar = ({
     }
   }, [inputValue, handleSubmit, autoSendRequest]);
 
+  // What a ```ui block's send button posts through: a normal, visible user
+  // message in this conversation. Mirrors handleSubmit's branch handling but
+  // leaves the composer alone (text, chips, attachments), and refuses whenever
+  // the panel cannot take a turn right now. Read through a ref so the context
+  // value below stays stable and the memoized message rows never re-render.
+  const sendGenerativeUiReply = (text: string): boolean => {
+    const query = text.trim();
+    if (!query) return false;
+    if (
+      isActiveSessionStreaming ||
+      isLoadingConversation ||
+      editingMessageId ||
+      assistant.isRouting ||
+      deskAutoDraftRef.current
+    )
+      return false;
+
+    messagesSentWhileOpenRef.current += 1;
+    // Same stuck-draft recovery as handleSubmit: a fresh draft slot still
+    // holding a finished turn means that turn never got a server session.
+    if (usesDraftStreamKeyRef.current && messages.length > 0) {
+      setMessages([]);
+      setBranchSelections({});
+    }
+    let parentMessageId: string | undefined;
+    if (!isLegacyConversation) {
+      const lastDisplayed = displayMessages[displayMessages.length - 1];
+      if (lastDisplayed && !usesDraftStreamKeyRef.current) parentMessageId = lastDisplayed.id;
+    }
+    if (!conversationChannelId) {
+      if (channelId) setConversationChannelId(channelId);
+      else if (kbCollectionIdProp) setConversationChannelId(kbCollectionIdProp);
+    }
+    setTimeout(() => {
+      scrollToBottom();
+    }, 50);
+    // Like a typed send, the reply carries the staged context and then clears
+    // it: context belongs to the message it was sent with.
+    void submitQuery(
+      query,
+      [],
+      undefined,
+      query,
+      undefined,
+      parentMessageId,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        trigger: 'programmatic',
+      },
+    ).finally(clearAddedContext);
+    return true;
+  };
+  const sendGenerativeUiReplyRef = useRef(sendGenerativeUiReply);
+  sendGenerativeUiReplyRef.current = sendGenerativeUiReply;
+  const generativeUiHost = useMemo(
+    () => ({
+      send: (text: string): boolean => sendGenerativeUiReplyRef.current(text),
+      findImage: findGenUiImage,
+    }),
+    [],
+  );
+
   const routedSubmit = useRoutedSubmit<'button' | 'enter' | undefined>({
     assistant,
     value: inputValue,
@@ -2171,7 +2249,6 @@ const XyneAISidebar = ({
     void handleSubmit(trigger);
   };
 
-  const [voiceMode, setVoiceMode] = useState(false);
   const submitTranscript = useCallback((text: string): void => {
     autoSendPendingQueryRef.current = text;
     setInputValue(text);
@@ -2520,127 +2597,133 @@ const XyneAISidebar = ({
                             </p>
                           </div>
                         )}
-                        <ConversationToolInvocationsContext.Provider
-                          value={conversationToolInvocations}
-                        >
-                          {(() => {
-                            // lastBotIndex / lastUserIndex / siblingIndexById are
-                            // computed in the memo above; just consume here so this
-                            // IIFE doesn't re-walk both lists on every render.
-                            return transcriptMessages.map((message: Message) => {
-                              if (isAssistantMessage(message.id)) {
+                        <GenerativeUiHostContext.Provider value={generativeUiHost}>
+                          <ConversationToolInvocationsContext.Provider
+                            value={conversationToolInvocations}
+                          >
+                            {(() => {
+                              // lastBotIndex / lastUserIndex / siblingIndexById are
+                              // computed in the memo above; just consume here so this
+                              // IIFE doesn't re-walk both lists on every render.
+                              return transcriptMessages.map((message: Message) => {
+                                if (isAssistantMessage(message.id)) {
+                                  return (
+                                    <MessageItem
+                                      key={message.id}
+                                      message={message}
+                                      readOnly
+                                      onFeedback={() => undefined}
+                                      onCitationClick={handleCitationClick}
+                                      onSummarizerCitationClick={handleSummarizerCitationClick}
+                                      feedbackValue={null}
+                                      isLatestBotMessage={message.type === 'bot'}
+                                      onFollowUpSuggestionClick={label => {
+                                        assistant.openPill(message.id, label);
+                                      }}
+                                    />
+                                  );
+                                }
+                                const index = serverIndexById.get(message.id) ?? -1;
+                                const isLatestBotMessage =
+                                  message.type === 'bot' && index === lastBotIndex;
+                                const isLatestUserMessage =
+                                  message.type === 'user' && index === lastUserIndex;
+                                const siblingCount = siblingCountById.get(message.id) ?? 0;
+                                const siblingIndex = siblingIndexById.get(message.id) ?? 0;
+                                const hasBranches = siblingCount > 1;
+                                const botTurnIndex =
+                                  message.type === 'bot'
+                                    ? displayMessages
+                                        .slice(0, index + 1)
+                                        .filter(item => item.type === 'bot').length - 1
+                                    : -1;
+                                const showFollowUps =
+                                  isV2 &&
+                                  isLatestBotMessage &&
+                                  !message.isStreaming &&
+                                  !!message.followUpSuggestions?.length;
                                 return (
-                                  <MessageItem
-                                    key={message.id}
-                                    message={message}
-                                    readOnly
-                                    onFeedback={() => undefined}
-                                    onCitationClick={handleCitationClick}
-                                    onSummarizerCitationClick={handleSummarizerCitationClick}
-                                    feedbackValue={null}
-                                    isLatestBotMessage={message.type === 'bot'}
-                                    onFollowUpSuggestionClick={label => {
-                                      assistant.openPill(message.id, label);
-                                    }}
-                                  />
+                                  <Fragment key={message.stableKey ?? message.id}>
+                                    <MessageItem
+                                      // Stable key so the bubble doesn't remount when
+                                      // the id swaps temp→server at completion (which
+                                      // would kill the activity block's transition).
+                                      message={message}
+                                      onFeedback={(id, type) => void handleFeedback(id, type)}
+                                      onCitationClick={handleCitationClick}
+                                      onSummarizerCitationClick={handleSummarizerCitationClick}
+                                      feedbackValue={feedbackMap[message.id] || null}
+                                      isV2={isV2}
+                                      trackContext={messageTrackContext}
+                                      {...(flowCards ? { flowCards } : {})}
+                                      onRatingChange={handleRatingChange}
+                                      onRegenerate={
+                                        !isLegacyConversation && isLatestBotMessage
+                                          ? () => void handleRegenerate()
+                                          : undefined
+                                      }
+                                      onEditSubmit={
+                                        !isLegacyConversation && isLatestUserMessage
+                                          ? (newContent: string, context?: EditedMessageContext) =>
+                                              void handleEditMessage(
+                                                message.id,
+                                                newContent,
+                                                context,
+                                              )
+                                          : undefined
+                                      }
+                                      onEditMobile={
+                                        !isLegacyConversation && isLatestUserMessage && isMobile
+                                          ? () => handleEditMobile(message.id)
+                                          : undefined
+                                      }
+                                      isLatestBotMessage={isLatestBotMessage}
+                                      branchInfo={
+                                        !isLegacyConversation && hasBranches
+                                          ? { index: siblingIndex, total: siblingCount }
+                                          : undefined
+                                      }
+                                      onBranchNavigate={
+                                        !isLegacyConversation && hasBranches
+                                          ? (dir: 'prev' | 'next') =>
+                                              handleBranchNavigate(message.id, dir)
+                                          : undefined
+                                      }
+                                      onDebug={
+                                        isV2 && !isAgentForced && message.type === 'bot'
+                                          ? () => {
+                                              setDebugTurnIndex(botTurnIndex);
+                                              // Prefer sessionId pinning when the
+                                              // run is known. Falls back to null
+                                              // (turn-index path) for live streams
+                                              // whose AgentRun hasn't been linked
+                                              // to chatMessageId yet.
+                                              setDebugSessionId(message.debugSessionId ?? null);
+                                              setDebugFocusToolCallId(null);
+                                              setShowDebugger(true);
+                                            }
+                                          : undefined
+                                      }
+                                      onOpenToolDebug={
+                                        isV2 && !isAgentForced && message.type === 'bot'
+                                          ? (toolCallId: string) => {
+                                              setDebugTurnIndex(botTurnIndex);
+                                              setDebugSessionId(message.debugSessionId ?? null);
+                                              setDebugFocusToolCallId(toolCallId);
+                                              setShowDebugger(true);
+                                            }
+                                          : undefined
+                                      }
+                                      onFollowUpSuggestionClick={
+                                        showFollowUps ? handleSuggestionClick : undefined
+                                      }
+                                    />
+                                  </Fragment>
                                 );
-                              }
-                              const index = serverIndexById.get(message.id) ?? -1;
-                              const isLatestBotMessage =
-                                message.type === 'bot' && index === lastBotIndex;
-                              const isLatestUserMessage =
-                                message.type === 'user' && index === lastUserIndex;
-                              const siblingCount = siblingCountById.get(message.id) ?? 0;
-                              const siblingIndex = siblingIndexById.get(message.id) ?? 0;
-                              const hasBranches = siblingCount > 1;
-                              const botTurnIndex =
-                                message.type === 'bot'
-                                  ? displayMessages
-                                      .slice(0, index + 1)
-                                      .filter(item => item.type === 'bot').length - 1
-                                  : -1;
-                              const showFollowUps =
-                                isV2 &&
-                                isLatestBotMessage &&
-                                !message.isStreaming &&
-                                !!message.followUpSuggestions?.length;
-                              return (
-                                <Fragment key={message.stableKey ?? message.id}>
-                                  <MessageItem
-                                    // Stable key so the bubble doesn't remount when
-                                    // the id swaps temp→server at completion (which
-                                    // would kill the activity block's transition).
-                                    message={message}
-                                    onFeedback={(id, type) => void handleFeedback(id, type)}
-                                    onCitationClick={handleCitationClick}
-                                    onSummarizerCitationClick={handleSummarizerCitationClick}
-                                    feedbackValue={feedbackMap[message.id] || null}
-                                    isV2={isV2}
-                                    trackContext={messageTrackContext}
-                                    {...(flowCards ? { flowCards } : {})}
-                                    onRatingChange={handleRatingChange}
-                                    onRegenerate={
-                                      !isLegacyConversation && isLatestBotMessage
-                                        ? () => void handleRegenerate()
-                                        : undefined
-                                    }
-                                    onEditSubmit={
-                                      !isLegacyConversation && isLatestUserMessage
-                                        ? (newContent: string, context?: EditedMessageContext) =>
-                                            void handleEditMessage(message.id, newContent, context)
-                                        : undefined
-                                    }
-                                    onEditMobile={
-                                      !isLegacyConversation && isLatestUserMessage && isMobile
-                                        ? () => handleEditMobile(message.id)
-                                        : undefined
-                                    }
-                                    isLatestBotMessage={isLatestBotMessage}
-                                    branchInfo={
-                                      !isLegacyConversation && hasBranches
-                                        ? { index: siblingIndex, total: siblingCount }
-                                        : undefined
-                                    }
-                                    onBranchNavigate={
-                                      !isLegacyConversation && hasBranches
-                                        ? (dir: 'prev' | 'next') =>
-                                            handleBranchNavigate(message.id, dir)
-                                        : undefined
-                                    }
-                                    onDebug={
-                                      isV2 && !isAgentForced && message.type === 'bot'
-                                        ? () => {
-                                            setDebugTurnIndex(botTurnIndex);
-                                            // Prefer sessionId pinning when the
-                                            // run is known. Falls back to null
-                                            // (turn-index path) for live streams
-                                            // whose AgentRun hasn't been linked
-                                            // to chatMessageId yet.
-                                            setDebugSessionId(message.debugSessionId ?? null);
-                                            setDebugFocusToolCallId(null);
-                                            setShowDebugger(true);
-                                          }
-                                        : undefined
-                                    }
-                                    onOpenToolDebug={
-                                      isV2 && !isAgentForced && message.type === 'bot'
-                                        ? (toolCallId: string) => {
-                                            setDebugTurnIndex(botTurnIndex);
-                                            setDebugSessionId(message.debugSessionId ?? null);
-                                            setDebugFocusToolCallId(toolCallId);
-                                            setShowDebugger(true);
-                                          }
-                                        : undefined
-                                    }
-                                    onFollowUpSuggestionClick={
-                                      showFollowUps ? handleSuggestionClick : undefined
-                                    }
-                                  />
-                                </Fragment>
-                              );
-                            });
-                          })()}
-                        </ConversationToolInvocationsContext.Provider>
+                              });
+                            })()}
+                          </ConversationToolInvocationsContext.Provider>
+                        </GenerativeUiHostContext.Provider>
                         {aiOnboarding.isActive && visibleSuggestions.length > 0 && (
                           <div className='mt-4 flex flex-wrap gap-2'>
                             {visibleSuggestions.map(suggestion => (

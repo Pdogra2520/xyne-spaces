@@ -92,6 +92,9 @@ export interface ClawRunRequest {
   /** Single search + single answer pass instead of the full agentic tool
    *  loop — see xyne-claw-auth's run-stream.ts POST / instant branch. */
   instant?: boolean;
+  /** Streaming chat surfaces only (AI screen / sidebar): lets the agent write
+   *  fenced ui blocks. claw owns the instructions; this is just the opt-in. */
+  generativeUi?: boolean;
   /** cmd+K AI overview: the palette tab claw searches before answering (its `agentConfig.answerScope`). */
   answerScope?: string;
   researchContext?: { type: string; id?: string; name: string } | null;
@@ -607,6 +610,7 @@ export async function runClawAgentStream(
     ...(request.webSearchEnabled && { webSearchEnabled: true }),
     ...(request.deepResearchEnabled && { deepResearchEnabled: true }),
     ...(request.instant && { instant: true }),
+    ...(request.generativeUi === true && { generativeUi: true }),
     ...(request.researchContext && { researchContext: request.researchContext }),
     ...(request.thinkingLevel && { thinkingLevel: request.thinkingLevel }),
     ...(request.studioMode && { studioMode: request.studioMode }),

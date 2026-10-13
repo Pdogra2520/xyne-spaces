@@ -216,9 +216,18 @@ export function transformToolOutput(
   return result;
 }
 
+// A reply carrying a generative-UI fence. Its JSON Lines can contain "summary" or
+// "keypoints" keys, or the reply can open with "{", all of which the legacy
+// envelope parsing below would strip fences from and truncate.
+const UI_FENCE_LINE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*ui[ \t]*$/m;
+
 export function parseStreamingContent(content: string): StreamingParsedContent {
   let cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '');
   cleaned = cleaned.replace(/<think>[\s\S]*/gi, '');
+
+  if (UI_FENCE_LINE.test(cleaned)) {
+    return { summary: cleaned, keypoints: [], citations: {}, isComplete: false };
+  }
 
   const isJsonEnvelope =
     /^\s*(?:```json)?\s*\{/.test(cleaned) ||

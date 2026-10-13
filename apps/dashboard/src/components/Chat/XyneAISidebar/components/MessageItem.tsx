@@ -2,6 +2,7 @@ import { PageSelectionPreview } from './PageSelectionPreview';
 import { logger, Event as LogEvent } from '../../../../utils/logger';
 import {
   ReactElement,
+  ReactNode,
   useState,
   useMemo,
   useEffect,
@@ -87,6 +88,8 @@ import type {
   ClawCitation,
 } from '../utils/XyneAITypes';
 import { TurnTimeline } from './TurnTimeline';
+import { renderWithGenerativeUi } from '../../../Markdown/GenerativeUi/GenerativeUi';
+import { uiFencesAsText } from '../../../Markdown/GenerativeUi/genUiCore';
 import { turnDurationLabel, turnFinishedAt } from './activityShared';
 import { FlowScreenManager } from '../../../flowUI/FlowScreenManager';
 import {
@@ -1282,7 +1285,7 @@ export const MessageItem = React.memo(
       } else {
         // Genius or generic message
         textToCopy = processTextForCopy(
-          message.content || message.streamingContent || '',
+          uiFencesAsText(message.content || message.streamingContent || ''),
           resolveMention,
         );
         // Add key points from parsed content
@@ -2031,6 +2034,27 @@ const MessageContent = ({
     ) : null;
   const isGenius = !message.agentType || message.agentType === 'genius';
 
+  /** An answer text: citations linked, then markdown segments through
+   *  renderAnswerMarkdown and ```ui segments as live blocks. The split runs on
+   *  the RAW text so citation linking never touches a block's JSON. */
+  const renderAnswerWithUi = (raw: string, streaming: boolean, busy = streaming): ReactNode =>
+    renderWithGenerativeUi(
+      raw,
+      streaming,
+      md => {
+        const linked = stripCitationMarks(
+          linkifyAndGroupClawCitations(md, clawCitationToolNumbers),
+        );
+        return renderAnswerMarkdown(streaming ? linked + '\n' : linked);
+      },
+      { busy },
+    );
+  // The same raw text displayContent is built from, for the no-parts path.
+  const legacyRaw =
+    message.type === 'bot' && message.isStreaming && message.streamingContent
+      ? message.streamingContent
+      : message.content || message.streamingContent || '';
+
   return (
     <div className='space-y-4 max-w-full'>
       {/* The turn in order — thinking, text, tool calls, … answer — with each
@@ -2038,13 +2062,16 @@ const MessageContent = ({
           screen and the overlay. */}
       <TurnTimeline
         message={message}
-        renderText={(text, { streaming }) => {
-          const linked = stripCitationMarks(
-            linkifyAndGroupClawCitations(text, clawCitationToolNumbers),
-          );
-          return renderAnswerMarkdown(streaming ? linked + '\n' : linked);
-        }}
-        legacyAnswer={isGenius && displayContent ? renderAnswerMarkdown(displayContent) : null}
+        renderText={(text, { streaming, turnStreaming }) =>
+          renderAnswerWithUi(text, streaming, turnStreaming)
+        }
+        legacyAnswer={
+          // TurnTimeline only shows this for a message with no parts; skip the
+          // split and markdown work on every streamed frame otherwise.
+          !message.parts?.length && isGenius && displayContent
+            ? renderAnswerWithUi(legacyRaw, !!message.isStreaming)
+            : null
+        }
       />
 
       {flowCards &&

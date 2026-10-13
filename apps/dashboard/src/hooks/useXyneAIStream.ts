@@ -73,6 +73,8 @@ export interface StreamOverrides {
    *  switch agents mid-conversation; regenerating or editing a turn re-runs it
    *  with the agent that owned it. */
   agentSlug?: string | null;
+  /** Opt this send in/out of the generative-UI instructions. Absent = hook-level. */
+  generativeUi?: boolean;
 }
 
 interface UseXyneAIStreamParams {
@@ -119,6 +121,9 @@ interface UseXyneAIStreamParams {
   surface?: XyneAiSurface;
   /** xyneAIMachine contextType at submit time (panel only). */
   contextType?: string | null;
+  /** Let the agent answer with a ```ui interface block. Only the AI screen and
+   *  the AI sidebar opt in; off for cmd+K, desk, voice and every other caller. */
+  generativeUi?: boolean;
 }
 
 /**
@@ -186,6 +191,7 @@ export const useXyneAIStream = ({
   suppressCompletionToast,
   surface,
   contextType,
+  generativeUi = false,
   setDebugEvents,
   setDebugArtifactsReadyVersion,
 }: UseXyneAIStreamParams) => {
@@ -359,6 +365,9 @@ export const useXyneAIStream = ({
       const eModel = ov && 'model' in ov ? (ov.model ?? null) : model;
       const eModelProvider = ov && 'model' in ov ? (ov.modelProvider ?? null) : modelProvider;
       const eThinkingLevel = ov?.thinkingLevel ?? thinkingLevel ?? undefined;
+      // A voice reply is read aloud, so a ```ui block would be spoken as JSON.
+      const eGenerativeUi =
+        !eVoiceMode && (ov && 'generativeUi' in ov ? ov.generativeUi === true : generativeUi);
       const eAgentSlug = ov && 'agentSlug' in ov ? (ov.agentSlug ?? null) : agentSlug;
       const eResearchContext =
         ov && 'researchContext' in ov ? (ov.researchContext ?? null) : researchContext;
@@ -578,6 +587,7 @@ export const useXyneAIStream = ({
           ...(isV2 && eModel ? { model: eModel } : {}),
           ...(isV2 && eModel && eModelProvider ? { modelProvider: eModelProvider } : {}),
           ...(eThinkingLevel ? { thinkingLevel: eThinkingLevel } : {}),
+          ...(eGenerativeUi ? { generativeUi: true } : {}),
           ...(suppressCompletionToast && { suppressCompletionToast: true }),
           ...(ov?.sandboxMode && ov.sandboxMode !== 'remote'
             ? { sandboxMode: ov.sandboxMode }
@@ -624,6 +634,7 @@ export const useXyneAIStream = ({
       suppressCompletionToast,
       surface,
       contextType,
+      generativeUi,
     ],
   );
 

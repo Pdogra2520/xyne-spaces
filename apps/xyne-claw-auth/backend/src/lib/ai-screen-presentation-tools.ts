@@ -48,7 +48,7 @@ export function withAiScreenPresentationTools(
 /** Xyne AI counterpart to claw's buildPresentationPrimer, which only fires for
  *  thread runs. These are catalog entries, so without guidance the model never
  *  spends the `load-tools` turn. */
-export const AI_SCREEN_PRESENTATION_INSTRUCTIONS = [
+const INSTRUCTIONS_HEAD = [
   "## Artifact cards in this chat",
   "",
   "You can render cards into this conversation with `ask-user-question`,",
@@ -65,23 +65,66 @@ export const AI_SCREEN_PRESENTATION_INSTRUCTIONS = [
   "  related questions into ONE card, and stop your turn there — the answer",
   "  arrives as a new message and a fresh run continues the task. Don't spend a",
   "  card on something you could look up yourself.",
+];
+
+const CODE_CARD_RULE = [
   "- Multi-line code ALWAYS goes in a card — this is not a judgement call. If you",
   "  are about to type a ``` fence in your reply, stop: call `load-tools` and post",
   "  it with `post-code-block` instead. A change to an existing file →",
   "  `post-diff`. This holds even for a short answer or a question outside your",
   "  usual scope.",
+];
+
+/** Generative UI requested: the no-fences rule is about CODE fences only, so it
+ *  cannot be read as forbidding a ```ui block. How to write one is claw's call
+ *  (its primer), since claw alone decides whether the run gets it. */
+const CODE_CARD_RULE_GENERATIVE_UI = [
+  "- Multi-line CODE ALWAYS goes in a card — this is not a judgement call. If you",
+  "  are about to type a code ``` fence in your reply, stop: call `load-tools` and post",
+  "  it with `post-code-block` instead. A change to an existing file →",
+  "  `post-diff`. This holds even for a short answer or a question outside your",
+  "  usual scope.",
+];
+
+const INSTRUCTIONS_TAIL = [
   "- Numbers worth comparing — a trend, a breakdown, a ranking → `post-chart`.",
   "- Short expressions, names, paths and single values → inline backticks in your",
   "  reply. Do NOT spend a card on them.",
   "- After posting a card, do NOT repeat its contents in your text. Write only",
   "  what the card cannot say: what it shows and what to do about it.",
+];
+
+const PROSE_DEFAULT_RULE = [
   "- Prose is the default for everything else (explanations, names, paths, single",
   "  values). Code blocks are the exception above, not a card to be earned.",
-].join("\n");
+];
+
+/** Generative UI requested: when an answer is drawn is claw's call (its primer
+ *  draws structured answers, explanations included), so this list must not
+ *  name prose as the default for explanations. The eval behind the primer saw
+ *  this line keep explanations in prose. */
+const PROSE_DEFAULT_RULE_GENERATIVE_UI = [
+  "- Code blocks are the exception above, not a card to be earned.",
+];
+
+function buildPresentationInstructions(generativeUi: boolean): string {
+  return [
+    ...INSTRUCTIONS_HEAD,
+    ...(generativeUi ? CODE_CARD_RULE_GENERATIVE_UI : CODE_CARD_RULE),
+    ...INSTRUCTIONS_TAIL,
+    ...(generativeUi ? PROSE_DEFAULT_RULE_GENERATIVE_UI : PROSE_DEFAULT_RULE),
+  ].join("\n");
+}
+
+export const AI_SCREEN_PRESENTATION_INSTRUCTIONS = buildPresentationInstructions(false);
 
 export function withAiScreenPresentationInstructions(
   existing: string | undefined,
+  opts?: { generativeUi?: boolean },
 ): string {
   const base = typeof existing === "string" ? existing.trim() : "";
-  return base ? `${base}\n\n${AI_SCREEN_PRESENTATION_INSTRUCTIONS}` : AI_SCREEN_PRESENTATION_INSTRUCTIONS;
+  const instructions = opts?.generativeUi === true
+    ? buildPresentationInstructions(true)
+    : AI_SCREEN_PRESENTATION_INSTRUCTIONS;
+  return base ? `${base}\n\n${instructions}` : instructions;
 }

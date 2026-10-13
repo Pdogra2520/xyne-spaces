@@ -195,6 +195,14 @@ export const OPTIMIZATIONS = {
     defaultOn: true,
     scope: "agent",
   },
+  generative_ui: {
+    label: "Interactive answers in chat",
+    summary: "On the AI screen, the AI sidebar and the claw chat, the agent can answer with a small live interface (choices, sliders, tables, buttons) instead of only text.",
+    detail: "Only applies to direct chats on those three screens. It never applies to Spaces threads, DMs, Slack, WhatsApp, scheduled or automation runs, which keep answering in plain text. A block that fails its check gets one silent retry; if it is still invalid, the chat draws the parts it can and says the rest could not be shown. Adds about 5,000 tokens of instructions to the agent's system prompt on those screens. Turn it off if the agent should answer in plain text only.",
+    group: "answering",
+    defaultOn: true,
+    scope: "agent",
+  },
   jev_tool_progress: {
     label: "Detect stalled tool loops",
     summary: "On long tool loops, Jev scores whether recent calls still make progress; clear stalls get the converge nudge early.",

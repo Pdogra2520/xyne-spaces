@@ -60,6 +60,7 @@ import {
   chatAttachmentDownloadUrl,
   publishDesignArtifact,
   revokeDesignArtifactShare,
+  findGenUiImage,
   type AttachedContextRef,
   type ChatAttachmentMeta,
   type DesignArtifactShare,
@@ -88,6 +89,7 @@ import { Menu as BaseMenu } from "@base-ui-components/react/menu";
 import { Badge } from "./ui/Badge";
 import { SidePanel } from "./ui/SidePanel";
 import { useSnackbar } from "./ui/Snackbar";
+import { GenerativeUiHostContext, renderWithGenerativeUi, type GenerativeUiHost } from "./genui/GenerativeUi";
 
 /* ── helpers ─────────────────────────────────────────────────────── */
 
@@ -886,12 +888,16 @@ export function CitationMarkdown({
   // chip even when the turn's captured tool invocations don't line up — better a
   // visible chip than a silently dropped citation.
   filterUnknownCitations = true,
+  numberingSource,
 }: {
   content: string;
   invocations: ToolInvocation[];
   selectedCitationKey: string | null;
   onOpenCitation: (citation: CitationRef, citationNumber: number, numbers: Map<string, number>) => void;
   filterUnknownCitations?: boolean;
+  /** Number citations across this text instead of `content`: a reply split
+   *  around ```ui blocks keeps one numbering across its markdown segments. */
+  numberingSource?: string;
 }) {
   const knownToolCallIds = useMemo(() => {
     const ids = new Set<string>();
@@ -901,8 +907,8 @@ export function CitationMarkdown({
     return ids;
   }, [invocations]);
   const citationNumbers = useMemo(
-    () => buildCitationNumbers(content, filterUnknownCitations ? knownToolCallIds : undefined),
-    [content, knownToolCallIds, filterUnknownCitations]
+    () => buildCitationNumbers(numberingSource ?? content, filterUnknownCitations ? knownToolCallIds : undefined),
+    [numberingSource, content, knownToolCallIds, filterUnknownCitations]
   );
   const linkedContent = useMemo(
     () => linkifyClawCitations(content, citationNumbers),
@@ -1593,6 +1599,7 @@ function MessageThread({
   runByMsgId,
   onRated,
   hideHtmlSource = false,
+  generativeUi = false,
   designVersionByMessageId,
   onSelectDesignVersion,
 }: {
@@ -1630,6 +1637,9 @@ function MessageThread({
   /** Design consumes fenced HTML in the preview, so do not duplicate the
    *  entire source document inside the adjacent conversation panel. */
   hideHtmlSource?: boolean;
+  /** Render fenced `ui` blocks in assistant replies as live interfaces. Plain
+   *  chat only: Design Studio output and the old v1/v2 views stay markdown. */
+  generativeUi?: boolean;
   designVersionByMessageId?: Map<string, DesignVersion>;
   onSelectDesignVersion?: (index: number) => void;
 }) {
@@ -1926,14 +1936,30 @@ function MessageThread({
                     color: msg.status === "error" ? "var(--color-error, #dc2626)" : undefined,
                   }}
                 >
-                  <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2">
-                    <CitationMarkdown
-                      content={displayContent}
-                      invocations={allConversationInvocations}
-                      selectedCitationKey={selectedCitationKey}
-                      onOpenCitation={onOpenCitation}
-                    />
-                  </div>
+                  {generativeUi ? (
+                    // Split on the RAW reply so citation preprocessing runs per
+                    // markdown segment and never rewrites ui JSON.
+                    renderWithGenerativeUi(displayContent, isStream, (markdown) => (
+                      <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2">
+                        <CitationMarkdown
+                          content={markdown}
+                          numberingSource={displayContent}
+                          invocations={allConversationInvocations}
+                          selectedCitationKey={selectedCitationKey}
+                          onOpenCitation={onOpenCitation}
+                        />
+                      </div>
+                    ))
+                  ) : (
+                    <div className="prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2">
+                      <CitationMarkdown
+                        content={displayContent}
+                        invocations={allConversationInvocations}
+                        selectedCitationKey={selectedCitationKey}
+                        onOpenCitation={onOpenCitation}
+                      />
+                    </div>
+                  )}
                   {isStream && (
                     <span className="ml-1 inline-block h-3 w-1 translate-y-[1px] animate-pulse bg-xyne-fg-muted" />
                   )}
@@ -5852,15 +5878,40 @@ export function ChatPageV3({ mode = "chat" }: ChatPageV3Props) {
   const speedOverride = fastMode ? ("fast" as const) : undefined;
   const thinkingOverride = thinkingLevel ?? undefined;
 
+  // Generative UI is for the plain chat only; Design Studio has its own output contract.
+  const generativeUi = mode !== "design";
+
+  // A block's send button posts a normal, visible user message. send() aborts
+  // an in-flight run, so refuse while any reply is still streaming. Refs keep
+  // the context value stable across the per-delta re-renders.
+  const generativeUiSendRef = useRef({ sending, activeAgentSlug, userId, send, selectedModel, speedOverride, thinkingOverride });
+  generativeUiSendRef.current = { sending, activeAgentSlug, userId, send, selectedModel, speedOverride, thinkingOverride };
+  const generativeUiHost = useMemo<GenerativeUiHost | null>(() => generativeUi ? {
+    send: (text) => {
+      const cur = generativeUiSendRef.current;
+      const message = text.trim();
+      if (cur.sending || !cur.activeAgentSlug || !message) return false;
+      // Same per-chat model, speed and thinking level as a typed send.
+      void cur.send(cur.activeAgentSlug, cur.userId, message, {
+        ...(cur.selectedModel ? { modelOverride: cur.selectedModel } : {}),
+        ...(cur.speedOverride ? { speed: cur.speedOverride } : {}),
+        ...(cur.thinkingOverride ? { thinkingLevel: cur.thinkingOverride } : {}),
+        generativeUi: true,
+      });
+      return true;
+    },
+    findImage: findGenUiImage,
+  } : null, [generativeUi]);
+
   const handleRegenerate = useCallback((assistantMessageId: string) => {
     if (!activeAgentSlug || sending) return;
-    void regenerate(activeAgentSlug, userId, assistantMessageId, selectedModel || undefined, speedOverride, thinkingOverride);
-  }, [activeAgentSlug, sending, regenerate, userId, selectedModel, speedOverride, thinkingOverride]);
+    void regenerate(activeAgentSlug, userId, assistantMessageId, selectedModel || undefined, speedOverride, thinkingOverride, generativeUi);
+  }, [activeAgentSlug, sending, regenerate, userId, selectedModel, speedOverride, thinkingOverride, generativeUi]);
 
   const handleEditUserMessage = useCallback((userMessageId: string, text: string) => {
     if (!activeAgentSlug || sending) return;
-    void editLatestUserMessage(activeAgentSlug, userId, userMessageId, text, selectedModel || undefined, speedOverride, thinkingOverride);
-  }, [activeAgentSlug, sending, editLatestUserMessage, userId, selectedModel, speedOverride, thinkingOverride]);
+    void editLatestUserMessage(activeAgentSlug, userId, userMessageId, text, selectedModel || undefined, speedOverride, thinkingOverride, generativeUi);
+  }, [activeAgentSlug, sending, editLatestUserMessage, userId, selectedModel, speedOverride, thinkingOverride, generativeUi]);
 
   const handleSend = useCallback(() => {
     const text = inputValue.trim();
@@ -5967,6 +6018,7 @@ export function ChatPageV3({ mode = "chat" }: ChatPageV3Props) {
           ...(speedOverride ? { speed: speedOverride } : {}),
           // Per-chat thinking level (composer model menu).
           ...(thinkingOverride ? { thinkingLevel: thinkingOverride } : {}),
+          ...(generativeUi ? { generativeUi: true } : {}),
         });
         if (designSelectionSnapshot) setDesignSelection(null);
         if (manualEditsSnapshot.length > 0) {
@@ -6165,6 +6217,7 @@ export function ChatPageV3({ mode = "chat" }: ChatPageV3Props) {
                     </p>
                   </div>
                 ) : (
+                  <GenerativeUiHostContext.Provider value={generativeUiHost}>
                   <MessageThread
                     messages={messages}
                     sending={sending}
@@ -6213,9 +6266,11 @@ export function ChatPageV3({ mode = "chat" }: ChatPageV3Props) {
                     onApproveAndContinueAction={handleApproveAndContinueAction}
                     onDeclineAction={handleDeclineAction}
                     hideHtmlSource={mode === "design"}
+                    generativeUi={generativeUi}
                     designVersionByMessageId={mode === "design" ? designVersionByMessageId : undefined}
                     onSelectDesignVersion={mode === "design" ? setActiveVersionIndex : undefined}
                   />
+                  </GenerativeUiHostContext.Provider>
                 )}
 
                 {mode === "design" && designSelection && (

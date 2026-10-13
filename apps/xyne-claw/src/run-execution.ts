@@ -150,6 +150,10 @@ export interface InternalRunPayload {
    *  mode_switch debug event; behavior is identical to any other auto run. */
   planContinuation?: boolean;
   generateFollowUpSuggestions?: boolean;
+  /** Opt-in for ```ui blocks in the reply. claw-auth forwards `true` only for a
+   *  direct chat from the AI screen, the AI sidebar or the claw v3 chat; claw
+   *  re-checks the surface (see generativeUiDefaultOn). Anything but `true` is off. */
+  generativeUi?: boolean;
   /** Multi-agent direct chat: the turns other agents answered that this
    *  agent's own session has not seen, as a text note in two variants. The
    *  runtime sends `resume` when it resumes the agent's session and `fresh`
@@ -235,6 +239,7 @@ export async function executeRunFromPayload(
     planContinuation,
     awakening,
     generateFollowUpSuggestions: shouldGenerateFollowUpSuggestions,
+    generativeUi,
     agentHandoff,
   } = payload;
 
@@ -309,6 +314,7 @@ export async function executeRunFromPayload(
       typeof callbackUrl === "string" ? callbackUrl : undefined,
       awakening,
       agentHandoff,
+      generativeUi,
       state,
     );
   } catch (err) {

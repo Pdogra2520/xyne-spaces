@@ -54,6 +54,8 @@ export interface WorkerStartStreamMessage {
       tab?: string;
       /** Per-run thinking level (composer dropdown). Absent = agent default. */
       thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high';
+      /** Opt in to the ```ui generative-interface instructions (AI screen / sidebar only). */
+      generativeUi?: boolean;
       researchContext?: { type: string; id?: string; name: string } | null;
       canvasId?: string;
       workflowContext?: {
@@ -215,6 +217,7 @@ async function executeStream(
         instant: requestBody.instant ?? false,
         ...(requestBody.tab && { tab: requestBody.tab }),
         ...(requestBody.thinkingLevel ? { thinkingLevel: requestBody.thinkingLevel } : {}),
+        ...(requestBody.generativeUi === true ? { generativeUi: true } : {}),
         research_context: requestBody.researchContext ?? null,
         ...(requestBody.canvasId && {
           canvas_id: requestBody.canvasId,

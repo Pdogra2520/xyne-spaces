@@ -209,7 +209,7 @@ function normalizeRelativePath(input: string): string | null {
 }
 
 /** Normalize a skill name/slug to pi's required `^[a-z0-9-]+$` shape. */
-function toPiSlug(rawSlug: string): string {
+export function toPiSlug(rawSlug: string): string {
   return rawSlug
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")

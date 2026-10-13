@@ -9,6 +9,8 @@
 // Same base as the other claw services: same-origin `/claw` by default (the
 // dashboard host routes `/claw/*` to claw-auth; local dev uses the Vite proxy
 // for `/claw/api/v1`).
+import type { UiImageHit } from '@/components/Markdown/GenerativeUi/genUiCore';
+
 export const CLAW_API_BASE = import.meta.env.VITE_CLAW_API_BASE_URL || '/claw';
 
 /** Typed error carrying the HTTP status so callers can branch on it. */
@@ -58,6 +60,14 @@ export async function clawRequest<T>(path: string, init?: RequestInit): Promise<
   }
 
   return res.json() as Promise<T>;
+}
+
+/** A picture for a ```ui image written with a `query` (claw-auth routes/genui-images.ts). */
+export async function findGenUiImage(query: string): Promise<UiImageHit | null> {
+  const { image } = await clawRequest<{ image: UiImageHit | null }>(
+    `/api/v1/genui/image?q=${encodeURIComponent(query)}`,
+  );
+  return image;
 }
 
 /** Calls a standard `/api/v1` endpoint and unwraps its `{ success, data }` envelope. */

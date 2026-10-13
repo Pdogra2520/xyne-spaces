@@ -11,6 +11,7 @@ import {
   forwardRef,
   useImperativeHandle,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import {
   Menu,
@@ -75,6 +76,7 @@ import {
 import { fetchV2ConversationMessages } from '../../services/XyneAI/XyneAISessionsV2Service';
 import { useV2SessionsList, useV2SessionInvalidator } from '../../hooks/useAskAISessionsV2';
 import { xyneAIStreamManager } from '../../services/XyneAI/XyneAIStreamManager';
+import { findGenUiImage } from '../../services/claw/clawRequest';
 import { BASE_URL } from '../../services/clients/apiClient';
 import { createMarkdownComponents } from '../../utils/markdownComponents';
 import { StreamingMarkdownBlocks, rehypeStreamWordFade } from '../utils/StreamingMarkdownBlocks';
@@ -125,6 +127,11 @@ import {
   processTextForCopy,
 } from '../Chat/XyneAISidebar/components/MessageItem';
 import { TurnTimeline } from '../Chat/XyneAISidebar/components/TurnTimeline';
+import {
+  GenerativeUiHostContext,
+  renderWithGenerativeUi,
+} from '../Markdown/GenerativeUi/GenerativeUi';
+import { uiFencesAsText } from '../Markdown/GenerativeUi/genUiCore';
 import { turnDurationLabel, turnFinishedAt } from '../Chat/XyneAISidebar/components/activityShared';
 import { PendingActionBlock } from '../Chat/XyneAISidebar/components/PendingActionBlock';
 import { respondToPendingAction } from '../../services/XyneAI/XyneAIPendingActionService';
@@ -803,18 +810,12 @@ function ChatMessageBubble({
     // only writes `content` on completion. Reading content-only here is what
     // made /ai wait until the end to render anything; mirror the sidebar's
     // MessageItem and prefer streamingContent during streaming.
-    const raw =
-      message.type === 'bot' && message.isStreaming && message.streamingContent
-        ? message.streamingContent
-        : message.content || message.streamingContent || '';
-    return prepareAnswerText(raw, !!message.isStreaming);
-  }, [
-    message.type,
-    message.content,
-    message.streamingContent,
-    message.isStreaming,
-    prepareAnswerText,
-  ]);
+    // Raw: the ui-fence split happens before prepareAnswerText so citation and
+    // design preprocessing never touch a block's JSON.
+    return message.type === 'bot' && message.isStreaming && message.streamingContent
+      ? message.streamingContent
+      : message.content || message.streamingContent || '';
+  }, [message.type, message.content, message.streamingContent, message.isStreaming]);
 
   const inlineCitations = useMemo(
     () => extractInlineCitations(message.content || message.streamingContent || ''),
@@ -1000,6 +1001,16 @@ function ChatMessageBubble({
         )}
       </div>
     ) : null;
+
+  /** An answer text: markdown segments through renderAnswerMarkdown, ```ui
+   *  segments as live blocks. The split runs on the RAW text. */
+  const renderAnswerWithUi = (raw: string, streaming: boolean, busy = streaming): ReactNode =>
+    renderWithGenerativeUi(
+      raw,
+      streaming,
+      md => renderAnswerMarkdown(prepareAnswerText(md, streaming)),
+      { busy },
+    );
 
   const hasUserContent = isUser && message.content.trim().length > 0;
   const hasUserAttachments = isUser && !!message.attachments && message.attachments.length > 0;
@@ -1223,10 +1234,16 @@ function ChatMessageBubble({
           <TurnTimeline
             message={message}
             previewLines={4}
-            renderText={(text, { streaming }) =>
-              renderAnswerMarkdown(prepareAnswerText(text, streaming))
+            renderText={(text, { streaming, turnStreaming }) =>
+              renderAnswerWithUi(text, streaming, turnStreaming)
             }
-            legacyAnswer={displayContent ? renderAnswerMarkdown(displayContent) : null}
+            legacyAnswer={
+              // TurnTimeline only shows this for a message with no parts; skip
+              // the split and markdown work on every streamed frame otherwise.
+              !message.parts?.length && displayContent
+                ? renderAnswerWithUi(displayContent, !!message.isStreaming)
+                : null
+            }
             plan={
               message.planTodos?.length ? (
                 <PlanCard todos={message.planTodos} title={message.planTitle} />
@@ -1489,6 +1506,17 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
     [],
   );
 
+  // What a ```ui block's send button posts through. The composer refuses while
+  // a reply is pending, so a block can never interrupt or double-send a turn.
+  // Stable so the message list never re-renders on its account.
+  const generativeUiHost = useMemo(
+    () => ({
+      send: (text: string): boolean => composerRef.current?.submitPrompt(text) ?? false,
+      findImage: findGenUiImage,
+    }),
+    [],
+  );
+
   useEffect(() => {
     const el = dropZoneRef.current;
     if (!el) return;
@@ -1662,6 +1690,9 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
     isV2,
     agentSlug: effectiveAgentSlug,
     surface: 'page',
+    // Gated here and not in the shared renderer: the AI screen is one of the
+    // two chats whose agents are told they may answer with a ```ui block.
+    generativeUi: isV2,
   });
 
   // Dimensions every act-on-answer click carries (see ChatMessageBubble).
@@ -2545,152 +2576,155 @@ export const AIChatThread = forwardRef<AIChatThreadHandle, AIChatThreadProps>(fu
             aria-label='Chat messages'
           >
             <div ref={contentRef} className='mx-auto flex max-w-3xl flex-col'>
-              <ConversationToolInvocationsContext.Provider value={conversationToolInvocations}>
-                {transcriptMessages.map(message => {
-                  if (isAssistantMessage(message.id)) {
+              <GenerativeUiHostContext.Provider value={generativeUiHost}>
+                <ConversationToolInvocationsContext.Provider value={conversationToolInvocations}>
+                  {transcriptMessages.map(message => {
+                    if (isAssistantMessage(message.id)) {
+                      return (
+                        <ChatMessageBubble
+                          key={message.id}
+                          message={message}
+                          readOnly
+                          onFollowUpSuggestionClick={label => {
+                            assistant?.openPill(message.id, label);
+                          }}
+                        />
+                      );
+                    }
+                    const idx = serverIndexById.get(message.id) ?? -1;
+                    const feedbackValue: FeedbackValue =
+                      message.feedback === 1 ? 'LIKE' : message.feedback === 2 ? 'DISLIKE' : null;
+                    const botTurnIndex =
+                      message.type === 'bot'
+                        ? displayMessages.slice(0, idx + 1).filter(m => m.type === 'bot').length - 1
+                        : -1;
+                    // Branching is disabled for legacy conversations (no parentId).
+                    const branchEnabled = !isLegacyConversation;
+                    const isLatestUserMessage = idx === lastUserIndex;
+                    const isLatestBotMessage = idx === lastBotIndex;
+                    const siblingCount = siblingCountById.get(message.id) ?? 1;
+                    const branchInfo =
+                      branchEnabled && siblingCount > 1
+                        ? { index: siblingIndexById.get(message.id) ?? 0, total: siblingCount }
+                        : undefined;
+                    const restoresHere = restoresByMessageId.get(message.id);
+                    // Anchor on the USER turn: it is persisted first, so its
+                    // timestamp is the real one even while the reply streams.
+                    const previousTurn = idx > 0 ? displayMessages[idx - 1] : undefined;
+                    const showTurnSeparator =
+                      message.type === 'user' &&
+                      (idx === firstUserIndex ||
+                        !previousTurn?.timestamp ||
+                        new Date(message.timestamp).getTime() -
+                          new Date(previousTurn.timestamp).getTime() >
+                          TURN_SEPARATOR_GAP_MS);
                     return (
-                      <ChatMessageBubble
-                        key={message.id}
-                        message={message}
-                        readOnly
-                        onFollowUpSuggestionClick={label => {
-                          assistant?.openPill(message.id, label);
-                        }}
-                      />
+                      // Stable key so the bubble doesn't remount when the id swaps
+                      // temp→server at completion (which would kill the reasoning
+                      // section's transitions).
+                      <Fragment key={message.stableKey ?? message.id}>
+                        {showTurnSeparator && (
+                          <div className='py-3 text-center text-xs text-muted-foreground'>
+                            {formatChatTurnSeparator(message.timestamp)}
+                          </div>
+                        )}
+                        <ChatMessageBubble
+                          trackContext={messageTrackContext}
+                          message={message}
+                          recipientAgentSlug={
+                            isV2 && message.type === 'user' ? message.agentSlug : undefined
+                          }
+                          conversationId={conversationId || undefined}
+                          // A pending action belongs to the agent that proposed
+                          // it, which after a switch may not be the one picked.
+                          agentSlug={message.agentSlug ?? effectiveAgentSlug ?? undefined}
+                          onPendingActionResolved={() => {
+                            if (!conversationId) return;
+                            const refreshArtifacts = (): void => {
+                              void queryClient.invalidateQueries({
+                                queryKey: conversationArtifactsQueryKey(conversationId),
+                              });
+                            };
+                            refreshArtifacts();
+                            window.setTimeout(refreshArtifacts, 4000);
+                            window.setTimeout(refreshArtifacts, 12000);
+                            liveViewerRef.current?.detach();
+                            liveViewerRef.current = {
+                              sessionId: conversationId,
+                              detach: xyneAIStreamManager.attachLiveViewer(
+                                threadId,
+                                conversationId,
+                                effectiveAgentSlug || 'ask-ai',
+                                xyneAIStreamManager.getActiveStream(threadId)?.messages ?? messages,
+                              ),
+                            };
+                          }}
+                          onFlowActionComplete={handleFlowActionComplete}
+                          onCopy={() => {
+                            void navigator.clipboard.writeText(
+                              uiFencesAsText(message.content || message.streamingContent || ''),
+                            );
+                          }}
+                          onFeedback={(id, type) => {
+                            void handleFeedback(id, type);
+                          }}
+                          feedbackValue={feedbackValue}
+                          isV2={isV2}
+                          onRatingChange={handleRatingChange}
+                          onDebug={
+                            isV2 && message.type === 'bot'
+                              ? () => {
+                                  setDebugTurnIndex(botTurnIndex);
+                                  // Pin to this message's run when known (branching-safe);
+                                  // null falls back to turn-index for unlinked live runs.
+                                  setDebugSessionId(message.debugSessionId ?? null);
+                                  setDebugFocusToolCallId(null);
+                                  setShowDebugger(true);
+                                }
+                              : undefined
+                          }
+                          onOpenToolDebug={
+                            isV2 && message.type === 'bot'
+                              ? (toolCallId: string) => {
+                                  setDebugTurnIndex(botTurnIndex);
+                                  setDebugSessionId(message.debugSessionId ?? null);
+                                  setDebugFocusToolCallId(toolCallId);
+                                  setShowDebugger(true);
+                                }
+                              : undefined
+                          }
+                          onEditSubmit={
+                            branchEnabled && isLatestUserMessage
+                              ? (newContent: string) =>
+                                  void handleEditMessage(message.id, newContent)
+                              : undefined
+                          }
+                          onRegenerate={
+                            branchEnabled && isLatestBotMessage && !message.isStreaming
+                              ? () => void handleRegenerate()
+                              : undefined
+                          }
+                          onFollowUpSuggestionClick={
+                            isV2 && isLatestBotMessage && !message.isStreaming
+                              ? handleFollowUpSuggestion
+                              : undefined
+                          }
+                          branchInfo={branchInfo}
+                          onBranchNavigate={
+                            branchInfo
+                              ? (direction: 'prev' | 'next') =>
+                                  handleBranchNavigate(message.id, direction)
+                              : undefined
+                          }
+                        />
+                        {restoresHere?.map(event => (
+                          <ArtifactRestoreNotice key={event.id} event={event} />
+                        ))}
+                      </Fragment>
                     );
-                  }
-                  const idx = serverIndexById.get(message.id) ?? -1;
-                  const feedbackValue: FeedbackValue =
-                    message.feedback === 1 ? 'LIKE' : message.feedback === 2 ? 'DISLIKE' : null;
-                  const botTurnIndex =
-                    message.type === 'bot'
-                      ? displayMessages.slice(0, idx + 1).filter(m => m.type === 'bot').length - 1
-                      : -1;
-                  // Branching is disabled for legacy conversations (no parentId).
-                  const branchEnabled = !isLegacyConversation;
-                  const isLatestUserMessage = idx === lastUserIndex;
-                  const isLatestBotMessage = idx === lastBotIndex;
-                  const siblingCount = siblingCountById.get(message.id) ?? 1;
-                  const branchInfo =
-                    branchEnabled && siblingCount > 1
-                      ? { index: siblingIndexById.get(message.id) ?? 0, total: siblingCount }
-                      : undefined;
-                  const restoresHere = restoresByMessageId.get(message.id);
-                  // Anchor on the USER turn: it is persisted first, so its
-                  // timestamp is the real one even while the reply streams.
-                  const previousTurn = idx > 0 ? displayMessages[idx - 1] : undefined;
-                  const showTurnSeparator =
-                    message.type === 'user' &&
-                    (idx === firstUserIndex ||
-                      !previousTurn?.timestamp ||
-                      new Date(message.timestamp).getTime() -
-                        new Date(previousTurn.timestamp).getTime() >
-                        TURN_SEPARATOR_GAP_MS);
-                  return (
-                    // Stable key so the bubble doesn't remount when the id swaps
-                    // temp→server at completion (which would kill the reasoning
-                    // section's transitions).
-                    <Fragment key={message.stableKey ?? message.id}>
-                      {showTurnSeparator && (
-                        <div className='py-3 text-center text-xs text-muted-foreground'>
-                          {formatChatTurnSeparator(message.timestamp)}
-                        </div>
-                      )}
-                      <ChatMessageBubble
-                        trackContext={messageTrackContext}
-                        message={message}
-                        recipientAgentSlug={
-                          isV2 && message.type === 'user' ? message.agentSlug : undefined
-                        }
-                        conversationId={conversationId || undefined}
-                        // A pending action belongs to the agent that proposed
-                        // it, which after a switch may not be the one picked.
-                        agentSlug={message.agentSlug ?? effectiveAgentSlug ?? undefined}
-                        onPendingActionResolved={() => {
-                          if (!conversationId) return;
-                          const refreshArtifacts = (): void => {
-                            void queryClient.invalidateQueries({
-                              queryKey: conversationArtifactsQueryKey(conversationId),
-                            });
-                          };
-                          refreshArtifacts();
-                          window.setTimeout(refreshArtifacts, 4000);
-                          window.setTimeout(refreshArtifacts, 12000);
-                          liveViewerRef.current?.detach();
-                          liveViewerRef.current = {
-                            sessionId: conversationId,
-                            detach: xyneAIStreamManager.attachLiveViewer(
-                              threadId,
-                              conversationId,
-                              effectiveAgentSlug || 'ask-ai',
-                              xyneAIStreamManager.getActiveStream(threadId)?.messages ?? messages,
-                            ),
-                          };
-                        }}
-                        onFlowActionComplete={handleFlowActionComplete}
-                        onCopy={() => {
-                          void navigator.clipboard.writeText(
-                            message.content || message.streamingContent || '',
-                          );
-                        }}
-                        onFeedback={(id, type) => {
-                          void handleFeedback(id, type);
-                        }}
-                        feedbackValue={feedbackValue}
-                        isV2={isV2}
-                        onRatingChange={handleRatingChange}
-                        onDebug={
-                          isV2 && message.type === 'bot'
-                            ? () => {
-                                setDebugTurnIndex(botTurnIndex);
-                                // Pin to this message's run when known (branching-safe);
-                                // null falls back to turn-index for unlinked live runs.
-                                setDebugSessionId(message.debugSessionId ?? null);
-                                setDebugFocusToolCallId(null);
-                                setShowDebugger(true);
-                              }
-                            : undefined
-                        }
-                        onOpenToolDebug={
-                          isV2 && message.type === 'bot'
-                            ? (toolCallId: string) => {
-                                setDebugTurnIndex(botTurnIndex);
-                                setDebugSessionId(message.debugSessionId ?? null);
-                                setDebugFocusToolCallId(toolCallId);
-                                setShowDebugger(true);
-                              }
-                            : undefined
-                        }
-                        onEditSubmit={
-                          branchEnabled && isLatestUserMessage
-                            ? (newContent: string) => void handleEditMessage(message.id, newContent)
-                            : undefined
-                        }
-                        onRegenerate={
-                          branchEnabled && isLatestBotMessage && !message.isStreaming
-                            ? () => void handleRegenerate()
-                            : undefined
-                        }
-                        onFollowUpSuggestionClick={
-                          isV2 && isLatestBotMessage && !message.isStreaming
-                            ? handleFollowUpSuggestion
-                            : undefined
-                        }
-                        branchInfo={branchInfo}
-                        onBranchNavigate={
-                          branchInfo
-                            ? (direction: 'prev' | 'next') =>
-                                handleBranchNavigate(message.id, direction)
-                            : undefined
-                        }
-                      />
-                      {restoresHere?.map(event => (
-                        <ArtifactRestoreNotice key={event.id} event={event} />
-                      ))}
-                    </Fragment>
-                  );
-                })}
-              </ConversationToolInvocationsContext.Provider>
+                  })}
+                </ConversationToolInvocationsContext.Provider>
+              </GenerativeUiHostContext.Provider>
               <div ref={tailRef} />
             </div>
           </div>

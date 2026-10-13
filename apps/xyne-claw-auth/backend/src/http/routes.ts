@@ -42,6 +42,7 @@ import { agentChatRouter, agentChatInternalRouter } from "../routes/agent-chat.j
 import { artifactAppsRouter } from "../routes/artifact-apps.js";
 import { artifactAppAgentsRouter } from "../routes/artifact-app-agents.js";
 import { artifactAppStorageRouter, storageBearerAuthBridge } from "../routes/artifact-app-storage.js";
+import { genUiImagesRouter } from "../routes/genui-images.js";
 import { designSharesRouter, publicDesignSharesRouter } from "../routes/design-shares.js";
 import { conversationArtifactsRouter } from "../routes/conversation-artifacts.js";
 import { sessionsArchiveRouter } from "../routes/sessions-archive.js";
@@ -184,6 +185,8 @@ function mountCoreApi(app: Express): void {
   app.use(`${BASE}/chain-workflows`, requireAuth, requireNoAccessToken, chainWorkflowsRouter);
   app.use(`${BASE}/spaces`, requireAuth, requireNoAccessToken, spacesRouter);
   app.use(`${BASE}/tools`, requireAuth, requireNoAccessToken, toolsRouter);
+  // Pictures for ```ui blocks: an image written with a `query` instead of a URL.
+  app.use(`${BASE}/genui`, requireAuth, requireNoAccessToken, genUiImagesRouter);
   app.use(`${BASE}/skills`, requireAuth, allowScopedAccessToken({ write: "skills:write" }), skillsRouter);
   // Session-authed UI surface over the MCP Gateway registry (secret x-s2s-key
   // stays server-side; see routes/gateway-registry-ui.ts). Distinct from the

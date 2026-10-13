@@ -5650,3 +5650,21 @@ img.inline-emoji,
 [data-ticket-context-row] [role="combobox"] {
   height: 34px !important;
 }
+
+/* Generative UI blocks (the ```ui fence an agent writes in AI chat). The
+   renderer is theme-agnostic and reads these; every token below exists in all
+   three themes, so there is nothing to override per theme. */
+.gui {
+  --gui-fg: hsl(var(--foreground));
+  --gui-fg-muted: hsl(var(--muted-foreground));
+  --gui-surface: hsl(var(--card));
+  --gui-surface-muted: hsl(var(--muted));
+  --gui-border: hsl(var(--border));
+  --gui-accent: hsl(var(--primary));
+  --gui-accent-fg: hsl(var(--primary-foreground));
+  --gui-positive: var(--status-success);
+  --gui-warning: hsl(var(--warning));
+  --gui-danger: hsl(var(--destructive));
+  --gui-link: var(--link-color);
+  --gui-focus: hsl(var(--primary));
+}

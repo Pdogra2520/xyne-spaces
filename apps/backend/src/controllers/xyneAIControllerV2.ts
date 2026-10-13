@@ -210,6 +210,9 @@ const XyneAIRequestSchemaV2 = z.object({
   attached_context: AttachedContextSchema,
   displayQuery: z.string().optional(),
   draftMode: z.boolean().optional().default(false),
+  // Generative UI opt-in from the AI screen / AI sidebar only. Zod strips
+  // unknown keys, so without this the flag never reaches claw-auth.
+  generativeUi: z.boolean().optional(),
   provider: z.enum(['spaces', 'copilot', 'claude', 'codex']).optional().default('spaces'),
   /** Per-run model pin from the composer's model picker. Rides the agent's
    *  shared LiteLLM credential, so it names a model from that key's own
@@ -316,6 +319,7 @@ export class XyneAIControllerV2 {
       attachedContext,
       attached_context,
       draftMode,
+      generativeUi,
       provider,
       model,
       modelProvider,
@@ -359,6 +363,14 @@ export class XyneAIControllerV2 {
     }
 
     const mode = draftMode ? 'draft' : 'ask';
+    // Only real chat turns may be told to emit ui blocks: cmd+K renders one
+    // plain answer, desk drafts and the design studio write into non-chat
+    // surfaces that would show the fence as raw JSON.
+    const effectiveGenerativeUi =
+      generativeUi === true &&
+      agentSlug !== CMDK_ANSWER_AGENT_SLUG &&
+      !draftMode &&
+      !studioMode;
 
     try {
       // Authorization check - verify user has access to ALL specified channels
@@ -551,6 +563,7 @@ export class XyneAIControllerV2 {
           ...(thinkingLevel ? { thinkingLevel } : {}),
           ...(studioMode ? { studioMode } : {}),
           ...(sandboxMode ? { sandboxMode } : {}),
+          ...(effectiveGenerativeUi ? { generativeUi: true } : {}),
           ...(designArtifactAttachmentId ? { designArtifactAttachmentId } : {}),
           ...(designSelection !== undefined ? { designSelection } : {}),
           ...(pageSelection !== undefined ? { pageSelection } : {}),

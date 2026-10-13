@@ -594,7 +594,12 @@ publicRouter.post("/", requireAuth, requireNoAccessToken, async (req: Request, r
       pageSelection,
       openItems,
       sandboxMode,
+      generativeUi: rawGenerativeUi,
     } = req.body as Record<string, unknown> & { sandboxMode?: "local" | "remote" | "container" };
+    // Set by apps/backend only for the AI screen and sidebar (cmd+K, drafts and
+    // the dashboard-ai builder share this route and must not get it). Design
+    // Studio replies are not chat markdown, so it stays off there too.
+    const generativeUi = rawGenerativeUi === true && studioMode === undefined;
 
     if (!task || typeof task !== "string") {
       res.status(400).json({ success: false, error: "task is required" });
@@ -1430,6 +1435,7 @@ publicRouter.post("/", requireAuth, requireNoAccessToken, async (req: Request, r
     // Composed here so both the base field and the design/page override use it.
     const aiScreenInstructions = withAiScreenPresentationInstructions(
       typeof additionalInstructions === "string" ? additionalInstructions : undefined,
+      { generativeUi },
     );
     const incomingAgentConfig = agentConfig && typeof agentConfig === "object" && !Array.isArray(agentConfig)
       ? agentConfig as Record<string, unknown>
@@ -1538,6 +1544,7 @@ publicRouter.post("/", requireAuth, requireNoAccessToken, async (req: Request, r
       conversationId: convId,
       ...(piConversationId !== convId ? { piSessionConversationId: piConversationId } : {}),
       ...(isRegenerateFlag ? { isRegenerate: true } : {}),
+      ...(generativeUi ? { generativeUi: true } : {}),
       callbackUrl: internalCallbackUrl,
       progressUrl: internalProgressUrl,
       channelId,

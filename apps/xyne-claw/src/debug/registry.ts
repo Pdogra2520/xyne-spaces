@@ -263,6 +263,10 @@ export const EVENTS = defineEvents({
   auto_continue: {
     fields: { attempt: plain(), maxAttempts: plain(), verdict: plain(), answered: plain(), finished: plain(), intent: plain() },
   },
+  // The hidden rewrite of a reply whose ```ui block failed the answer check.
+  generative_ui_retry: {
+    fields: { problemCount: plain(), problems: plain(), clean: plain() },
+  },
 
   // ── Delegation ──────────────────────────────────────────────────────────
   subagent_start: {

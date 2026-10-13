@@ -1,3 +1,4 @@
+import { isDirectChatConversation } from "./conversation-kind.js";
 import { sanitizeAgentHandoff } from "./multi-agent-chat.js";
 import { scopeReplyFormat } from "./reply-format-scope.js";
 import { randomUUID } from "crypto";
@@ -549,6 +550,25 @@ async function persistDetachedRunStart(prepared: PreparedRun): Promise<void> {
       JSON.stringify({ type: "agent_start", sessionId: prepared.sessionId, agentSlug: prepared.agentSlug || "assistant" }),
     )
     .catch(() => {});
+}
+
+/**
+ * Generative-UI opt-in (the ```ui fence primer in claw). Honored only for a
+ * direct chat surface: an internal (S2S) caller, no eventType, and a `chat-`
+ * conversation. Spaces threads, DMs, twins, Slack, scheduled and artifact-app
+ * runs all carry an eventType or another conversation id, and external callers
+ * are never internal, so none of them can switch it on.
+ */
+export function resolveGenerativeUi(
+  body: Record<string, unknown>,
+  ctx: { isInternalRun: boolean; eventType: string | undefined; conversationId: string | undefined },
+): boolean {
+  return (
+    body["generativeUi"] === true &&
+    ctx.isInternalRun &&
+    !ctx.eventType &&
+    isDirectChatConversation(ctx.conversationId)
+  );
 }
 
 export async function prepareRun(
@@ -1607,6 +1627,9 @@ export async function prepareRun(
         ? { planContinuation: true }
         : {}),
       ...(generateFollowUpSuggestions === true ? { generateFollowUpSuggestions: true } : {}),
+      // Allowlisted again: claw only appends the ```ui primer when this arrives,
+      // and resolveGenerativeUi keeps it off every non-chat dispatcher.
+      ...(resolveGenerativeUi(body, { isInternalRun, eventType, conversationId }) ? { generativeUi: true } : {}),
       // Multi-agent direct chat hand-off note (lib/multi-agent-chat.ts). claw picks
       // `resume` or `fresh` once it knows whether the agent's session exists.
       // Explicit allowlist again: drop it here and an agent switch silently

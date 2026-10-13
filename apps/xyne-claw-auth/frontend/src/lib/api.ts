@@ -1,4 +1,5 @@
 import type { User, McpServer, UserConnection, HealthResult, CredentialField, Gateway, GatewayIdentity, GatewayServiceRow, GatewayServiceRequest, Agent, AgentLight, ScheduledJob, ScheduledJobRun } from "./types";
+import type { UiImageHit } from "../v3/components/genui/genUiCore";
 
 import { frontendConfig } from "./config";
 
@@ -106,6 +107,14 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   }
 
   return res.json() as Promise<T>;
+}
+
+/** A picture for a ```ui image written with a `query` (backend routes/genui-images.ts). */
+export async function findGenUiImage(query: string): Promise<UiImageHit | null> {
+  const { image } = await request<{ image: UiImageHit | null }>(
+    `${AUTH_API_URL}/api/v1/genui/image?q=${encodeURIComponent(query)}`,
+  );
+  return image;
 }
 
 export type AdminOrgScope = "org" | "all";
@@ -3376,6 +3385,10 @@ export async function sendChatMessage(
     /** Per-turn thinking level (composer model menu). Overrides the agent's
      *  modelSettings.thinkingLevel for this run only. */
     thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
+    /** Opt this turn into generative UI (the agent may reply with fenced `ui`
+     *  blocks). Only the plain chat sets it; the server still gates it by
+     *  conversation kind. Omitted when off. */
+    generativeUi?: boolean;
   },
 ): Promise<{ conversationId: string; reply: ChatReply }> {
   // Backward-compat: allow passing a single onProgress function (old signature).
@@ -3424,6 +3437,7 @@ export async function sendChatMessage(
       ...(requestOptions?.researchContext ? { researchContext: requestOptions.researchContext } : {}),
       ...(requestOptions?.speed ? { speed: requestOptions.speed } : {}),
       ...(requestOptions?.thinkingLevel ? { thinkingLevel: requestOptions.thinkingLevel } : {}),
+      ...(requestOptions?.generativeUi === true ? { generativeUi: true } : {}),
     }),
     ...(requestSignal ? { signal: requestSignal } : {}),
   });

@@ -24,6 +24,7 @@ import { takeCitations, takeDebug } from "./citations.js";
 import { applyAutoCitations } from "./auto-citations.js";
 import { extractSessionClfTokens } from "./citation-sanitizer.js";
 import { checkReplyFormat, replyFormatNudge, type ResultSectionLimits, getSandboxSession } from "xyne-claw-shared";
+import { uiBlockAwaitsUser, uiBlockProblems, uiBlockRetryNudge } from "./presentation-catalog.js";
 import type {
   ClawAttachmentPayload,
   ClawSandboxPreviewPayload,
@@ -1866,6 +1867,10 @@ export interface RunTaskOptions {
    *  the answer with inline citations. See the post-loop block. */
   citationReflection?: boolean | undefined;
   replyFormat?: ResultSectionLimits | undefined;
+  /** The run may answer with ```ui blocks (generative UI). When the final
+   *  answer holds a block that fails the check, runTask asks for a corrected
+   *  reply once. Set by the run route only for plain chat replies. */
+  generativeUiCheck?: boolean | undefined;
   /** Opt-in generic auto-citations (agentConfig.autoToolCitations). When true,
    *  EVERY tool result that doesn't already self-cite is chunked and prefixed
    *  with inline [clf-<toolCallId>#n] tokens (plus one generic citation per
@@ -2036,6 +2041,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     agentHandoff,
     citationReflection,
     replyFormat,
+    generativeUiCheck,
     autoToolCitations,
     isRegenerate,
     backgroundRegistry,
@@ -4148,6 +4154,13 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     }
     if (!continuable || !answerAssessment) break;
     if (answerAssessment.verdict === "complete") break;
+    // A ```ui block with an input or a send button hands the turn back to the
+    // user, like a question. "Continue the work" would make the agent act on
+    // their behalf (pick the time, send the invite) before they choose.
+    if (generativeUiCheck && uiBlockAwaitsUser(text)) {
+      log.info(`[agent] auto-continue skipped: the reply's ui block is waiting on the user (verdict ${answerAssessment.verdict})`);
+      break;
+    }
     if (
       optEnabled("auto_continue_strict") &&
       answerAssessment.verdict === "partial" &&
@@ -4177,6 +4190,38 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     if (queue._agentEventQueue) await withAbort(queue._agentEventQueue);
     text = computeFinalText();
   }
+  // Generative UI: the chat renders a ```ui block live, so a malformed one shows
+  // as a "could not be displayed" note. Checked last, on the reply the user
+  // keeps, so a block written in a context-gate or auto-continue turn is covered
+  // too. One hidden rewrite, never a loop; a failed check keeps the answer.
+  if (generativeUiCheck && continuable && !verifyResponsesRef && !abortSignal?.aborted) {
+    // Only the check is guarded: the retry turn itself fails, hands off or
+    // aborts exactly like the other nudges above.
+    const checkUi = (reply: string): string[] => {
+      try {
+        return uiBlockProblems(reply);
+      } catch (err) {
+        log.info(`[agent] generativeUi: check failed (${err instanceof Error ? err.message : String(err)}) — keeping the answer as written`);
+        return [];
+      }
+    };
+    const problems = checkUi(text);
+    if (problems.length > 0) {
+      log.info(`[agent] generativeUi: ui block has ${problems.length} problem(s) (${problems.join("; ")}) — nudging rewrite`);
+      turnParts.supersedeTrailingText();
+      await promptWithAbort(() => session.prompt(`<system>${uiBlockRetryNudge(problems)}</system>`));
+      const uq = session as unknown as { _agentEventQueue?: Promise<void> };
+      if (uq._agentEventQueue) await withAbort(uq._agentEventQueue);
+      // A rewrite that came back empty (or as a bare tool call) never erases the
+      // answer already written; alignFinalAnswer puts that answer back at the end.
+      const rewritten = computeFinalText();
+      if (rewritten.trim()) text = rewritten;
+      const after = checkUi(text);
+      log.info(`[agent] generativeUi: rewrite ${after.length === 0 ? "is clean" : `still has problems (${after.join("; ")}) — the chat shows what it can draw`}`);
+      pushDebugEvent("generative_ui_retry", { problemCount: problems.length, problems: problems.slice(0, 6).join("; "), clean: after.length === 0 });
+    }
+  }
+
   pushDebugEvent("session_end", {
     textLength: text.length,
     toolCount: toolInvocations.length,

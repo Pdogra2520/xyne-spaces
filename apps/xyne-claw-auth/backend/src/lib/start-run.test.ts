@@ -12,16 +12,42 @@ vi.mock("../config.js", () => ({
     clawSseTransport: false,
     encryptionKey: Buffer.alloc(32, 7),
     defaultAgentSlug: "assistant",
+    sessionSigningKey: "test-signing-key",
   },
 }));
 
-vi.mock("../db.js", () => ({ prisma: {} }));
+// Any model/method not named here resolves to null, which is what prepareRun
+// treats as "nothing stored" on the happy path the forwardBody tests walk.
+vi.mock("../db.js", () => ({
+  prisma: new Proxy(
+    {},
+    {
+      get: (_target, model) =>
+        model === "user"
+          ? { findUnique: async () => ({ name: "U", email: "u@example.test", orgId: "org-1" }) }
+          : model === "agent"
+            ? {
+                findUnique: async () => ({
+                  id: "agent-1",
+                  slug: "ask-ai",
+                  enabled: true,
+                  systemPrompt: "prompt",
+                  orgId: "org-1",
+                  config: {},
+                  delegationTier: "standard",
+                  skills: [],
+                }),
+              }
+            : new Proxy({}, { get: () => async () => null }),
+    },
+  ),
+}));
 vi.mock("../redis.js", () => ({ redisService: { getConnection: () => ({}) } }));
 vi.mock("xyne-claw-shared", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
 }));
 
-const { startRun } = await import("./start-run.js");
+const { startRun, prepareRun, resolveGenerativeUi } = await import("./start-run.js");
 
 describe("startRun validation failures", () => {
   const input = (body: Record<string, unknown>) => ({
@@ -87,5 +113,82 @@ describe("startRun validation failures", () => {
       status: 403,
       error: "This token does not have the runs:write scope",
     });
+  });
+});
+
+describe("resolveGenerativeUi", () => {
+  const ok = { isInternalRun: true, eventType: undefined, conversationId: "chat-123" };
+
+  it("is on for an internal chat- run with no eventType", () => {
+    expect(resolveGenerativeUi({ generativeUi: true }, ok)).toBe(true);
+  });
+
+  it.each([false, undefined, "true", 1, null, {}])("is off when the body value is %j", (value) => {
+    expect(resolveGenerativeUi({ generativeUi: value }, ok)).toBe(false);
+  });
+
+  it("is off for an external (non-internal) caller", () => {
+    expect(resolveGenerativeUi({ generativeUi: true }, { ...ok, isInternalRun: false })).toBe(false);
+  });
+
+  it.each(["APP_MENTIONED", "DIRECT_MESSAGE", "USER_MENTIONED", "scheduled_job", "automation", "awakening", "artifact_app"])(
+    "is off when eventType is %s",
+    (eventType) => {
+      expect(resolveGenerativeUi({ generativeUi: true }, { ...ok, eventType })).toBe(false);
+    },
+  );
+
+  it.each([undefined, "", "thread-1", "app_abc", "a2a_abc", "scheduled_abc", "C123"])(
+    "is off for conversation id %j",
+    (conversationId) => {
+      expect(resolveGenerativeUi({ generativeUi: true }, { ...ok, conversationId })).toBe(false);
+    },
+  );
+});
+
+describe("prepareRun generativeUi forwarding", () => {
+  const forwarded = async (
+    body: Record<string, unknown>,
+    isInternalRun = true,
+  ): Promise<Record<string, unknown>> => {
+    const result = await prepareRun(
+      { body: { userId: "u1", task: "hi", agentSlug: "ask-ai", ...body }, isInternalRun, isInternalS2SCaller: isInternalRun, wantsSse: false },
+      {},
+    );
+    if (!result.ok) throw new Error(`prepareRun refused: ${result.error}`);
+    return result.prepared.forwardBody;
+  };
+
+  it("forwards generativeUi for an internal chat- run with no eventType", async () => {
+    const body = await forwarded({ conversationId: "chat-abc", generativeUi: true });
+    expect(body["generativeUi"]).toBe(true);
+  });
+
+  it.each([false, "true", 1, null])("does not forward when the body value is %j", async (value) => {
+    const body = await forwarded({ conversationId: "chat-abc", generativeUi: value });
+    expect("generativeUi" in body).toBe(false);
+  });
+
+  it("does not forward when absent", async () => {
+    const body = await forwarded({ conversationId: "chat-abc" });
+    expect("generativeUi" in body).toBe(false);
+  });
+
+  it.each(["APP_MENTIONED", "DIRECT_MESSAGE", "USER_MENTIONED", "scheduled_job", "awakening", "artifact_app"])(
+    "does not forward with eventType %s even on a chat- conversation",
+    async (eventType) => {
+      const body = await forwarded({ conversationId: "chat-abc", generativeUi: true, eventType });
+      expect("generativeUi" in body).toBe(false);
+    },
+  );
+
+  it.each(["thread-1", "app_abc", "scheduled_abc"])("does not forward for conversation %s", async (conversationId) => {
+    const body = await forwarded({ conversationId, generativeUi: true });
+    expect("generativeUi" in body).toBe(false);
+  });
+
+  it("does not forward for a non-internal (cookie or service-token) caller", async () => {
+    const body = await forwarded({ conversationId: "chat-abc", generativeUi: true }, false);
+    expect("generativeUi" in body).toBe(false);
   });
 });

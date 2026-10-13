@@ -161,7 +161,15 @@ import { buildTwinDeliverTool, type TwinDeliverRef } from "../twin-deliver.js";
 import { buildTwinDeliverMandate } from "../twin-prompts.js";
 import { buildTwinPersonaBlock } from "../twin-persona.js";
 import { buildProposePlanTool, PROPOSE_PLAN_TOOL_NAME, type ProposePlanRef } from "../propose-plan.js";
-import { presentationCatalogDefaultOn, isFreePresentationTool, buildPresentationPrimer } from "../presentation-catalog.js";
+import {
+  presentationCatalogDefaultOn,
+  isFreePresentationTool,
+  buildPresentationPrimer,
+  generativeUiDefaultOn,
+  buildGenerativeUiPrimer,
+  generativeUiSkillPaths,
+  skillsForRun,
+} from "../presentation-catalog.js";
 import { buildProposeAgentTool, type ProposeAgentRef } from "../propose-agent.js";
 import { buildDescribeAgentTool, type DescribeAgentRef } from "../describe-agent.js";
 import { buildSuggestConnectorsTool, SUGGEST_CONNECTORS_TOOL_NAME, type SuggestConnectorsRef } from "../suggest-connectors.js";
@@ -587,6 +595,7 @@ router.post("/run", validateS2SKey, async (req, res: Response) => {
     planContinuation,
     awakening,
     generateFollowUpSuggestions: shouldGenerateFollowUpSuggestions,
+    generativeUi,
     agentHandoff,
   } = req.body as InternalRunPayload;
 
@@ -847,6 +856,7 @@ router.post("/run", validateS2SKey, async (req, res: Response) => {
       typeof callbackUrl === "string" ? callbackUrl : undefined,
       awakening,
       agentHandoff,
+      generativeUi,
     ).finally(() => {
       if (activeRun.handoffCapTimer) clearTimeout(activeRun.handoffCapTimer);
       if (activeRun.gracefulInterruptSummaryTimer) clearTimeout(activeRun.gracefulInterruptSummaryTimer);
@@ -974,6 +984,7 @@ router.post("/run", validateS2SKey, async (req, res: Response) => {
         typeof callbackUrl === "string" ? callbackUrl : undefined,
         awakening,
         agentHandoff,
+        generativeUi,
       );
     } catch (err) {
       processTaskError = err;
@@ -1525,6 +1536,7 @@ export async function processTask(
     entryPath?: string;
   },
   agentHandoff?: AgentHandoffNote,
+  generativeUi?: boolean,
   execution?: RunExecutionState,
 ): Promise<void> {
   // Started here so the extractor overlaps session restore + MCP listing;
@@ -1994,10 +2006,13 @@ export async function processTask(
         when: string;
         prompt?: string;
       }>) ?? [];
+    // Triggers and subagents never get the generative-ui skill: only a run
+    // whose chat draws ```ui blocks loads it (skillsForRun on effectiveSkills).
+    const delegableSkills = skillsForRun(skills, false);
     const resolvedTriggers = rawTriggers
       .filter((t) => t.toolName && t.skillSlug)
       .map((t) => {
-        const skill = skills?.find((s) => s.name === t.skillSlug);
+        const skill = delegableSkills?.find((s) => s.name === t.skillSlug);
         return skill
           ? {
               toolName: t.toolName,
@@ -2073,7 +2088,7 @@ export async function processTask(
     // Previous behavior was "inherit ALL parent skills by default" — flipped
     // here. Agents that depended on the old default need to explicitly list
     // the skills they want propagated per subagent.
-    const allSkills = skills ?? [];
+    const allSkills = delegableSkills ?? [];
     const rawSubagentSkills = agentConfig?.["subagentSkills"] as
       | Record<string, string[]>
       | undefined;
@@ -3114,6 +3129,35 @@ export async function processTask(
       !isTwinMentionFlow &&
       !isPlanMode &&
       !isDailyBrief;
+    // Interactive ```ui answers: only a direct chat on the three streaming
+    // surfaces (claw-auth sets the flag), and never when the reply is not a plain
+    // chat message. Each term below is a mode that delivers through a terminal
+    // tool or a fixed format, where a ui fence would be the wrong shape or never
+    // reach the user.
+    const hasOwnDeliveryContract =
+      isTwinMentionFlow ||
+      isPlanMode ||
+      isDailyBrief ||
+      structuredOutputActive ||
+      verifyResponses ||
+      isCopilot ||
+      !!replyFormat ||
+      !!taskCommand ||
+      !!experiment ||
+      !!awakening;
+    const generativeUiOn = generativeUiDefaultOn({
+      generativeUi,
+      eventType,
+      conversationId,
+      isScheduledOrAutomationRun,
+      hasOwnDeliveryContract,
+      enabled: optEnabled("generative_ui"),
+    });
+    if (generativeUi === true) {
+      log(
+        `[generative-ui] ${generativeUiOn ? "on" : "off"} (flag=true event=${eventType ?? "(none)"} optimization=${optEnabled("generative_ui")} ownDelivery=${hasOwnDeliveryContract})`,
+      );
+    }
     const evidenceRef: EvidenceRef = {};
     if (verifyResponses && !isCopilot) {
       const rawCriteria = agentConfig?.["verifyResponseCriteria"];
@@ -3970,6 +4014,7 @@ export async function processTask(
     const extraSkillPathNames = [
       ...(taskCommand?.skillPaths ?? []),
       ...(experiment?.kind === "understanding" ? [UNDERSTANDING_SKILL_PATH] : []),
+      ...generativeUiSkillPaths(XYNE_CLAW_PACKAGE_DIR, generativeUiOn),
     ];
 
     const securityGuide = `\n\n## Security mode\nYou are in a security run (epoch ${experiment?.epoch ?? 0}; focus ${experiment?.focus ?? "unspecified"}). Keep TWO TIERS apart, because mixing them is what makes a security report untrustworthy.\n\nLEAD (status=conjecture) — you read the code and the defect looks real. Cite file:line. Most findings belong here, and there is no shame in it.\nCONFIRMED (status=proved) — you EXECUTED it and captured the result: the request you sent, the status or output you got back, and where you verified the effect. The ledger refuses a close without an observation, so do not try to word around it. A script that greps source and asserts a vulnerable pattern is present is not a confirmation — it re-proves what you already read.\n\nDEFENDED is a real result. If you try it and a guard stops you, close it refuted and name the guard. Also check whether a SAFE SIBLING already exists — the same operation done correctly elsewhere in the repo. That has been the single most common shape, and it is the cheapest fix to recommend.\n\nDo not promote a lead because it looks obvious. Confirming a wrong finding is expensive: it becomes a ticket someone has to disprove.\n\nThis run is TIME-BOXED: end-experiment refuses until the deadline, because attack surface cannot be exhausted — there is always one more endpoint. When a surface runs dry, move to a different one rather than restating closed findings.\n\nThe DELIVERABLE is ONE markdown report with a STABLE filename, extended EVERY epoch (so a run that ends at the deadline still delivers everything found), with the two tiers in separate sections and the exact reproduction for every CONFIRMED entry. The sandbox recycles — if the file is missing locally, recover it with spaces-thread-attachments + spaces-fetch-attachment and extend THAT.`;
@@ -3997,7 +4042,9 @@ export async function processTask(
     const siftGuide = optEnabled("jev_result_sift") ? RESULT_SIFT_GUIDE : "";
     const effectiveSystemPrompt = ((channelId
       ? `${basePrompt}${citationGuide}${SPACES_MENTION_GUIDE}`
-      : `${basePrompt}${citationGuide}`) + authoritativeSdlcContext) + siftGuide + twinMandate + experimentGuide;
+      : `${basePrompt}${citationGuide}`) + authoritativeSdlcContext) + siftGuide + twinMandate + experimentGuide +
+      // System prompt, not fullContext: it is the same text every turn, so it stays in the prompt cache.
+      (generativeUiOn ? `\n\n${buildGenerativeUiPrimer()}` : "");
     // Proof (twin mention flow only) that BOTH prompt changes actually reach the
     // model: the twin_deliver mandate + its who/where line in the SYSTEM prompt,
     // and the "@mentioned by" note in the USER-prompt context. Grep the run logs
@@ -4064,10 +4111,14 @@ export async function processTask(
             ].join("\n"),
           }))
         : [];
-    const effectiveSkills =
+    // The generative-ui skill (a dashboard skill in production) only goes to
+    // runs whose chat draws ```ui blocks.
+    const effectiveSkills = skillsForRun(
       fastModeSubagentSkills.length > 0
         ? [...(skills ?? []), ...fastModeSubagentSkills]
-        : skills;
+        : skills,
+      generativeUiOn,
+    );
 
     // Quota fallback wrapper: walks the agent owner's `providerOrder` on
     // 429 / insufficient_quota / out-of-credits, then drops to "spaces" (Kimi
@@ -4177,6 +4228,7 @@ export async function processTask(
           : {}),
         citationReflection,
         replyFormat,
+        ...(generativeUiOn ? { generativeUiCheck: true } : {}),
         autoToolCitations,
         // Thread invocations (Spaces/Slack replies — channelId present) keep a
         // clean posted reply = the last 2 assistant turns; ask-ai and every other

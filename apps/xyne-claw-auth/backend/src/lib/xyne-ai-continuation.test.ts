@@ -113,6 +113,33 @@ describe("dispatchXyneAiContinuationRun", () => {
     expect(body["idempotencyKey"]).toBe("write_continue_ticket-proposal-abc");
   });
 
+  it("opts a chat- conversation into generative UI and scopes the code-card rule to code", async () => {
+    await dispatchXyneAiContinuationRun({
+      ...BASE,
+      prompt: "continue",
+      idempotencyKey: "user_answer_gen-ui",
+      failureMessage: "x",
+    });
+
+    const body = state.fetchBodies[0]!;
+    expect(body["generativeUi"]).toBe(true);
+    expect(body["additionalInstructions"]).toContain("about to type a code ``` fence in your reply");
+  });
+
+  it("leaves generative UI off for a conversation that is not a direct chat", async () => {
+    await dispatchXyneAiContinuationRun({
+      ...BASE,
+      conversationId: "app_abc",
+      prompt: "continue",
+      idempotencyKey: "user_answer_no-gen-ui",
+      failureMessage: "x",
+    });
+
+    const body = state.fetchBodies[0]!;
+    expect("generativeUi" in body).toBe(false);
+    expect(body["additionalInstructions"]).not.toContain("```ui");
+  });
+
   it("sanitises and caps the idempotency key", async () => {
     await dispatchXyneAiContinuationRun({
       ...BASE,

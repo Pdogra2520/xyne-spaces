@@ -10,10 +10,12 @@
     "./tools": "./src/tools/index.ts",
     "./tools/pgm": "./src/tools/pgm/index.ts",
     "./tools/google": "./src/tools/google/index.ts",
-    "./tools/react-artifact": "./src/tools/react-artifact/index.ts"
+    "./tools/react-artifact": "./src/tools/react-artifact/index.ts",
+    "./gen-ui": "./src/gen-ui.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "sync:gen-ui": "node scripts/sync-gen-ui.mjs",
     "postinstall": "pnpm exec playwright install chromium",
     "test": "vitest run",
     "test:watch": "vitest"

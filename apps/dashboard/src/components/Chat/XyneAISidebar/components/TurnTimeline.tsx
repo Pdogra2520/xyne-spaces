@@ -38,6 +38,8 @@ import {
 export interface TurnTextState {
   /** This text is still being written. */
   streaming: boolean;
+  /** The turn is still running: a later step or text part may still come. */
+  turnStreaming: boolean;
 }
 
 type TurnMessage = Pick<
@@ -118,7 +120,10 @@ export function TurnTimeline({
           <Fragment key={segment.kind === 'text' ? segment.part.id : segment.id}>
             {segment.kind === 'text' ? (
               <div className='min-w-0'>
-                {renderText(segment.part.text, { streaming: streaming && isLast })}
+                {renderText(segment.part.text, {
+                  streaming: streaming && isLast,
+                  turnStreaming: streaming,
+                })}
               </div>
             ) : (
               <StepGroup

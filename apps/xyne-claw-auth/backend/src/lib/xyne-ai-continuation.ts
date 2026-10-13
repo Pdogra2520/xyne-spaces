@@ -4,6 +4,7 @@ import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { redisService } from "../redis.js";
 import { agentRunRepository, chatMessageRepository } from "../repositories/index.js";
+import { isDirectChatConversation } from "./conversation-kind.js";
 import { errMsg } from "./errors.js";
 import { resolveFastMode } from "./fast-mode.js";
 
@@ -105,6 +106,10 @@ export async function dispatchXyneAiContinuationRun(input: {
       ? withAiScreenPresentationTools(storedConfig, storedConfig["tools"], delegationTier)
       : null;
 
+    // Keeps the ```ui primer on after a card answer or approval. prepareRun
+    // re-checks the chat- id, so a non-chat conversation could not honor it.
+    const generativeUi = isDirectChatConversation(input.conversationId);
+
     const runRes = await fetch(`${CONFIG.internalUrl}/claw/api/v1/internal/run`, {
       method: "POST",
       headers: {
@@ -124,7 +129,8 @@ export async function dispatchXyneAiContinuationRun(input: {
         idempotencyKey: input.idempotencyKey.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128),
         detached: true,
         __persistedByCaller: true,
-        additionalInstructions: withAiScreenPresentationInstructions(undefined),
+        additionalInstructions: withAiScreenPresentationInstructions(undefined, { generativeUi }),
+        ...(generativeUi ? { generativeUi: true } : {}),
         ...(enrichedConfig ? { agentConfig: enrichedConfig } : {}),
         ...(providers?.parent ? { provider: providers.parent } : {}),
         ...(providers && Object.keys(providers.providerConfigs).length > 0

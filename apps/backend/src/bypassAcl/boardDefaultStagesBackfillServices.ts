@@ -43,7 +43,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * Idempotent: the insert re-checks inside a transaction that the board still has no stages,
  * so re-running, or racing a user who is saving stages, never adds a second set.
  *
- * Spans every workspace, so it runs under asSystem.
+ * Spans every workspace, so it runs under asSystem. Not called from this (public) repo: the
+ * admin controller and route live in xyne-spaces-private
+ * (controllers/boardDefaultStagesBackfillController.ts), which imports this bypass primitive
+ * per the repo-coupling rule that no bypass logic may live in the private tree itself.
  */
 export function runBoardDefaultStagesBackfillAsSystem(
   options: BoardDefaultStagesBackfillOptions

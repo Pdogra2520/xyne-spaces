@@ -1,3 +1,21 @@
+## [1.496.0](https://github.com/juspay/xyne-spaces/compare/v1.495.0...v1.496.0) (2026-10-13)
+
+
+### Features
+
+* default new agents to sandbox + safe system tools with top-25 cap ([#2986](https://github.com/juspay/xyne-spaces/issues/2986)) ([2bdcfd2](https://github.com/juspay/xyne-spaces/commit/2bdcfd28e8fdd56935148561df193d137622983a))
+* get_fleet_stats system tool for daily xyne-claw fleet reports ([#2988](https://github.com/juspay/xyne-spaces/issues/2988)) ([cd117db](https://github.com/juspay/xyne-spaces/commit/cd117db6ad6779d2df4cbcbdbd40c74244515d66))
+
+
+### Bug Fixes
+
+* attach reload live viewer as the in-flight agent and … ([#2955](https://github.com/juspay/xyne-spaces/issues/2955)) ([02ce4cd](https://github.com/juspay/xyne-spaces/commit/02ce4cd063c5360022ad3396f4eb4eba5fc97f78))
+* let conversation members read every artifact in a sha… ([#2968](https://github.com/juspay/xyne-spaces/issues/2968)) ([afaac98](https://github.com/juspay/xyne-spaces/commit/afaac9820f6f8a81b91a9c1e4d5504ff571e2ef6))
+* let Stop cancel a run the tab reattached to ([#2956](https://github.com/juspay/xyne-spaces/issues/2956)) ([9bc35c6](https://github.com/juspay/xyne-spaces/commit/9bc35c6746d3d94d086c5f8430e07c013c999b9d))
+* return readable, typed error codes from flow actions ([#2989](https://github.com/juspay/xyne-spaces/issues/2989)) ([49c1664](https://github.com/juspay/xyne-spaces/commit/49c16645b0d52fb00813aec86e1f27aa9c1fd677))
+* show why a failed Xyne AI reply failed instead of a blank turn ([#2967](https://github.com/juspay/xyne-spaces/issues/2967)) ([d86f4cf](https://github.com/juspay/xyne-spaces/commit/d86f4cfbc5a2308b281a49d210d5548b59fcfe03))
+* Xyne AI: No setting to turn auto-open off ([#2973](https://github.com/juspay/xyne-spaces/issues/2973)) ([e2b4d1e](https://github.com/juspay/xyne-spaces/commit/e2b4d1e296396a819aa0c9deef6e64c2910f9643))
+
 ## [1.495.0](https://github.com/juspay/xyne-spaces/compare/v1.494.0...v1.495.0) (2026-10-13)
 
 

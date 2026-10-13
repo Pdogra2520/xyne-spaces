@@ -66,6 +66,7 @@ export function useRecordingSearch({
         limit: SEARCH_LIMIT,
         offset: 0,
         filterOnly: query.length === 0,
+        keywordOnly: true,
         ...(ownerKey ? { from: ownerKey } : {}),
       };
 

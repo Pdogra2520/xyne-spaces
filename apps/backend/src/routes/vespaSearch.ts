@@ -48,6 +48,7 @@ export const relatedContextRouter = Router();
  * @param {string} stage - Filter by ticket stage (optional)
  * @param {string} assignee - Filter by assigned user ID (optional)
  * @param {boolean} filterOnly - Enable filter-only mode (no query text required) (optional)
+ * @param {boolean} keywordOnly - Match keywords only, skipping vector retrieval (optional)
  * @param {boolean} includeDebugInfo - Include debug info in response (optional)
  * @param {boolean} searchId - searchId (optional)
  * @param {string} presentationSummary - Vespa presentation.summary profile, e.g. "lean" (optional, defaults to "lean")

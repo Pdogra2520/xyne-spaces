@@ -57,7 +57,8 @@ export function RecordingSearchInput({
         .filter(mention => mention.type === ChipType.USER)
         .map(mention => mention.id);
       setSelectedOwnerIds(ownerIds);
-      onChange(text, ownerIds);
+      // An `@name` still being typed is an owner lookup, not search text.
+      onChange(text.replace(/(^|\s)@\S*$/, '$1'), ownerIds);
     },
     [onChange],
   );

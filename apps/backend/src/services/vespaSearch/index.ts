@@ -233,6 +233,7 @@ export const searchHandler = async (req: Request, res: Response): Promise<void> 
       assignee,    // Assigned user name
       userGroup,   // User group ID(s) - comma-separated
       filterOnly,  // Flag for filter-only search (no query text)
+      keywordOnly, // 'true' skips vector retrieval: hits must contain the query words
       collectionId, // KB collection id(s) - comma-separated; restricts file results to those clIds
       fileId,      // KB file id(s) - comma-separated; restricts file results to those Vespa docIds (collectionItem.fileId)
       callType,   // Call type filter (e.g. HEADLESS for recordings)
@@ -666,6 +667,7 @@ export const searchHandler = async (req: Request, res: Response): Promise<void> 
       mail: { userEmail },
       call: {},
       filterOnly: filterOnly === 'true',
+      keywordOnly: keywordOnly === 'true',
       workspaceId,
     };
 

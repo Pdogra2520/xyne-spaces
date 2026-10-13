@@ -106,8 +106,17 @@ function getSnapshot(): string | null {
   return currentSlug;
 }
 
+/**
+ * Something already set the agent this load — a pick, or an opened chat
+ * continuing with its own agent (Ask AI included). The default must not
+ * replace it when the agent list arrives later. Not persisted: it only guards
+ * this load's default.
+ */
+let agentChosenThisLoad = false;
+
 function setSelectedAgentSlugStore(slug: string | null): void {
   const normalized = slug === 'ask-ai' ? null : slug;
+  agentChosenThisLoad = true;
   // Picking an agent forgets an earlier explicit Auto / Ask AI; clearing the
   // agent is itself a choice, so the default no longer stands in for it.
   if (normalized !== null) writeChoice(null);
@@ -151,7 +160,10 @@ export function useDefaultAgent(agents: ReadonlyArray<{ slug: string }> | undefi
       writeUrlAgent(null);
       emit();
     }
-    if (currentSlug !== null) return;
+    // An Ask AI chat restored before the list arrived set `null` — the same
+    // value as "nothing decided" — so the store, not the slug, says it was a
+    // choice. Without this, reloading an Ask AI chat switched it to the default.
+    if (currentSlug !== null || agentChosenThisLoad) return;
     const choice = readChoice();
     if (choice === 'ask-ai') {
       setAskAIAuto(false);

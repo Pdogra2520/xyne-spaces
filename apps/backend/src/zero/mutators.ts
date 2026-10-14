@@ -174,6 +174,7 @@ import { getStorageService } from '@/services/storage';
 import { summaryTemplateService } from '@/services/summaryTemplateService';
 import { repositories } from '@/database/repositories';
 import { db } from '@/database/client';
+import { channelConnectIdFor } from '@/database/connectStamp';
 import { parseDlAliases, dlAddressesFor } from '@/services/dlResolver';
 import { vespaQueue } from '@/queues/vespaQueue';
 import { ticketReassignmentQueue } from '@/queues/ticketReassignmentQueue';
@@ -12501,6 +12502,7 @@ export function createMutators(
           await tx.mutate.sdlc_tracks.insert({
             id: args.id,
             workspaceId: authData.workspaceId,
+            channelConnectId: (await channelConnectIdFor(args.channelId)) ?? undefined,
             name: args.name,
             description: args.description,
             status: 'ACTIVE',

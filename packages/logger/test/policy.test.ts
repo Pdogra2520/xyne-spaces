@@ -46,6 +46,16 @@ describe("parseRedactConfig", () => {
   });
 });
 
+describe("prototype safety", () => {
+  it("rejects __proto__ / constructor / toString keys and never writes them", () => {
+    const c = parseRedactConfig('{"__proto__": ["x"], "constructor": ["y"], "toString": ["z"], "secretWords": ["otp"]}');
+    expect(c.rejected).toEqual(["__proto__", "constructor", "toString"]);
+    expect(c.value).toEqual({ secretWords: ["otp"] });
+    expect(Object.getPrototypeOf(c.value)).toBe(Object.prototype);
+    expect(c.accepted).toEqual(["secretWords:otp"]);
+  });
+});
+
 describe("word lists", () => {
   it("the fallback reproduces the detector's documented behaviour", () => {
     for (const k of ["password", "accessToken", "x-api-key", "privateKey", "pass_phrase", "setcookie", "clientsecret"]) expect(isSecretKey(k)).toBe(true);

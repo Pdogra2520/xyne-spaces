@@ -22,6 +22,7 @@ export const FALLBACK_KEY_WORDS = Object.freeze({
   booleanFlagPrefixes: ["has", "is"],
 });
 type KeyWordList = keyof typeof FALLBACK_KEY_WORDS;
+const CONFIG_FIELDS: readonly string[] = ["allowPaths", ...Object.keys(FALLBACK_KEY_WORDS)];
 
 export interface RedactConfig {
   readonly enabled: boolean;
@@ -61,9 +62,13 @@ export function parseRedactConfig(raw: unknown): RedactConfig {
   const rejected = obj || raw === undefined || raw === null || raw === "" ? [] : [String(raw).slice(0, 200)];
   // Anything but a boolean is rejected and keeps redaction on.
   if (typeof enabled !== "boolean") rejected.push(`enabled:${JSON.stringify(enabled)}`);
-  for (const [field, entries] of Object.entries(lists)) {
-    const re = field === "allowPaths" ? ALLOW_PATH_RE : field === "secretWordPairs" ? PAIR_RE : field in FALLBACK_KEY_WORDS ? WORD_RE : null;
-    if (!re || !Array.isArray(entries)) {
+  // Iterate our own field names, never the config's keys (no `__proto__`/`constructor` writes).
+  for (const field of Object.keys(lists)) if (!CONFIG_FIELDS.includes(field)) rejected.push(field);
+  for (const field of CONFIG_FIELDS) {
+    if (!Object.hasOwn(lists, field)) continue;
+    const entries = lists[field];
+    const re = field === "allowPaths" ? ALLOW_PATH_RE : field === "secretWordPairs" ? PAIR_RE : WORD_RE;
+    if (!Array.isArray(entries)) {
       rejected.push(field);
       continue;
     }

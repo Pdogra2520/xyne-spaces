@@ -371,6 +371,17 @@ function WorkspacePaneInner({
 
   const showDetail =
     (tab === 'artifacts' || tab === 'sources' || tab === 'files') && selected !== null;
+  // A live preview (noVNC browser, VS Code) loses its session when its iframe unmounts,
+  // and with resize=remote every reconnect resizes the sandbox screen too. So it mounts
+  // the first time the Preview tab is opened, then stays mounted, only hidden, while
+  // another tab shows. Each conversation starts unmounted again.
+  const previewShown = tab === 'preview';
+  const [previewMountedFor, setPreviewMountedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (previewShown && previewArtifact) setPreviewMountedFor(conversationId ?? '');
+  }, [previewShown, previewArtifact, conversationId]);
+  const keepPreview =
+    previewArtifact !== null && (previewShown || previewMountedFor === (conversationId ?? ''));
   // A web page open in a tab, kept loaded for the agent while the conversation is.
   const hasOpenPages = surfaceItems.some(
     item => tabs.openIds.includes(item.id) && (item.kind === 'link' || item.kind === 'page'),
@@ -588,6 +599,23 @@ function WorkspacePaneInner({
             />
           </div>
         ) : null}
+        {keepPreview && previewArtifact ? (
+          <div
+            key={previewArtifact.id}
+            // Hidden by visibility, not display:none: a 0x0 frame would make noVNC's
+            // resize=remote shrink the sandbox screen.
+            className={
+              previewShown ? 'absolute inset-0 min-h-0 w-full' : 'invisible absolute inset-0'
+            }
+            aria-hidden={previewShown ? undefined : true}
+          >
+            <ArtifactInlineView
+              artifact={previewArtifact}
+              appPane={appPane}
+              reviewGuide={reviewGuide}
+            />
+          </div>
+        ) : null}
         {showDetail ? null : tab === 'artifacts' ? (
           <ArtifactList
             artifacts={listedArtifacts}
@@ -613,13 +641,7 @@ function WorkspacePaneInner({
             />
           )
         ) : tab === 'preview' ? (
-          previewArtifact ? (
-            <ArtifactInlineView
-              artifact={previewArtifact}
-              appPane={appPane}
-              reviewGuide={reviewGuide}
-            />
-          ) : (
+          previewArtifact ? null : (
             <div className='flex h-full flex-col items-center justify-center gap-1 px-8 text-center'>
               <p className='text-sm font-medium text-foreground'>Nothing to preview</p>
               <p className='text-xs text-muted-foreground'>

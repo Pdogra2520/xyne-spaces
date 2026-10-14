@@ -4,31 +4,36 @@ import { newConnectId, createConnectGroupForEntity, resolveCanvasConnectId, Conn
 import { PrismaClient } from '@prisma/client';
 import { transaction } from '../base';
 import { v4 as uuidv4 } from 'uuid';
-import type { Prisma } from '@prisma/client';
-import { lockMessageMetadata } from '@/bypassAcl/rowLockServices';
+import { Prisma } from '@prisma/client';
+import { retryOnWriteConflict } from './callMessageMetadataTx';
 export function updateCallMessageMetadataTx(prisma: PrismaClient, callMessage: any, canvasUrl: string | null, metadataKey: string) {
-  return transaction(['Message'], 'updateCallMessageMetadata: locked message metadata merge and update must commit atomically; tx is not ACL-wrapped', prisma, async (tx) => {
-    // Title generation and first-chunk Canvas publication can now update
-    // this message concurrently. Lock the row and merge from the latest
-    // metadata so neither write erases the other's key.
-    const lockedMessage = await lockMessageMetadata(tx, callMessage.messageId);
-    if (!lockedMessage) {
-      return;
-    }
+  // Title generation and first-chunk Canvas publication can update this message concurrently.
+  // Run SERIALIZABLE and retry on write conflict so the merge always starts from the latest
+  // metadata and neither write erases the other's key. No raw SQL / FOR UPDATE needed.
+  return retryOnWriteConflict(() =>
+    transaction(['Message'], 'updateCallMessageMetadata: message metadata merge and update must commit atomically; tx is not ACL-wrapped', prisma, async (tx) => {
+      const lockedMessage = await tx.message.findUnique({
+        where: { messageId: callMessage.messageId },
+        select: { metadata: true },
+      });
+      if (!lockedMessage) {
+        return;
+      }
 
-    // Set the canvas URL, or drop the key entirely when clearing (null).
-    const currentMetadata = (lockedMessage.metadata as Record<string, any>) || {};
-    const nextMetadata = { ...currentMetadata };
-    if (canvasUrl === null) {
-      delete nextMetadata[metadataKey];
-    } else {
-      nextMetadata[metadataKey] = canvasUrl;
-    }
-    await tx.message.update({
-      where: { messageId: callMessage.messageId },
-      data: { metadata: nextMetadata },
-    });
-  });
+      // Set the canvas URL, or drop the key entirely when clearing (null).
+      const currentMetadata = (lockedMessage.metadata as Record<string, any>) || {};
+      const nextMetadata = { ...currentMetadata };
+      if (canvasUrl === null) {
+        delete nextMetadata[metadataKey];
+      } else {
+        nextMetadata[metadataKey] = canvasUrl;
+      }
+      await tx.message.update({
+        where: { messageId: callMessage.messageId },
+        data: { metadata: nextMetadata },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
+  );
 }
 
 export async function createPRDCanvasTx(prisma: PrismaClient, canvasId: string, title: string, channelId: string, workspaceId: string, createdByUserId: string, now: Date, callId: string, conversationId: string, accessMode: string, callCreatorUserId: string) {

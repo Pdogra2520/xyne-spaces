@@ -581,7 +581,7 @@ export class MessagesSideEffectHandler extends BaseSideEffectHandler {
 
     const workspaceId = await channelRepository.getWorkspaceId(channelId);
     // In thread replies, disable @channel/@here expansion by not passing channelId.
-    // contentForMentions is already computed above (flow text for FlowJSON, raw HTML otherwise)
+    // contentForMentions is already computed above (the note for forwards, flow text for FlowJSON, raw HTML otherwise)
     const mentionedUsers = await extractAllUsersForNotification(
       contentForMentions,
       workspaceId,

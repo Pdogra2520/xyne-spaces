@@ -1,5 +1,5 @@
 import { ReactElement } from 'react';
-import { parseForwardedMessageXml, parseSlashCommandArtifactMessage } from '@xyne/shared';
+import { parseSlashCommandArtifactMessage } from '@xyne/shared';
 import type { ActivityWithRelated } from '../../types/activity';
 import { MessageBubble } from '../ui/MessageBubble/MessageBubble';
 import { AtMark } from '@xyne/icons';
@@ -9,6 +9,7 @@ import {
   SlashCommandArtifactBadge,
 } from './SlashCommandArtifactActivity';
 import { RenderMessageWithHTML } from '../Chat/RenderMessageWithHTML/RenderMessageWithHTML';
+import { getReactionMessagePreview } from './reactionMessagePreview';
 import { getFlowJsonPreviewText } from '../../utils/flowPreview';
 import { useUser } from '../../hooks/useUsers';
 import { getUserDisplayName } from '../../utils/userDisplayName';
@@ -26,7 +27,6 @@ export const MessageMentionActivity = ({
   // Mentioning someone in a SEV2 notifies them as a plain mention, so this row —
   // not just the artifact row — has to present the artifact.
   const artifact = parseSlashCommandArtifactMessage(message?.content);
-  const forwarded = parseForwardedMessageXml(message?.content ?? '');
 
   const { baseRoute } = useRouteContext();
 
@@ -75,7 +75,7 @@ export const MessageMentionActivity = ({
         <div className='text-foreground text-sm line-clamp-1 truncate whitespace-normal break-all'>
           {getFlowJsonPreviewText(message.content) ?? (
             <RenderMessageWithHTML
-              message={forwarded ? (forwarded.optionalText ?? forwarded.content) : message.content}
+              message={getReactionMessagePreview(message.content)}
               showEdited={message.edited}
               disableLinks
             />

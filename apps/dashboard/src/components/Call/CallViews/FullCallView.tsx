@@ -584,7 +584,8 @@ export function FullCallView({
       {/* Floating reactions overlay */}
       <ReactionsOverlay reactions={reactions} />
 
-      {/* Network quality toast — floats top-center, auto-dismisses after 5s */}
+      {/* Network quality toast — floats top-center, shown only after 2s of sustained
+          poor/lost quality, auto-dismisses after 5s */}
       {showQualityToast && (
         <div
           className={cn(
@@ -607,8 +608,10 @@ export function FullCallView({
           lights in Electron. */}
       <div
         className={cn(
-          'relative flex h-14 shrink-0 items-center justify-between gap-3 pr-3 sm:pr-4',
-          isElectron && isMac ? 'pl-24' : 'pl-3 sm:pl-4',
+          'relative flex shrink-0 items-center justify-between gap-3 pr-3 sm:pr-4',
+          isElectron && isMac
+            ? 'h-14 pl-24 [[data-fs]_&]:pl-3 sm:[[data-fs]_&]:pl-4'
+            : 'h-16 pl-3 pt-4 sm:pl-4',
         )}
       >
         <div className='flex min-w-0 items-center gap-2 sm:gap-3'>

@@ -1,6 +1,10 @@
 /**
  * Effective MCP credential resolution. Resolution order (first hit wins):
  *
+ *   0. subagent — SubagentMcpConnection, or the subagent's mcpInstanceMap
+ *               routing to one agent instance. Only consulted when caller
+ *               passes `subagentId` (a call from inside a subagent's run, or
+ *               the approval of a write one queued).
  *   1. agent  — AgentMcpConnection pinned by the agent owner. The agent
  *               wins because pasting creds on an agent is a deliberate
  *               operator contract ("this agent talks to THIS Grafana").
@@ -52,6 +56,27 @@ export interface EffectiveCredentials {
    *  avoid mutating global creds on a per-user code path). False for both
    *  agent-pinned and global creds. */
   isUserOwned: boolean;
+  instance?: string;
+  /** The subagent that determined this credential — its own pinned connection,
+   *  or its mcpInstanceMap routing to one agent instance. A write queued under
+   *  it binds this id into its signature, so the approval resolves the same
+   *  identity instead of falling back to the parent agent's. */
+  viaSubagent?: string;
+}
+
+async function subagentInstanceFor(
+  subagentId: string,
+  serverType: string,
+  orgId: string,
+): Promise<string | undefined> {
+  const row = await prisma.subagentDefinition.findFirst({
+    where: { id: subagentId, orgId },
+    select: { mcpInstanceMap: true },
+  });
+  const map = row?.mcpInstanceMap;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return undefined;
+  const slug = (map as Record<string, unknown>)[serverType];
+  return typeof slug === "string" && slug.trim() ? slug.trim() : undefined;
 }
 
 /**
@@ -81,11 +106,12 @@ export function isPrivateUserCredential(serverType: string, source: EffectiveCre
 async function ensureSpacesWorkspaceCredential(
   userId: string,
   credentials: Record<string, unknown>,
+  workspaceHint?: string | null,
 ): Promise<Record<string, unknown>> {
   const existing = credentials["workspaceId"];
   if (typeof existing === "string" && existing.trim()) return credentials;
 
-  const workspaceId = await getWorkspaceIdForUser(userId, "mcp-runner");
+  const workspaceId = await getWorkspaceIdForUser(userId, "mcp-runner", workspaceHint);
   if (!workspaceId) return credentials;
 
   log.info(`[creds-loader] xyne-spaces userId=${userId} → resolved workspaceId=${workspaceId} for cached credentials`);
@@ -96,8 +122,9 @@ async function resolveSpacesAppToolsWorkspaceId(
   userId: string,
   orgId: string,
   agentSlug: string,
+  workspaceHint?: string | null,
 ): Promise<string | null> {
-  const userWorkspaceId = await getWorkspaceIdForUser(userId, "mcp-runner").catch(() => null);
+  const userWorkspaceId = await getWorkspaceIdForUser(userId, "mcp-runner", workspaceHint).catch(() => null);
   if (userWorkspaceId) return userWorkspaceId;
 
   const links = await prisma.surfaceTenantLink.findMany({
@@ -122,9 +149,11 @@ async function resolveSpacesAppToolsWorkspaceId(
 
 /** Synthesize EffectiveCredentials from the user's live Spaces session —
  *  the ambient operating credential for the Spaces-session-backed server
- *  types (xyne-spaces, xyne-dashboard). Returns null when no session. */
-async function liveSpacesCredentials(userId: string): Promise<EffectiveCredentials | null> {
-  const live = await getSpacesAuthForUser(userId, "mcp-runner");
+ *  types (xyne-spaces, xyne-dashboard). Returns null when no session.
+ *  `workspaceHint` disambiguates users holding two Spaces memberships —
+ *  pass the request's verified workspace whenever one is in scope. */
+async function liveSpacesCredentials(userId: string, workspaceHint?: string | null): Promise<EffectiveCredentials | null> {
+  const live = await getSpacesAuthForUser(userId, "mcp-runner", workspaceHint);
   if (!live) return null;
   return {
     source: "user",
@@ -147,6 +176,7 @@ export async function loadEffectiveCredentials(
   instanceSlug?: string,
   agentOrgId?: string,
   subagentId?: string,
+  workspaceHint?: string | null,
 ): Promise<EffectiveCredentials | null> {
   // google / microsoft: per-user OAuth connectors (never agent-pinned or
   // global), executed as claw-auth-hosted stdio MCP servers. Resolve a fresh
@@ -181,14 +211,14 @@ export async function loadEffectiveCredentials(
   // /mcp/tools lists the server for the agent) carries EMPTY creds by design,
   // and returning those would spawn the child with no url/token.
   if (serverType === "xyne-dashboard") {
-    const live = await liveSpacesCredentials(userId);
+    const live = await liveSpacesCredentials(userId, workspaceHint);
     if (live) return live;
     log.info(`[creds-loader] xyne-dashboard userId=${userId} → no live Spaces session`);
     return null;
   }
 
   if (serverType === "xyne-workflows") {
-    const live = await liveSpacesCredentials(userId);
+    const live = await liveSpacesCredentials(userId, workspaceHint);
     if (live) return live;
     log.info(`[creds-loader] xyne-workflows userId=${userId} → no live Spaces session`);
     return null;
@@ -229,7 +259,7 @@ export async function loadEffectiveCredentials(
       if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
         try {
           const appToken = decrypt(parts[0], parts[1], parts[2], CONFIG.encryptionKey);
-          const workspaceId = await resolveSpacesAppToolsWorkspaceId(userId, credOrgId, agentSlug);
+          const workspaceId = await resolveSpacesAppToolsWorkspaceId(userId, credOrgId, agentSlug, workspaceHint);
           log.info(`[creds-loader] xyne-spaces-app-tools userId=${userId} agent=${agentSlug} → resolved app_token from agent row workspaceId=${workspaceId ?? "(none)"}`);
           return {
             source: "agent",
@@ -256,6 +286,8 @@ export async function loadEffectiveCredentials(
   }
 
 
+  let agentInstance = instanceSlug;
+  let instanceFromSubagent = false;
   if (subagentId) {
     const subagentOrgScope = agentOrgId
       ?? (await prisma.user.findUnique({ where: { id: userId }, select: { orgId: true } }))?.orgId
@@ -303,6 +335,8 @@ export async function loadEffectiveCredentials(
           connectionId: subConn.id,
           credentials: JSON.parse(decrypted) as Record<string, unknown>,
           isUserOwned: false,
+          instance: `subagent:${subConn.id}`,
+          viaSubagent: subagentId,
         };
       } catch (err) {
         // A pinned-but-undecryptable credential is a config error. When the pin
@@ -312,6 +346,10 @@ export async function loadEffectiveCredentials(
         log.error(`[creds-loader] ${serverType} subagent=${subagentId} → decrypt failed: ${errMsg(err)}`);
         if (subConn.nonOverridable) return null;
       }
+    }
+    if (!subConn && !agentInstance && subagentOrgScope) {
+      agentInstance = await subagentInstanceFor(subagentId, serverType, subagentOrgScope);
+      instanceFromSubagent = agentInstance !== undefined;
     }
   }
 
@@ -332,12 +370,12 @@ export async function loadEffectiveCredentials(
     // to the oldest row, so legacy callers keep working until they're
     // explicitly migrated to pass instance slugs.
     let agentConn = null;
-    if (instanceSlug) {
+    if (agentInstance) {
       agentConn = await prisma.agentMcpConnection.findFirst({
         where: {
           agent: agentWhere,
           mcpServer: { type: serverType },
-          slug: instanceSlug,
+          slug: agentInstance,
         },
       });
     } else {
@@ -370,8 +408,19 @@ export async function loadEffectiveCredentials(
         connectionId: agentConn.id,
         credentials: JSON.parse(decrypted) as Record<string, unknown>,
         isUserOwned: false,
+        instance: agentConn.slug,
+        ...(instanceFromSubagent && subagentId ? { viaSubagent: subagentId } : {}),
       };
     }
+  }
+  // A subagent routed to one agent instance must never land on a weaker
+  // identity: not when that instance is gone, and not when the caller has no
+  // agent in scope to look it up on.
+  if (instanceFromSubagent) {
+    log.warn(
+      `[creds-loader] ${serverType} userId=${userId} agent=${agentSlug ?? "(none)"} subagent=${subagentId} instance=${agentInstance} → mapped connection not found`,
+    );
+    return null;
   }
 
   // xyne-spaces priority order: live Spaces DB FIRST, cached
@@ -384,7 +433,7 @@ export async function loadEffectiveCredentials(
   // no active session, or the refresh hop itself failed — at which point
   // the cached creds are no worse than nothing.
   if (serverType === "xyne-spaces") {
-    const live = await liveSpacesCredentials(userId);
+    const live = await liveSpacesCredentials(userId, workspaceHint);
     if (live) return live;
   }
 
@@ -437,7 +486,7 @@ export async function loadEffectiveCredentials(
       userConn.authTag,
     );
     if (serverType === "xyne-spaces") {
-      credentials = await ensureSpacesWorkspaceCredential(userId, credentials);
+      credentials = await ensureSpacesWorkspaceCredential(userId, credentials, workspaceHint);
     }
     log.info(`[creds-loader] ${serverType} userId=${userId} → user-row hit (connId=${userConn.id})`);
     return { source: "user", connectionId: userConn.id, credentials, isUserOwned: true };
@@ -488,4 +537,33 @@ export async function loadEffectiveCredentials(
     credentials: JSON.parse(decrypted) as Record<string, unknown>,
     isUserOwned: false,
   };
+}
+
+/**
+ * Credentials for running a write a human approved. The approval must land on
+ * the identity /mcp/call resolved when it queued the write: the subagent pin
+ * (bound into the signed action as `subagentId`), then the session agent,
+ * user, global. Anything less and an approved payout runs on the parent
+ * agent's account instead of the subagent's. `spacesAppId` scopes the agent
+ * and subagent lookups to the agent's org, as resolveSessionAgentOrgId does
+ * for the run itself.
+ */
+export async function loadApprovedWriteCredentials(args: {
+  userId: string;
+  serverType: string;
+  agentSlug?: string | undefined;
+  spacesAppId?: string | undefined;
+  subagentId?: string | undefined;
+}): Promise<EffectiveCredentials | null> {
+  const agentOrgId = args.spacesAppId
+    ? (await prisma.agent.findUnique({ where: { spacesAppId: args.spacesAppId }, select: { orgId: true } }))?.orgId ?? undefined
+    : undefined;
+  return loadEffectiveCredentials(
+    args.userId,
+    args.serverType,
+    args.agentSlug || undefined,
+    undefined,
+    agentOrgId,
+    args.subagentId || undefined,
+  );
 }

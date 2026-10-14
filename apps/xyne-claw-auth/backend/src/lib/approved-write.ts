@@ -8,25 +8,35 @@
  * messaging channel (WhatsApp) can now render the same approval as a native
  * card, so the tap needs somewhere to land — this module.
  *
- * It deliberately covers ONLY the generic MCP-connector path, the last branch
- * of flow-action's approve-write handler. Every branch flow-action special-
- * cases (Spaces app-token sends, gateway services, Google, Microsoft, skill
- * and agent-tool mutations) carries setup that the Spaces card has and a
- * messenger does not, so those are refused here and pointed back at Spaces
- * rather than half-implemented. Widening this set means porting a branch
- * properly, not deleting a check.
+ * It covers the generic MCP-connector path, the Google/Microsoft tools
+ * (lib/oauth-custom-tool.ts, shared with flow-action) and MCP-gateway
+ * services (lib/gateway-approval.ts, shared with flow-action). The other
+ * branches flow-action special-cases (Spaces app-token sends, skill and
+ * agent-tool mutations) carry setup that the Spaces card has and a messenger
+ * does not, so those are refused here and pointed back at Spaces rather than
+ * half-implemented. Widening this set means porting a branch properly, not
+ * deleting a check.
  */
 import { createLogger } from "../logger.js";
 import { errMsg } from "./errors.js";
 import type { SignedWriteAction as BaseWriteAction } from "./write-actions.js";
 import { AGENT_TOOL_SLUGS } from "./agent-tools-apply.js";
-import { GATEWAY_KEY_PREFIX, parseGatewayCatalogSource } from "../mcpgateway/key-format.js";
+import { FORK_TO_CONVERSATION_TOOL } from "xyne-claw-shared";
+import {
+  defaultGatewayTenant,
+  formatGatewayApprovalExecutionError,
+  parseGatewayServerTypeForApproval,
+  sanitizeApprovalToolError,
+} from "./gateway-approval.js";
+import { agentRunRepository } from "../repositories/index.js";
+import { isOAuthProvider, prepareOAuthCustomTool } from "./oauth-custom-tool.js";
 
 const log = createLogger("approved-write");
 
-/** A pending write exactly as claw minted it. The signature covers only the
- *  four fields of the base shape (routes/mcp.ts signAction); the two optional
- *  ones ride along so a re-signed card can be verified in either form. */
+/** A pending write exactly as claw minted it. The signature covers the base
+ *  shape (routes/mcp.ts writeActionPayload, which includes `subagentId` when
+ *  one was bound); the two optional fields here ride along so a re-signed card
+ *  can be verified in either form. */
 export interface SignedWriteAction extends BaseWriteAction {
   agentSlug?: string;
   spacesAppId?: string;
@@ -38,10 +48,8 @@ export type ApprovedWriteOutcome =
 
 /** True when flow-action would take a branch this module does not implement. */
 export function needsSpacesApproval(serverType: string, tool: string): boolean {
-  if (parseGatewayCatalogSource(serverType) || serverType.startsWith(GATEWAY_KEY_PREFIX)) return true;
-  if (serverType === "google" || serverType === "microsoft") return true;
   if (serverType === "skill") return true;
-  if (serverType === "agent-tools" && (AGENT_TOOL_SLUGS.has(tool) || tool === "create-skill")) return true;
+  if (serverType === "agent-tools" && (AGENT_TOOL_SLUGS.has(tool) || tool === "create-skill" || tool === FORK_TO_CONVERSATION_TOOL)) return true;
   // Posting AS the user through the Spaces app token needs an agent's
   // spacesAppToken, which is resolved from the card's own agent binding.
   if (serverType === "xyne-spaces" && tool === "spaces-send-message") return true;
@@ -69,14 +77,72 @@ export async function executeApprovedWrite(input: {
     return { ok: false, reason: "signature", message: "This approval isn't yours to give." };
   }
 
-  const { verifyActionSignatureAny } = await import("../routes/mcp.js");
-  // Claw signs the bare four-field shape; accept the agent-bound shape too so
-  // a re-signed card (webhook.ts mints one for Spaces) still verifies.
-  const bare = { serverType, tool, params, userId };
+  const { verifyActionSignatureAny, writeActionPayload } = await import("../routes/mcp.js");
+  // Claw signs the bare shape; accept the agent-bound shape too so a re-signed
+  // card (webhook.ts mints one for Spaces) still verifies.
+  const bare = writeActionPayload(action);
   const bound = { ...bare, agentSlug: action.agentSlug ?? "", spacesAppId: action.spacesAppId ?? "" };
   if (!verifyActionSignatureAny([bare, bound], signature)) {
     log.error(`[approved-write] HMAC verification failed tool=${tool} user=${userId}`);
     return { ok: false, reason: "signature", message: "This action could not be verified. Please approve it in Xyne Spaces." };
+  }
+
+  if (isOAuthProvider(serverType)) {
+    const prepared = await prepareOAuthCustomTool({ provider: serverType, tool, userId });
+    if (!prepared.ok) return { ok: false, reason: "no-connection", message: prepared.message };
+    if (input.conversationId) {
+      agentRunRepository
+        .markUsedUserTokenByConversation(input.conversationId, action.agentSlug)
+        .catch((err) => log.warn(`[approved-write] markUsedUserToken failed for ${input.conversationId}: ${errMsg(err)}`));
+    }
+    try {
+      const result = await prepared.run(params);
+      log.info(`[approved-write] executed tool=${tool} user=${userId} → ${result.slice(0, 100)}`);
+      return { ok: true, message: `Done — ${tool} ran.`, resultText: result };
+    } catch (err) {
+      log.error(`[approved-write] tool failed tool=${tool} user=${userId}: ${errMsg(err)}`);
+      return { ok: false, reason: "failed", message: `${tool} failed to run. Please try again from Xyne Spaces.` };
+    }
+  }
+
+  const gatewayTarget = parseGatewayServerTypeForApproval(serverType);
+  if (gatewayTarget) {
+    const tenant = defaultGatewayTenant();
+    if (!tenant) {
+      return { ok: false, reason: "unsupported", message: `The connector gateway isn't configured here. Please approve ${tool} in Xyne Spaces.` };
+    }
+    const { prisma } = await import("../db.js");
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (!user?.email) {
+      return { ok: false, reason: "no-connection", message: `Couldn't find your account email to run ${tool}.` };
+    }
+    const { executeTool } = await import("../mcpgateway/services/execution.js");
+    const execution = await executeTool(tenant, user.email, {
+      serviceName: gatewayTarget.serviceName,
+      toolName: tool,
+      arguments: params,
+      ...(gatewayTarget.backendId ? { backendId: gatewayTarget.backendId } : {}),
+    });
+    if (!execution.success) {
+      const errText = sanitizeApprovalToolError(formatGatewayApprovalExecutionError(execution, gatewayTarget.serviceName, tool));
+      log.error(`[approved-write] gateway tool failed server=${serverType} tool=${tool} user=${userId}: ${errText}`);
+      return { ok: false, reason: "failed", message: `${tool} failed: ${errText}` };
+    }
+    log.info(`[approved-write] executed gateway tool=${tool} service=${gatewayTarget.serviceName} user=${userId} backend=${execution.backendId}`);
+    const resultText = typeof execution.result === "string" ? execution.result : JSON.stringify(execution.result ?? "");
+    return { ok: true, message: `Done — ${tool} ran.`, resultText };
+  }
+
+  // Artifact-app writes (publish-app) have no connector; claw-auth applies
+  // them directly, so they run here like on every other approval surface.
+  {
+    const { applyArtifactAppAction, isArtifactAppAction } = await import("./artifact-app-apply.js");
+    if (isArtifactAppAction(serverType, tool)) {
+      const outcome = await applyArtifactAppAction(tool, params, userId);
+      if (!outcome.ok) return { ok: false, reason: "failed", message: outcome.error };
+      log.info(`[approved-write] executed tool=${tool} user=${userId}`);
+      return { ok: true, message: outcome.message, resultText: outcome.message };
+    }
   }
 
   if (needsSpacesApproval(serverType, tool)) {
@@ -89,18 +155,33 @@ export async function executeApprovedWrite(input: {
 
   const { callTool } = await import("../mcp/runner.js");
   const { hasConnectorDefinition } = await import("../mcp/connector-definitions.js");
-  const { loadEffectiveCredentials } = await import("./credentials-loader.js");
+  const { loadApprovedWriteCredentials } = await import("./credentials-loader.js");
 
   if (!(await hasConnectorDefinition(serverType))) {
     return { ok: false, reason: "unsupported", message: `No adapter for ${serverType}.` };
   }
-  const effective = await loadEffectiveCredentials(userId, serverType, action.agentSlug);
+  const effective = await loadApprovedWriteCredentials({
+    userId,
+    serverType,
+    agentSlug: action.agentSlug,
+    spacesAppId: action.spacesAppId,
+    subagentId: bare.subagentId,
+  });
   if (!effective) {
     return { ok: false, reason: "no-connection", message: `Your ${serverType} connection is missing — reconnect it in Xyne Spaces.` };
   }
 
   try {
-    const result = await callTool(userId, serverType, effective.credentials, tool, params);
+    const result = await callTool(
+      userId,
+      serverType,
+      effective.credentials,
+      tool,
+      params,
+      action.agentSlug,
+      undefined,
+      effective.instance,
+    );
     log.info(`[approved-write] executed tool=${tool} user=${userId} → ${result.content.slice(0, 100)}`);
     return { ok: true, message: `Done — ${tool} ran.`, resultText: result.content };
   } catch (err) {

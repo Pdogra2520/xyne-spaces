@@ -32,7 +32,7 @@ import type { Dirent } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import path from "node:path";
-import { PATHS } from "../config.js";
+import { PATHS, SERVER } from "../config.js";
 import { validateS2SKey } from "../middleware/auth.js";
 import { restoreSessionFromArchive } from "../session-store.js";
 import {
@@ -69,7 +69,55 @@ import {
 } from "../debug/index.js";
 
 import { createLogger } from "../logger.js";
+import { currentOwnerPod, podAddress, podName } from "../run-ownership.js";
 const log = createLogger("debug");
+
+const DEBUG_FORWARDED_HEADER = "x-debug-forwarded-from";
+const DEBUG_FORWARD_TIMEOUT_MS = Number(process.env["DEBUG_FORWARD_TIMEOUT_MS"] ?? 20_000);
+
+export function isTrustedPodAddress(address: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return false;
+  const port = url.port === "" ? 80 : Number(url.port);
+  if (port !== SERVER.port) return false;
+  const octets = url.hostname.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return false;
+  const [a, b] = octets as [number, number, number, number];
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 127 && process.env["NODE_ENV"] !== "production");
+}
+
+async function forwardToOwnerPod(req: Request, res: Response, sessionId: string): Promise<boolean> {
+  if (req.header(DEBUG_FORWARDED_HEADER)) return false;
+  const owner = await currentOwnerPod(sessionId);
+  if (!owner || owner === podName()) return false;
+  const base = await podAddress(owner);
+  if (!base) return false;
+  if (!isTrustedPodAddress(base)) {
+    log.warn(`[debug] refusing to forward to untrusted pod address for ${owner}; serving locally`);
+    return false;
+  }
+  try {
+    const upstream = await fetch(`${base}${req.originalUrl}`, {
+      headers: { "x-s2s-key": SERVER.s2sKey, [DEBUG_FORWARDED_HEADER]: podName() },
+      redirect: "error",
+      signal: AbortSignal.timeout(DEBUG_FORWARD_TIMEOUT_MS),
+    });
+    if (!upstream.ok) {
+      log.warn(`[debug] owner pod ${owner} answered ${upstream.status} for session ${sessionId}; serving locally`);
+      return false;
+    }
+    res.status(upstream.status).type(upstream.headers.get("content-type") ?? "application/json").send(await upstream.text());
+    return true;
+  } catch (err) {
+    log.warn(`[debug] forward to owner pod ${owner} failed for session ${sessionId}; serving locally: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
 
 const router = Router();
 
@@ -736,6 +784,9 @@ function dedupeSubagents(items: readonly SubagentArtifact[]): SubagentArtifact[]
 
 // ── GET /internal/sessions/:convId/debug ────────────────────────────────────
 
+/** Cap on `agentSlugs` — each one multiplies the GCS keys probed. */
+const MAX_AGENT_SLUGS = 20;
+
 function fail(res: Response, status: number, error: string, code: "invalid_id" | "not_found" | "internal", extra?: Record<string, unknown>): void {
   metric.count("debug_bundle", { result: code });
   res.status(status).json({ success: false, error, code, ...(extra ?? {}) });
@@ -746,12 +797,26 @@ router.get("/internal/sessions/:convId/debug", validateS2SKey, async (req: Reque
     const { convId } = req.params;
     const agentSlug = typeof req.query["agentSlug"] === "string" ? req.query["agentSlug"] : undefined;
     const userId = typeof req.query["userId"] === "string" ? req.query["userId"] : undefined;
-    // All three ids end up in filesystem paths under the sessions root —
+    // A direct chat can switch agents mid-conversation, and each agent's runs
+    // live under its own `<convId>_<slug>` key. Once those sessions are
+    // archived off the PVC, the only way to find them is to guess each key, so
+    // the caller names every agent that answered.
+    const extraAgentSlugs = typeof req.query["agentSlugs"] === "string"
+      ? req.query["agentSlugs"].split(",").map((s) => s.trim()).filter(Boolean).slice(0, MAX_AGENT_SLUGS)
+      : [];
+    // All of these ids end up in filesystem paths under the sessions root —
     // reject anything outside the safe charset before touching the disk.
-    if (!isSafeId(convId) || (agentSlug !== undefined && !isSafeId(agentSlug)) || (userId !== undefined && !isSafeId(userId))) {
+    if (
+      !isSafeId(convId) ||
+      (agentSlug !== undefined && !isSafeId(agentSlug)) ||
+      (userId !== undefined && !isSafeId(userId)) ||
+      extraAgentSlugs.some((s) => !isSafeId(s))
+    ) {
       fail(res, 400, "Invalid conversation id, agent slug, or user id", "invalid_id");
       return;
     }
+    const liveSessionId = typeof req.query["sessionId"] === "string" ? req.query["sessionId"] : undefined;
+    if (liveSessionId && isSafeId(liveSessionId) && (await forwardToOwnerPod(req, res, liveSessionId))) return;
 
     const warnings: string[] = [];
     const format = req.query["format"] === "v2" ? "v2" : "v1";
@@ -771,7 +836,9 @@ router.get("/internal/sessions/:convId/debug", validateS2SKey, async (req: Reque
     const index = await collectIndexLocations(convId, warnings);
 
     // 3. GCS runs for every key anyone knows about.
-    const guessedKeys = candidateStoreKeys(convId, agentSlug, userId);
+    const guessedKeys = unique(
+      [agentSlug, ...extraAgentSlugs].flatMap((slug) => candidateStoreKeys(convId, slug, userId)),
+    );
     const gcsKeys = unique([...index.storeKeys, ...guessedKeys, ...dirNames]);
     const gcsLocations = (await Promise.all(gcsKeys.map((k) => collectGcsLocations(k, warnings)))).flat();
 

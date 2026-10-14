@@ -12,6 +12,7 @@ import { queries } from '../../../zero/queries';
 import { useZero } from '../../../hooks/useZero';
 import { ActivityItem } from '../ActivityItem';
 import { isCanvasActivity } from '../isCanvasActivity';
+import { isAllVisibleActivity } from '../../../utils/activityVisibility';
 import { NofocusRefProvider } from '../ActivityItemCard';
 import { GroupedTicketActivity } from '../GroupedTicketActivity';
 import * as Tabs from '@radix-ui/react-tabs';
@@ -91,28 +92,13 @@ type TabConfig = {
 
 type ActivityCursor = NonNullable<Parameters<typeof queries.userActivitiesPaginatedV2>[0]['start']>;
 
-const isAllVisibleActivity = (activity: ActivityWithRelated): boolean => {
-  const classification = activity.classification ?? ActivityClassification.PENDING;
-  if (activity.actionSource === 'call' && activity.actorAction === 'missed_call') {
-    return false;
-  }
-
-  if (classification === ActivityClassification.SKIP) return false;
-  if (activity.actorAction === 'direct_message') {
-    return (
-      classification === ActivityClassification.ACTIONABLE ||
-      classification === ActivityClassification.FYI
-    );
-  }
-  return true;
-};
-
 const CALL_ACTIVITY_TYPES = [
   'scheduled_call',
   'call_reminder',
   'call_updated',
   'meeting_accepted',
   'meeting_declined',
+  'missed_call',
 ] as const;
 
 const isCallActivity = (activity: ActivityWithRelated): boolean =>
@@ -131,7 +117,7 @@ type ActorFilter = 'all' | 'user' | 'agent';
 const ACTOR_FILTER_TYPES: Record<ActorFilter, UserType[] | undefined> = {
   all: undefined,
   user: [UserType.USER],
-  agent: [UserType.BOT, UserType.APP],
+  agent: [UserType.BOT, UserType.APP, UserType.AGENT],
 };
 
 const ACTOR_FILTER_OPTIONS: Array<{
@@ -780,10 +766,8 @@ const ActivityListView = (): ReactElement => {
     }
 
     unreadActivities.forEach(activity => {
-      // 'all' count includes everything visible
-      // Cast to ActivityWithRelated since unreadActivities has slightly different shape
-      // but isAllVisibleActivity only uses fields that exist in both
-      if (isAllVisibleActivity(activity as unknown as ActivityWithRelated)) {
+      // 'all' count uses the same predicate as the sidebar badge
+      if (isAllVisibleActivity(activity)) {
         counts.all++;
       }
 
@@ -960,6 +944,7 @@ const ActivityListView = (): ReactElement => {
                 id='activity-unread-toggle'
                 checked={showUnreadOnly}
                 onCheckedChange={handleUnreadToggle}
+                aria-label='Show unread only'
                 data-track-category='ACTIVITY'
                 data-track-name='UNREAD_FILTER_TOGGLE'
                 data-track-metadata={JSON.stringify({ filter_value: !showUnreadOnly })}

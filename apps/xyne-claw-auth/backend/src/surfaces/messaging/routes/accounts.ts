@@ -11,6 +11,7 @@ import { errMsg } from "../../../lib/errors.js";
 import { createLogger } from "../../../logger.js";
 import { prisma } from "../../../db.js";
 import { accountManager, getLoginArtifact } from "../account-manager.js";
+import { enqueueAndWait } from "../delivery.js";
 import { leaseHolder, publishControl } from "../placement.js";
 import { type AnyChannelPlugin } from "../plugin.js";
 import {
@@ -45,6 +46,11 @@ function validateChannelResidue(plugin: AnyChannelPlugin, residue: unknown): { o
   if (!plugin.channelConfigSchema) return { ok: true, value: residue ?? undefined };
   const parsed = plugin.channelConfigSchema.safeParse(residue ?? {});
   return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: parsed.error.message };
+}
+
+function mergeResidue(current: unknown, incoming: Record<string, unknown>): Record<string, unknown> {
+  const base = current && typeof current === "object" && !Array.isArray(current) ? (current as Record<string, unknown>) : {};
+  return Object.fromEntries(Object.entries({ ...base, ...incoming }).filter(([, value]) => value !== null));
 }
 
 async function accountView(row: AccountRow, plugin: AnyChannelPlugin) {
@@ -91,9 +97,10 @@ router.get("/accounts", async (req: Request, res: Response) => {
     res.status(caller.status).json({ success: false, error: caller.error });
     return;
   }
-  const rows = caller.isAdmin
-    ? await listOrgAccounts(plugin.key, caller.orgId)
-    : await listOwnedAccounts(plugin.key, caller.orgId, caller.userId);
+  const rows =
+    plugin.accountScope === "user"
+      ? await listOwnedAccounts(plugin.key, caller.orgId, caller.userId)
+      : await listOrgAccounts(plugin.key, caller.orgId);
   res.json({ success: true, accounts: await Promise.all(rows.map((row) => accountView(row, plugin))) });
 });
 
@@ -197,7 +204,10 @@ router.patch("/accounts/:id", async (req: Request, res: Response) => {
   }
   const patch: Record<string, unknown> = { ...policyPatch };
   if (channel !== undefined) {
-    const residue = validateChannelResidue(resolved.plugin, channel);
+    // Merged over what is stored: a client saving one setting must not wipe
+    // the others (the published question form, the notification template).
+    // A null clears a key.
+    const residue = validateChannelResidue(resolved.plugin, mergeResidue(account.channelConfig, channel));
     if (!residue.ok) {
       res.status(400).json({ success: false, error: residue.error });
       return;
@@ -210,6 +220,50 @@ router.patch("/accounts/:id", async (req: Request, res: Response) => {
   res.json({ success: true, account: await accountView(fresh, resolved.plugin) });
 });
 
+/**
+ * Publish the question form (WhatsApp Flows) into the business account and
+ * point this number at it, so a multi-part ask-user-question arrives as one
+ * native form. Needs the WhatsApp Business Account id, and a token that may
+ * manage it (whatsapp_business_management) — Meta's own error is returned if
+ * not.
+ */
+router.post("/accounts/:id/question-form", async (req: Request, res: Response) => {
+  const resolved = await resolveAccountRequest(req);
+  if (!resolved.ok) {
+    res.status(resolved.status).json({ success: false, error: resolved.error });
+    return;
+  }
+  const { plugin } = resolved;
+  if (!plugin.publishForm || !plugin.openHandle) {
+    res.status(400).json({ success: false, error: `${plugin.displayName} has no native forms` });
+    return;
+  }
+  const body = (req.body ?? {}) as { wabaId?: unknown };
+  const wabaId = typeof body.wabaId === "string" ? body.wabaId.trim() : "";
+  if (!/^\d+$/.test(wabaId)) {
+    res.status(400).json({ success: false, error: "wabaId (the WhatsApp Business Account ID) is required" });
+    return;
+  }
+  const account = toChannelAccount(resolved.account);
+  let formId: string;
+  try {
+    const handle = await plugin.openHandle(account, authStateFor(account.id));
+    formId = await plugin.publishForm(handle, wabaId);
+  } catch (err) {
+    log.warn(`[channels] question form publish failed account=${account.id}: ${errMsg(err)}`);
+    res.status(502).json({ success: false, error: errMsg(err) });
+    return;
+  }
+  const residue = validateChannelResidue(plugin, mergeResidue(account.channelConfig, { questionFormId: formId }));
+  if (!residue.ok) {
+    res.status(500).json({ success: false, error: residue.error });
+    return;
+  }
+  await updateAccountConfig(account.id, { channel: residue.value });
+  log.info(`[channels] question form published account=${account.id} form=${formId} by=${resolved.userId}`);
+  res.json({ success: true, questionFormId: formId });
+});
+
 router.delete("/accounts/:id", async (req: Request, res: Response) => {
   const resolved = await resolveAccountRequest(req);
   if (!resolved.ok) {
@@ -220,12 +274,9 @@ router.delete("/accounts/:id", async (req: Request, res: Response) => {
   await updateAccountConfig(account.id, { desiredState: "stopped" });
   await publishControl({ op: "logout", accountId: account.id });
   await setAccountStatus(account.id, "INACTIVE");
-  // Auth state never outlives the account; linked identities go with it.
+  // Auth state never outlives the account; linked numbers belong to people, not the account, so they stay.
   await authStateFor(account.id).clear();
-  await prisma.$transaction([
-    prisma.surfaceAgent.deleteMany({ where: { surfaceId: account.surfaceId, surfaceTenantId: account.accountKey } }),
-    prisma.userSurfaceIdentity.deleteMany({ where: { surfaceId: account.surfaceId, surfaceWorkspaceId: account.accountKey } }),
-  ]);
+  await prisma.surfaceAgent.deleteMany({ where: { surfaceId: account.surfaceId, surfaceTenantId: account.accountKey } });
   log.info(`[channels] account deleted id=${account.id} by=${resolved.userId}`);
   res.json({ success: true });
 });
@@ -330,7 +381,7 @@ router.get("/accounts/:id/status", async (req: Request, res: Response) => {
   });
 });
 
-/** Admin unlink: severs any user's identity on this account. The self-service
+/** Admin unlink: severs any user's number in this account's org. The self-service
  *  counterpart (your own numbers only) lives in numbers.ts. */
 router.delete("/accounts/:id/identities/:senderId", async (req: Request, res: Response) => {
   const resolved = await resolveAccountRequest(req);
@@ -340,7 +391,7 @@ router.delete("/accounts/:id/identities/:senderId", async (req: Request, res: Re
   }
   const account = toChannelAccount(resolved.account);
   const senderId = typeof req.params["senderId"] === "string" ? decodeURIComponent(req.params["senderId"]) : "";
-  const result = await unlinkIdentity({ surfaceId: account.surfaceId, accountKey: account.accountKey, senderId });
+  const result = await unlinkIdentity({ surfaceId: account.surfaceId, orgId: account.orgId, senderId });
   log.info(`[channels] identity unlinked account=${account.id} sender=${senderId} by=${resolved.userId}`);
   res.json({ success: true, removed: result.count });
 });
@@ -366,11 +417,12 @@ router.get("/accounts/:id/groups", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const groups = await accountManager.listGroups(account.id);
+    let groups = await accountManager.listGroups(account.id);
     if (groups === null) {
-      // Another pod holds the socket; a sweep moves it within ~30s.
-      res.status(503).json({ success: false, error: "This account is running on another server right now — try again in a moment." });
-      return;
+      // Another pod holds the socket, so ask it through the account's outbox.
+      const reply = await enqueueAndWait(account.id, { kind: "list-groups" });
+      if (!reply.ok) throw new Error(reply.error);
+      groups = reply.groups ?? [];
     }
     res.json({ success: true, groups, supported: true });
   } catch (err) {

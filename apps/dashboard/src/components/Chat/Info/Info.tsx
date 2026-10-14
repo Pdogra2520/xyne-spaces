@@ -26,6 +26,7 @@ import AboutChannel from '../AboutChannel/AboutChannel';
 import ChannelSettings from '../ChannelInformation/ChannelSettings';
 import { CallSummaryConfig } from '../CallSettings/CallSummaryConfig';
 import NotificationsTab from '../AboutChannel/NotificationsTab';
+import ScheduledMessagesTab from '../AboutChannel/ScheduledMessagesTab';
 import { AddChannelForm } from '../AddChannelForm/AddChannelForm';
 import { PromoteGroupDmRequest } from '../../../services/Chat/channelService';
 import { toast } from 'sonner';
@@ -51,7 +52,7 @@ import { isStatusExpired } from '../../../utils/statusUtils';
 import { renderEmoji } from '../../../utils/customEmojiUtils';
 import Popover from '../../ui/Popover';
 import { useLocation, useNavigate } from 'react-router-dom';
-import HuddleIcon from '../../icons/HuddleIcon';
+import { PhoneDefault } from '@xyne/icons';
 import { useCallActions } from '../../../hooks/useCallActions';
 import Tooltip from '../../ui/Tooltip';
 import { useCallConfirmation } from '../../../hooks/useCallConfirmation';
@@ -62,17 +63,17 @@ import { useUser, useUsers } from '../../../hooks/useUsers';
 import { usePlatform } from '../../../hooks/usePlatform';
 import { v4 as uuidv4 } from 'uuid';
 import { VisibleChannel } from '../../../machines/stateMachine';
-import { getUserDisplayName } from '../../../utils/userDisplayName';
+import { getUserDisplayName, isUserDeactivated } from '../../../utils/userDisplayName';
 import { channelTrackingMetadata } from '../../../services/Analytics/channelTracking';
 
 export type ChannelTab =
   | 'about'
   | 'members'
-  | 'agents-apps'
   | 'notifications'
   | 'settings'
-  | 'ai-features';
-
+  | 'ai-features'
+  | 'scheduled-messages'
+  | 'agents-apps';
 interface InfoProps {
   channel: VisibleChannel;
   previousChannelId?: string | null;
@@ -102,7 +103,7 @@ const Info = ({
 
   const [participants] = useCachedQuery(queries.channelParticipants({ channelId: channel.id }));
 
-  // Authoritative app/bot list for this channel — server-filtered by
+  // Authoritative app/agent/bot list for this channel — server-filtered by
   // users.userType so we don't depend on the workspace users map hydrating
   // with userType before the tab-label counts render.
   const [appParticipantsForCount] = useCachedQuery(
@@ -122,6 +123,8 @@ const Info = ({
   const isDefaultChannel = channel.scopeType === ChannelScopeType.DEFAULT;
   const canManageAiPreferences =
     currentUserParticipant?.role === ChannelRole.ADMIN || channel.createdBy === context.userID;
+  const canManageScheduledMessages =
+    isDefaultChannel && currentUserParticipant?.role === ChannelRole.ADMIN;
 
   const addUserPolicy = channel.channelStats?.addUserPolicy ?? ChannelAddUserPolicy.EVERYONE;
   const showAddPeopleButton =
@@ -151,6 +154,9 @@ const Info = ({
   }, [channel?.scopeType, channel?.name, context.userID, isDM]);
 
   const targetUser = useUser(targetUserId || '');
+
+  // A 1:1 DM with a deactivated user must not be turned into a group DM.
+  const canAddPeople = showAddPeopleButton && !(isDM && isUserDeactivated(targetUser));
 
   const hasValidStatus = useMemo(() => {
     return (
@@ -317,6 +323,7 @@ const Info = ({
           </div>
         </div>
         <button
+          aria-label='Close channel info'
           onClick={onClose}
           className='w-7 h-7 flex items-center justify-center border border-border rounded-[8px] cursor-pointer'
           data-track-category='CHAT_INFO'
@@ -354,7 +361,7 @@ const Info = ({
             Starred
           </div>
         </button>
-        {showAddPeopleButton && (
+        {canAddPeople && (
           <button
             onClick={handleAddPeopleClick}
             className={headerLinkContainerStyle}
@@ -382,9 +389,9 @@ const Info = ({
           {isUserInCurrentChannelCall ? (
             <PhoneOff className='w-4 h-4 text-status-failure' />
           ) : hasActiveCallInChannel && !isUserInCurrentChannelCall ? (
-            <HuddleIcon color='currentColor' />
+            <PhoneDefault size={16} color='currentColor' />
           ) : (
-            <HuddleIcon color='currentColor' />
+            <PhoneDefault size={16} color='currentColor' />
           )}
           <div
             className={`${isUserInCurrentChannelCall ? 'text-status-failure' : 'text-muted-foreground'} text-[13px]`}
@@ -450,6 +457,14 @@ const Info = ({
           {isDefaultChannel && (
             <Tabs.Trigger value='ai-features' className={tabTriggerClass('ai-features')}>
               AI Preference
+            </Tabs.Trigger>
+          )}
+          {canManageScheduledMessages && (
+            <Tabs.Trigger
+              value='scheduled-messages'
+              className={tabTriggerClass('scheduled-messages')}
+            >
+              Scheduled Messages
             </Tabs.Trigger>
           )}
         </Tabs.List>
@@ -535,6 +550,14 @@ const Info = ({
             className='outline-none flex-1 min-h-0 overflow-y-auto'
           >
             <NotificationsTab channel={channel} isParticipant={isParticipant} />
+          </Tabs.Content>
+        )}
+        {canManageScheduledMessages && (
+          <Tabs.Content
+            value='scheduled-messages'
+            className='outline-none flex-1 min-h-0 overflow-hidden'
+          >
+            <ScheduledMessagesTab channelId={channel.id} />
           </Tabs.Content>
         )}
       </Tabs.Root>
@@ -883,7 +906,7 @@ const ChannelMembers = ({
   const isAuthorizedToRemoveParticipant =
     channel.scopeType === ChannelScopeType.DEFAULT && currentUserIsAdmin;
 
-  // Server-authoritative set of app/bot user IDs in this channel. Used to
+  // Server-authoritative set of app/agent/bot user IDs in this channel. Used to
   // bucket search results without depending on usersById.userType hydration.
   const appUserIdSet = useMemo(
     () => new Set(appParticipants.map(p => p.userId)),

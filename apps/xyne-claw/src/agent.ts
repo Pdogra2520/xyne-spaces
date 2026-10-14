@@ -11,7 +11,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { dirname, isAbsolute, join } from "node:path";
 import { createLogger } from "./logger.js";
-import { buildTwinDeliverMandate } from "./twin-deliver.js";
+import { buildTwinSystemPrompt, TWIN_DELIVER_NUDGE } from "./twin-prompts.js";
+import { installStopAfterDelivery, recoverTwinDeliveryFromText, TWIN_DELIVER_TOOL_NAME, type TwinDeliverRef } from "./twin-deliver.js";
+import { checkTwinDelivery } from "./twin-delivery-check.js";
 import { installMidTurnCompaction, forceCompaction } from "./mid-turn-compaction.js";
 import { promoteIfOversized } from "./tool-output.js";
 import { createScopedToolMap } from "./scoped-tools.js";
@@ -21,7 +23,7 @@ import { compactionExtension, setCompactionSubmitTool } from "./compaction-exten
 import { takeCitations, takeDebug } from "./citations.js";
 import { applyAutoCitations } from "./auto-citations.js";
 import { extractSessionClfTokens } from "./citation-sanitizer.js";
-import { getSandboxSession } from "xyne-claw-shared";
+import { checkReplyFormat, replyFormatNudge, type ResultSectionLimits, getSandboxSession } from "xyne-claw-shared";
 import type {
   ClawAttachmentPayload,
   ClawSandboxPreviewPayload,
@@ -46,11 +48,13 @@ import {
 } from "./session-store.js";
 import { acquireSessionLock, refreshSessionLock, releaseSessionLock, startSessionLockHeartbeat, SessionLockedError } from "./session-lock.js";
 import { kickOffPrReviewRoom, registerLivePrRunContext, unregisterLivePrRunContext } from "./pr-review-room.js";
-import { judgeRunSummary, recordJudgeOutcome, setJudgeDebugSink } from "./judge-backend.js";
+import { judgeRunSummary, recordJudgeOutcome, setJudgeDebugSink } from "./judge-trace.js";
 import { effectiveOptimizations, optEnabled } from "./optimizations.js";
-import { jevThreshold } from "./jev.js";
-import { pinRunTask } from "./run-context.js";
-import { assessAnswer, type AnswerAssessment } from "./jev-completeness.js";
+import { xorThreshold } from "./xor.js";
+import { attachRunMessages, pinRunTask } from "./run-context.js";
+import { CONTEXT_GATE_NUDGE, checkpointPrecheck, contextGate } from "./answer-gates.js";
+import { runWithToolCall, takeSiftParam, withSiftParam, type ToolCallContext } from "./tool-call-context.js";
+import { assessAnswer, type AnswerAssessment } from "./xor-completeness.js";
 import { gcsUploadDebugRunWithRetries, gcsUploadDebugObject, gcsPutDebugIndex } from "./storage.js";
 import {
   BlobIndex,
@@ -88,6 +92,7 @@ import { installLlmCallMetrics } from "./llm-call-metrics.js";
 import { installFastMode, isAdaptiveThinkingClaudeModel, type ModelSpeed } from "./model-speed.js";
 import { installToolBudget } from "./tool-budget.js";
 import { installAwakeningInbox } from "./awakening-inbox.js";
+import { TurnParts, type TurnPart } from "./turn-parts.js";
 import type { FastToolRuntimeController } from "./tool-catalog.js";
 
 const log = createLogger("agent");
@@ -114,7 +119,9 @@ export interface ToolInvocation {
   /** Set when this invocation originated inside a subagent's own session.
    *  Points at the tool_call_id on the parent agent that invoked the subagent. */
   parentToolCallId?: string;
-  /** Name of the subagent wrapping this invocation (e.g. "spaces", "bitbucket"). */
+  /** Name of the subagent wrapping this invocation (e.g. "spaces", "bitbucket").
+   *  On a top-level call (no parentToolCallId) it names the subagent the call
+   *  itself runs, so the UI can show it as one from the moment it starts. */
   subagentName?: string;
   /** The underlying pi-coding-agent tool_call_id for this specific call. */
   toolCallId?: string;
@@ -277,6 +284,8 @@ export interface RunResult {
   readonly latency?: LatencyMetrics;
   readonly attachments?: Attachment[];
   readonly reasoning?: string;
+  /** The run's thinking, text and tool calls in the order they happened. */
+  readonly parts?: TurnPart[];
   /** Distinct real `[clf-<id>#n]` citation tokens seen ANYWHERE in the session
    *  transcript (all prior + current turns' tool outputs). Lets run.ts sanitize
    *  citations SESSION-wide so a follow-up turn can re-cite an earlier turn's
@@ -547,63 +556,6 @@ export class RunCancelledError extends Error {
   }
 }
 
-function buildSystemPrompt(userId: string, userName?: string, userEmail?: string, mandateDeliver = false): string {
-  const identity = userName ? `**${userName}**` : "the user";
-  const emailLine = userEmail ? `\n- **Email:** ${userEmail}` : "";
-
-  // Mention/approval flow only: the user NEVER sees your assistant text — only
-  // what you pass to twin_deliver. Shared with the systemPromptOverride path in
-  // run.ts (the ACTUAL prompt for the mention twin) via buildTwinDeliverMandate,
-  // so the mandate lands regardless of which prompt path runs.
-  const deliverySection = mandateDeliver ? buildTwinDeliverMandate(userName ? { userName } : {}) : "";
-
-  return `You are the **Digital Twin** of ${identity}. You act, think, and respond exactly as this person would.
-
-## Identity
-You ARE this user's digital representative. When someone asks you a question, they are asking ${userName ?? "this user"} — not a generic assistant. Your job is to respond the way this person would, using their knowledge, context, communication style, and expertise.
-- **Name:** ${userName ?? "unknown"}${emailLine}
-
-To get your Spaces user ID for filtering tools (assignedTo, from, createdBy), call the \`spaces-whoami\` tool first.
-
-## How to Build Context (do this FIRST)
-Before answering any query, use your available tools to gather context. Look at the tools you have access to — they include tools for searching messages, tickets, activity, memory, users, channels, and more. Use them proactively:
-
-1. **Recent activity** — Check for mentions, replies, and assignments.
-2. **Knowledge base** — Search memory/facts/SOPs relevant to the query.
-3. **Messages & conversations** — Read threads to understand communication style.
-4. **Tickets & work items** — Check current workload and priorities.
-5. **Search** — Broad search across all connected apps for relevant context.
-6. **People lookup** — Resolve names to user IDs when needed.
-
-Note: Tool names may be prefixed with the server name (e.g. \`xyne-spaces__spaces-search\`). Use the tools as they appear in your tool list.
-
-## How to Respond
-- **Mirror the user's communication style.** If they write short direct messages, you do too. If they use detailed explanations, match that.
-- **Use the user's actual knowledge.** Ground every answer in data from their messages, tickets, memory, and activity. Do not guess.
-- **For engineering queries** — use any available code/log/metrics tools.
-- **Be the user.** Respond in first person ("I", "my", "we") as if you are them. Do not say "the user" or "they".
-- **Acknowledge gaps honestly.** If you cannot find relevant information in the user's data, say so — don't fabricate.
-
-## Critical Rules
-1. NEVER fabricate information. Only use data retrieved from tools.
-2. ALWAYS gather context before responding — do not answer from thin air.
-3. Respond as the user, not as an assistant describing the user.
-4. When the query is about "what are you working on" or "what do you know about X", search the user's actual data first.
-5. Use the tools available to you — check your tool list, don't assume tool names.
-6. NEVER narrate your process or expose the machinery. No "Saved to memory", "Searching…", "Got it", "Step N", "updating todos", or references to tools/memory. Only the final human message is your voice.
-
-## Data Correlation Rules
-When correlating data across different systems (e.g. tickets from Spaces + PRs from Bitbucket):
-- ALWAYS clearly distinguish between verified facts and inferred/unverified data.
-- Ticket board status (COMPLETED, "Merged" stage) is a WORKFLOW state — it does NOT prove a Bitbucket PR exists or was merged. These are separate systems.
-- If Bitbucket search doesn't find a PR for a ticket, report it as "PR not found in search", NOT "No PR".
-- When reporting ticket-to-PR mappings, use three clear categories:
-  1. **PR verified** — matching PR found and confirmed in Bitbucket
-  2. **PR not found in search** — Bitbucket search returned no match (PR may exist under different naming)
-  3. **Board suggests done, PR not verified** — ticket board says Completed/Merged but no Bitbucket PR match found
-- Never collapse categories 2 and 3 together. The user needs to know what was verified vs what was assumed.${deliverySection}`;
-}
-
 /**
  * (B) System-level parallelism preamble prepended to every parent agent's
  * persona. Same intent as SUBAGENT_PREAMBLE in subagent-tools.ts — push the
@@ -711,16 +663,32 @@ export async function applyCopilotProxyIfNeeded<T extends { apiKey: string; mode
  * catches the heavy-investigation bloat path.
  */
 export function capCustomToolOutput(tools: ToolDefinition[], outputBaseDir: string): ToolDefinition[] {
+  // With result sifting on, every wrapped tool gets an optional `sift` switch
+  // the model can set per call (R3); it is stripped here, before the tool (or
+  // its MCP server) ever sees the params.
+  const offerSift = optEnabled("jev_result_sift");
   return tools.map((tool) => {
     const orig = tool.execute.bind(tool);
+    // Only a `sift` we added is ours to strip; a tool's own `sift` param passes through.
+    const ownsSift = offerSift && withSiftParam(tool.parameters) !== tool.parameters;
     const wrapped: ToolDefinition["execute"] = async (...args) => {
-      const result = await orig(...args);
+      const [toolCallId, rawParams, ...rest] = args;
+      const { params, sift } = ownsSift ? takeSiftParam(rawParams) : { params: rawParams, sift: undefined };
+      const callCtx: ToolCallContext = { tool: tool.name, args: params, ...(sift !== undefined ? { sift } : {}) };
+      const result = await runWithToolCall(
+        callCtx,
+        () => (orig as (...a: unknown[]) => ReturnType<ToolDefinition["execute"]>)(toolCallId, params, ...rest),
+      );
       const content = (result as { content?: unknown })?.content;
       if (Array.isArray(content)) {
         const mapped = await Promise.all(content.map(async (block) => {
           const b = block as { type?: string; text?: string };
           if (b && b.type === "text" && typeof b.text === "string") {
-            return { ...b, text: await promoteIfOversized(outputBaseDir, "custom", tool.name, b.text) };
+            const text = b.text;
+            return {
+              ...b,
+              text: await runWithToolCall(callCtx, () => promoteIfOversized(outputBaseDir, "custom", tool.name, text)),
+            };
           }
           return block;
         }));
@@ -728,7 +696,9 @@ export function capCustomToolOutput(tools: ToolDefinition[], outputBaseDir: stri
       }
       return result;
     };
-    return { ...tool, execute: wrapped };
+    return ownsSift
+      ? { ...tool, parameters: withSiftParam(tool.parameters), execute: wrapped }
+      : { ...tool, execute: wrapped };
   });
 }
 
@@ -795,7 +765,9 @@ const MODEL_CONTEXT_WINDOWS: ReadonlyMap<string, number> = (() => {
 const MODEL_CONTEXT_WINDOW_OVERRIDES: ReadonlyMap<string, number> = new Map([
   ["claude-opus-4-8", 1_000_000],
   ["claude-opus-5", 1_000_000],
+  ["claude-opus-5-5", 1_000_000],
   ["claude-sonnet-5", 1_000_000],
+  ["claude-sonnet-5-5", 1_000_000],
   ["claude-fable-5", 1_000_000],
   ["claude-fable-5-1", 1_000_000],
   ["gpt-5.6-luna", 272_000],
@@ -1132,7 +1104,7 @@ export interface ProgressEmitter {
    *  progress POST → renderPrCard). */
   pr(sessionId: string, pr: Record<string, unknown>): void;
   uiWidget(sessionId: string, widget: UiWidget): void;
-  streamChunk(sessionId: string, payload: { reasoningDelta?: string; textDelta?: string }): void;
+  streamChunk(sessionId: string, payload: { reasoningDelta?: string; textDelta?: string; partId?: string }): void;
   debugProgress(sessionId: string, event: DebugEventRecord): void;
   progressLabel(sessionId: string, toolLabel: string, meta?: ClawStreamMeta): void;
   /** Final result frame. Returns once flushed so the route handler can close
@@ -1156,8 +1128,8 @@ function isEmitter(dest: ProgressDest): dest is ProgressEmitter {
 // parent tools AND nested subagent child tools — so a PR card is emitted whether
 // create_pull_request runs directly in the parent or inside the git-host
 // subagent. Fire-and-forget: PR card rendering must NEVER block or fail a tool.
-// Only the URL/webhook progress path carries the card; SSE (emitter) mode has no
-// such surface, so we skip there (mirrors the plan card).
+// Both progress transports carry the card: an emitter run hands the fact to
+// emitter.pr() (see below), a URL run POSTs kind:"pr".
 
 type PrProviderName = "github" | "bitbucket" | "gitlab" | "other";
 
@@ -1451,6 +1423,7 @@ function maybeEmitPrCard(progressUrl: ProgressDest, sessionId: string, invocatio
 // Send a single tool invocation to the progress endpoint — NOT throttled,
 // fires on every tool_execution_end so the Control Center sees live tool streams.
 export function pushInvocation(progressUrl: ProgressDest, sessionId: string, invocation: unknown): void {
+  flushStreamChunks(progressUrl, sessionId);
   if (!progressUrl) return;
   // Emit a PR card when this invocation is a completed create/merge PR (guards
   // internally; no-op for every other tool). Runs for parent + nested tools.
@@ -1477,6 +1450,34 @@ export function pushInvocation(progressUrl: ProgressDest, sessionId: string, inv
       `[agent] Tool invocation push failed: toolCallId=${inv.toolCallId ?? "?"} ` +
       `tool=${inv.toolName ?? "?"} err=${err instanceof Error ? err.message : String(err)}`,
     );
+  });
+}
+
+const INTERIM_MESSAGE_MAX_CHARS = 1_500;
+
+/**
+ * Whether an assistant turn ended by calling tools — i.e. the run continues.
+ * pi reports this as "toolUse" (pi-ai StopReason); "tool_use" is the Anthropic
+ * wire spelling this code was written against, which pi never emits, so a
+ * check for that alone is silently never true. The interim-message check was
+ * exactly that: no interim line ever left a run until this.
+ */
+export function endedInToolCalls(stopReason: string | undefined): boolean {
+  return stopReason === "toolUse" || stopReason === "tool_use";
+}
+
+export function pushInterimMessage(progressUrl: ProgressDest, sessionId: string, text: string): void {
+  if (!progressUrl || typeof progressUrl !== "string") return;
+  fetch(progressUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(SERVER.s2sKey ? { "x-s2s-key": SERVER.s2sKey } : {}),
+    },
+    body: JSON.stringify({ sessionId, kind: "interim", text: text.slice(0, INTERIM_MESSAGE_MAX_CHARS) }),
+    signal: AbortSignal.timeout(5_000),
+  }).catch((err) => {
+    log.warn(`[agent] Interim message push failed session=${sessionId} err=${err instanceof Error ? err.message : String(err)}`);
   });
 }
 
@@ -1513,7 +1514,7 @@ export function pushAttachment(
 export function pushSandboxPreview(
   progressUrl: ProgressDest,
   sessionId: string,
-  payload: { sandboxId: string; sandboxPreviewUrl: string; sandboxCodePreviewUrl: string },
+  payload: { sandboxId: string; sandboxPreviewUrl: string; sandboxCodePreviewUrl: string; sandboxTermUrl?: string },
   progressMeta?: { conversationId?: string | null; agentSlug?: string | null },
 ): void {
   if (!progressUrl) return;
@@ -1546,10 +1547,60 @@ export function pushSandboxPreview(
 
 // Stream raw text fragments (reasoning deltas, assistant text deltas) to the progress endpoint.
 // These are fired on every pi-ai text_delta / thinking_delta event — high-frequency, keep it lean.
+const STREAM_CHUNK_FLUSH_MS = 200;
+
+type StreamChunkKind = "reasoningDelta" | "textDelta";
+
+interface PendingStreamChunk {
+  url: string;
+  sessionId: string;
+  kind: StreamChunkKind;
+  partId: string | undefined;
+  text: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const pendingStreamChunks = new Map<string, PendingStreamChunk>();
+
+function postStreamChunk(chunk: PendingStreamChunk): void {
+  fetch(chunk.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(SERVER.s2sKey ? { "x-s2s-key": SERVER.s2sKey } : {}),
+    },
+    body: JSON.stringify({
+      sessionId: chunk.sessionId,
+      [chunk.kind]: chunk.text,
+      ...(chunk.partId !== undefined ? { partId: chunk.partId } : {}),
+    }),
+    signal: AbortSignal.timeout(5_000),
+  }).catch(() => {
+    // Best-effort — don't spam logs on every chunk
+  });
+}
+
+function streamChunkKey(url: string, sessionId: string): string {
+  return `${url}\u0000${sessionId}`;
+}
+
+function flushStreamChunkKey(key: string): void {
+  const chunk = pendingStreamChunks.get(key);
+  if (!chunk) return;
+  clearTimeout(chunk.timer);
+  pendingStreamChunks.delete(key);
+  postStreamChunk(chunk);
+}
+
+export function flushStreamChunks(progressUrl: ProgressDest, sessionId: string): void {
+  if (!progressUrl || isEmitter(progressUrl)) return;
+  flushStreamChunkKey(streamChunkKey(progressUrl, sessionId));
+}
+
 function pushStreamChunk(
   progressUrl: ProgressDest,
   sessionId: string,
-  payload: { reasoningDelta?: string; textDelta?: string },
+  payload: { reasoningDelta?: string; textDelta?: string; partId?: string },
 ): void {
   if (!progressUrl) return;
   if (isEmitter(progressUrl)) {
@@ -1558,16 +1609,23 @@ function pushStreamChunk(
     }
     return;
   }
-  fetch(progressUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(SERVER.s2sKey ? { "x-s2s-key": SERVER.s2sKey } : {}),
-    },
-    body: JSON.stringify({ sessionId, ...payload }),
-    signal: AbortSignal.timeout(5_000),
-  }).catch(() => {
-    // Best-effort — don't spam logs on every chunk
+  const kind: StreamChunkKind = payload.reasoningDelta !== undefined ? "reasoningDelta" : "textDelta";
+  const text = payload[kind];
+  if (text === undefined) return;
+  const key = streamChunkKey(progressUrl, sessionId);
+  const pending = pendingStreamChunks.get(key);
+  if (pending && pending.kind === kind && pending.partId === payload.partId) {
+    pending.text += text;
+    return;
+  }
+  if (pending) flushStreamChunkKey(key);
+  pendingStreamChunks.set(key, {
+    url: progressUrl,
+    sessionId,
+    kind,
+    partId: payload.partId,
+    text,
+    timer: setTimeout(() => flushStreamChunkKey(key), STREAM_CHUNK_FLUSH_MS),
   });
 }
 
@@ -1756,7 +1814,7 @@ export interface RunTaskOptions {
    *  finish until this tool has run — enforced by a post-loop nudge pass. */
   requiredTool?: { name: string; nudge: string } | undefined;
   /** Digital Twin persona (soul.md, …) folded into the actual system prompt on
-   *  both the override and buildSystemPrompt-fallback paths, so it reads as
+   *  both the override and buildTwinSystemPrompt-fallback paths, so it reads as
    *  identity and shows in the debug panel. */
   twinPersona?: string | undefined;
   abortSignal?: AbortSignal | undefined;
@@ -1790,7 +1848,7 @@ export interface RunTaskOptions {
    *  delivery MANDATORY — runTask runs a hardcoded reflection stage that nudges
    *  the model to call the tool and, if it never does, leaves this undefined so
    *  the caller stays silent (fail-closed) instead of posting raw assistant text. */
-  twinDeliverRef?: import("./twin-deliver.js").TwinDeliverRef | undefined;
+  twinDeliverRef?: TwinDeliverRef | undefined;
   /** Pipeline mode of this run (plan / daily_brief / auto). Debug-telemetry only —
    *  emitted in the session_tools event so the pipeline UI shows which mode a run
    *  executed in. Behavior is driven by the tool palette / prompt assembled in
@@ -1800,11 +1858,16 @@ export interface RunTaskOptions {
    *  was approved (or a trivial plan auto-continued). Debug-telemetry only —
    *  emits a mode_switch (plan→auto) event at session start. */
   planContinuation?: boolean | undefined;
+  /** Multi-agent direct chat hand-off note (claw-auth lib/agent-handoff.ts):
+   *  `resume` when this run resumes the agent's own session, `fresh` when it
+   *  starts one. Picked here because only runTask knows which it is. */
+  agentHandoff?: { resume?: string | null; fresh?: string | null } | undefined;
   /** Opt-in citation reflection (agentConfig.citationReflection). When true and
    *  the run pulled citeable sources (a tool result carried [clf-…#n] tokens)
    *  yet the final prose cites none, runTask nudges the model once to rewrite
    *  the answer with inline citations. See the post-loop block. */
   citationReflection?: boolean | undefined;
+  replyFormat?: ResultSectionLimits | undefined;
   /** Opt-in generic auto-citations (agentConfig.autoToolCitations). When true,
    *  EVERY tool result that doesn't already self-cite is chunked and prefixed
    *  with inline [clf-<toolCallId>#n] tokens (plus one generic citation per
@@ -1972,7 +2035,9 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     twinDeliverRef,
     mode,
     planContinuation,
+    agentHandoff,
     citationReflection,
+    replyFormat,
     autoToolCitations,
     isRegenerate,
     backgroundRegistry,
@@ -2041,6 +2106,9 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   }
 
   const authStorage = AuthStorage.create();
+  if (LITELLM.apiKey) {
+    authStorage.setRuntimeApiKey("litellm", LITELLM.apiKey);
+  }
   // Pi v0.75 made the ModelRegistry constructor private — must use the
   // static factory. `.create(authStorage)` uses the default models.json path
   // (~/.pi/agent/models.json); for in-memory use ModelRegistry.inMemory().
@@ -2361,7 +2429,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   // "did it even get the tool?" question is answerable from the run logs.
   if (twinDeliverRef) {
     log.info(
-      `[agent] TWIN flow — twin_deliver in pi payload: ${customToolNames.includes("twin_deliver")} ` +
+      `[agent] TWIN flow — twin_deliver in pi payload: ${customToolNames.includes(TWIN_DELIVER_TOOL_NAME)} ` +
       `(allowlist=${builtinAllow.length + customToolNames.length}); customTools=[${customToolNames.join(", ")}]`,
     );
   }
@@ -2512,6 +2580,11 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   // mid-turn-compaction.ts, where the pi-internals coupling is contained and
   // version-guarded — see that file's header.
   installMidTurnCompaction(session);
+  // Digital Twin: end the loop right after the first accepted twin_deliver.
+  // Installed after mid-turn compaction so it chains that stop hook.
+  if (twinDeliverRef) {
+    installStopAfterDelivery(session.agent, () => twinDeliverRef.value !== undefined);
+  }
   // Pi v0.75 dropped the `setBeforeToolCall(fn)` method in favour of a
   // directly-assignable property of the same name on the Agent. Semantics
   // unchanged — the hook still runs before each tool call.
@@ -2559,6 +2632,9 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   const tokenUsage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let streamedText = "";
   let streamedReasoning = "";
+  // The same output in order — thinking, text and tool calls across every LLM
+  // call — for the chat's step timeline (done.parts).
+  const turnParts = new TurnParts();
   // Detail of the most recent assistant turn that ended in a provider error
   // (stopReason "error") with the SDK's own auto-retries already exhausted.
   // Reset to null whenever a later turn ends cleanly, so a mid-run blip the
@@ -2654,8 +2730,10 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   const pushDebugEvent = (kind: DebugEventKind, data: Record<string, unknown> = {}, extras?: Partial<DebugEventRecord>): void => {
     recorder?.record(kind, data, extras);
   };
-  setJudgeDebugSink((kind, data) => pushDebugEvent(kind, data));
   pinRunTask(task);
+  // Lazy view of the live transcript for classifier call sites (result sift,
+  // context gate): read at call time, so a tool mid-loop sees every prior turn.
+  attachRunMessages(() => (session as unknown as { messages?: readonly unknown[] }).messages);
 
   /**
    * The single terminal path for a run's trace. Idempotent — the success path
@@ -2958,6 +3036,11 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     ...(provider ? { provider } : {}),
   });
 
+  // Attach the judge sink only once capture has started: it flushes every Jev
+  // call made so far (pre-run sites: mode router, prefetch gate, plan gate,
+  // persona pick) into this run's trace. Attached earlier, those events went to
+  // a recorder with no open store and were lost.
+  setJudgeDebugSink((kind, data) => pushDebugEvent(kind, data));
   pushDebugEvent("session_start", {
     conversationId,
     sessionId,
@@ -3018,12 +3101,17 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   // Each invocation picks one at random so long-running tools cycle labels
   // instead of staying on a single string.
   const progressLabels = new Map<string, string[]>();
+  // Tools that run a whole subagent — their calls carry `subagentName`.
+  const subagentToolNames = new Set<string>();
   if (customTools) {
     for (const t of customTools) {
       const labels = (t as unknown as { progressLabels?: string[] }).progressLabels;
       if (labels?.length) progressLabels.set(t.name, labels);
+      if ((t as unknown as { subagent?: boolean }).subagent) subagentToolNames.add(t.name);
     }
   }
+  const subagentMark = (toolName: string): { subagentName?: string } =>
+    subagentToolNames.has(toolName) ? { subagentName: toolName } : {};
   const pickLabel = (toolName: string, fallback: string): string => {
     const arr = progressLabels.get(toolName);
     if (!arr?.length) return fallback;
@@ -3056,6 +3144,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
       modelActive = false;
       log.info(`[agent] Tool call: ${event.toolName} argCount=${Object.keys(event.args ?? {}).length} argKeys=[${Object.keys(event.args ?? {}).join(",")}]`);
       inflightCalls.set(event.toolCallId, { toolName: event.toolName, args: event.args, startedAt: Date.now() });
+      turnParts.tool(event.toolCallId);
       pushDebugEvent("tool_execution_start", {
         toolName: event.toolName,
         args: cloneForDebug(event.args),
@@ -3080,6 +3169,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
         durationMs: 0,
         status: "running",
         toolCallId: event.toolCallId,
+        ...subagentMark(event.toolName),
       };
       pushInvocation(progressUrl, sessionId ?? conversationId ?? "unknown", pendingInvocation);
       mirrorToCaller?.(pendingInvocation);
@@ -3134,6 +3224,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
           durationMs: Date.now() - started.startedAt,
           status: "completed",
           toolCallId: event.toolCallId,
+          ...subagentMark(event.toolName),
           ...(citations ? { citations } : {}),
           ...(debug ? { debug } : {}),
           ...(bgTask ? { background: true, backgroundState: "running" as const, backgroundTaskId: bgTask.taskId } : {}),
@@ -3177,12 +3268,13 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
             const previewBase = SANDBOX_PREVIEW.baseUrl.replace(/\/+$/, "");
             const sandboxPreviewUrl = `${previewBase}/claw-preview/${sbx.id}/`;
             const sandboxCodePreviewUrl = `${previewBase}/claw-code/${sbx.id}`;
+            const sandboxTermUrl = `${previewBase}/claw-term/${sbx.id}/`;
             sandboxPreviewEmitted = true;
-            log.info(`[agent] Sandbox preview ready: ${sandboxPreviewUrl} | code: ${sandboxCodePreviewUrl} (storeKey=${storeKey})`);
+            log.info(`[agent] Sandbox preview ready: ${sandboxPreviewUrl} | code: ${sandboxCodePreviewUrl} | term: ${sandboxTermUrl} (storeKey=${storeKey})`);
             // pushSandboxPreview goes to /webhook/progress which is keyed by
             // the run sessionId (the UUID), NOT the storeKey — claw-auth
             // looks the run session up. Use sessionId here.
-            pushSandboxPreview(progressUrl, sessionId ?? conversationId ?? "unknown", { sandboxId: sbx.id, sandboxPreviewUrl, sandboxCodePreviewUrl }, progressMeta);
+            pushSandboxPreview(progressUrl, sessionId ?? conversationId ?? "unknown", { sandboxId: sbx.id, sandboxPreviewUrl, sandboxCodePreviewUrl, sandboxTermUrl }, progressMeta);
           } else {
             log.info(`[agent] Sandbox preview skipped: no SESSION_STORE entry for storeKey=${storeKey} (tool=${event.toolName})`);
           }
@@ -3200,7 +3292,9 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     // We no longer persist the raw deltas in debug artifacts. Instead we only
     // accumulate stream-rate summaries for the current turn.
     if (event.type === "message_update") {
-      const ame = (event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
+      const ame = (event as { assistantMessageEvent?: { type?: string; delta?: string; contentIndex?: number } }).assistantMessageEvent;
+      const partId = TurnParts.partId(llmCallSeq, ame?.contentIndex);
+      if (ame?.type === "thinking_end") turnParts.endReasoning(partId);
       if (ame && typeof ame.delta === "string" && ame.delta.length > 0) {
         if (firstDeltaAt == null && turnStartedAt != null) {
           firstDeltaAt = Date.now();
@@ -3218,7 +3312,8 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
           startStreamRateTimer();
           turnStreamThinkingChars += ame.delta.length;
           turnStreamChars += ame.delta.length;
-          pushStreamChunk(progressUrl, sessionId ?? conversationId ?? "unknown", { reasoningDelta: ame.delta });
+          turnParts.delta("reasoning", partId, ame.delta);
+          pushStreamChunk(progressUrl, sessionId ?? conversationId ?? "unknown", { reasoningDelta: ame.delta, partId });
         } else if (ame.type === "text_delta") {
           turnStreamCount += 1;
           streamWindowCount += 1;
@@ -3226,11 +3321,13 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
           streamedText += ame.delta;
           turnStreamTextChars += ame.delta.length;
           turnStreamChars += ame.delta.length;
-          pushStreamChunk(progressUrl, sessionId ?? conversationId ?? "unknown", { textDelta: ame.delta });
+          turnParts.delta("text", partId, ame.delta);
+          pushStreamChunk(progressUrl, sessionId ?? conversationId ?? "unknown", { textDelta: ame.delta, partId });
         }
       }
     }
     if (event.type === "message_end") {
+      flushStreamChunks(progressUrl, sessionId ?? conversationId ?? "unknown");
       modelActive = false; // turn finished — next turn_start re-arms the watchdog
       const msg = (event as { message?: { role?: string; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } } }).message;
       if (msg?.role === "assistant" && msg.usage) {
@@ -3285,6 +3382,10 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
         }
         if (stopReason !== "tool_use" && stopReason !== "aborted" && stopReason !== "error") {
           recordHandoffBoundary(latency.llmTurns);
+        }
+        if (endedInToolCalls(stopReason) && optEnabled("interim_messages")) {
+          const interim = piAssistantText(msg as PiMsg);
+          if (interim && sessionId) pushInterimMessage(progressUrl, sessionId, interim);
         }
         // Emit the turn's thinking as its OWN timeline event, before
         // assistant_turn_end, so the debugger shows the reasoning block exactly
@@ -3541,7 +3642,14 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
         "Read these files from disk before answering.",
       ].join("\n")
     : "";
-  const mergedContext = [context, attachmentContext].filter(Boolean).join("\n\n");
+  // Multi-agent direct chat: the other agents' turns this session has not
+  // seen. A resumed session already holds this agent's own earlier turns, so it
+  // only needs what came after its last reply; a fresh one needs the whole path.
+  const handoffNote = (isResume ? agentHandoff?.resume : agentHandoff?.fresh) ?? "";
+  if (handoffNote) {
+    log.info(`[agent] multi-agent hand-off note (${isResume ? "resume" : "fresh"}, ${handoffNote.length} chars)`);
+  }
+  const mergedContext = [context, handoffNote, attachmentContext].filter(Boolean).join("\n\n");
   const contextBlock = mergedContext ? `\n\n## Additional Context\n${mergedContext}` : "";
 
   if (isResume) {
@@ -3589,7 +3697,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     //   appended the <available_skills> XML block to it. We only send the
     //   query as the first user message.
     // - Otherwise: pi uses its default system prompt; we prepend our local
-    //   buildSystemPrompt scaffold to the user message so the agent gets
+    //   buildTwinSystemPrompt scaffold to the user message so the agent gets
     //   userId/email context.
     if (systemPromptOverride) {
       const prompt = `${contextBlock}\n\n## Query\n${task}`;
@@ -3599,7 +3707,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
       // Mention-flow twin has no systemPromptOverride — its persona is prepended
       // to the first user message. Fold the twin persona files in here too so a
       // mention-driven reply speaks as the user.
-      const basePrompt = `${buildSystemPrompt(userId, userName, userEmail, !!twinDeliverRef)}${personaSuffix}`;
+      const basePrompt = `${buildTwinSystemPrompt(userName, userEmail, !!twinDeliverRef)}${personaSuffix}`;
       const prompt = `${basePrompt}${contextBlock}\n\n## Query\n${task}`;
       recordPrompt(prompt, "fresh", images?.length ?? 0);
       await promptWithAbort(() => session.prompt(prompt, images?.length ? { images } : undefined));
@@ -3788,6 +3896,23 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     }
   }
 
+  if (replyFormat && !structuredOutputRef && !verifyResponsesRef && !abortSignal?.aborted) {
+    const before = checkReplyFormat(extractFinalAnswerText(session, opts.finalAnswerMaxTurns) ?? "", replyFormat);
+    if (!before.ok) {
+      log.info(`[agent] replyFormat: answer does not fit (${before.problems.join("; ")}) — nudging rewrite`);
+      pushDebugEvent("reply_format", { phase: "nudge", problems: before.problems });
+      turnParts.supersedeTrailingText();
+      await promptWithAbort(() => session.prompt(`<system>${replyFormatNudge(before.problems, replyFormat)}</system>`));
+      const nq = session as unknown as { _agentEventQueue?: Promise<void> };
+      if (nq._agentEventQueue) {
+        await withAbort(nq._agentEventQueue);
+      }
+      const after = checkReplyFormat(extractFinalAnswerText(session, opts.finalAnswerMaxTurns) ?? "", replyFormat);
+      log.info(`[agent] replyFormat: rewrite ${after.ok ? "fits" : `still over (${after.problems.join("; ")}) — delivery will split it`}`);
+      pushDebugEvent("reply_format", { phase: "result", ok: after.ok, problems: after.problems });
+    }
+  }
+
   // Citation reflection (opt-in via agentConfig.citationReflection). If this run
   // pulled citeable sources — a tool/subagent result carried [clf-…#n] tokens —
   // but the final prose cites NONE of them, the agent answered from retrieved
@@ -3839,6 +3964,8 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
         rounds = nudge + 1;
         log.info(`[agent] citationReflection: uncited answer with citeable sources — nudging ${rounds}/${maxRounds}`);
         pushDebugEvent("citation_reflection", { phase: "nudge", round: rounds, maxRounds });
+        // The rewrite replaces the answer just written; show only the rewrite.
+        turnParts.supersedeTrailingText();
         await promptWithAbort(() => session.prompt(`<system>${CITATION_REFLECTION_NUDGE}</system>`));
         const nq = session as unknown as { _agentEventQueue?: Promise<void> };
         if (nq._agentEventQueue) {
@@ -3873,9 +4000,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   // posting the raw assistant text (chatter). This is the hardcoded reflection
   // stage the Twin always runs.
   if (twinDeliverRef) {
-    const { TWIN_DELIVER_NUDGE, recoverTwinDeliveryFromText } = await import("./twin-deliver.js");
-    for (let nudge = 0; nudge < 2 && twinDeliverRef.value === undefined; nudge++) {
-      if (abortSignal?.aborted) break;
+    for (let nudge = 0; nudge < 2 && twinDeliverRef.value === undefined && !abortSignal?.aborted; nudge++) {
       log.info(`[agent] twin_deliver missing — nudge ${nudge + 1}/2 to deliver via twin_deliver`);
       pushDebugEvent("twin_deliver_reflection", { phase: "nudge", round: nudge + 1 });
       await promptWithAbort(() => session.prompt(`<system>${TWIN_DELIVER_NUDGE}</system>`));
@@ -3896,11 +4021,21 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
         pushDebugEvent("twin_deliver_reflection", { phase: "recovered", action: recovered.action });
       }
     }
-    const delivered = twinDeliverRef.value !== undefined;
-    pushDebugEvent("twin_deliver_reflection", { phase: "result", delivered, action: twinDeliverRef.value?.action ?? null });
-    if (!delivered) {
-      log.warn("[agent] twin_deliver: model never delivered (no tool_call, nothing to recover) — staying silent (fail-closed)");
+    const delivery = twinDeliverRef.value;
+    pushDebugEvent("twin_deliver_reflection", { phase: "result", delivered: delivery !== undefined, action: delivery?.action ?? null });
+    // R6: classifier self-check of the accepted delivery. Advisory — the owner
+    // still approves; the scores ride along for the approver and calibration.
+    if (delivery && !abortSignal?.aborted) {
+      const check = await checkTwinDelivery(delivery, {
+        task,
+        messages: (session as unknown as { messages?: readonly unknown[] }).messages ?? [],
+      }).catch(() => null);
+      if (check) {
+        twinDeliverRef.value = { ...delivery, check };
+        pushDebugEvent("twin_deliver_reflection", { phase: "check", ...check });
+      }
     }
+    if (!delivery) log.warn("[agent] twin_deliver: model never delivered (no tool_call, nothing to recover) — staying silent (fail-closed)");
   }
 
   // NOTE: there used to be a raw `debug-session-<conv>.json` dump of these
@@ -3928,7 +4063,14 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     };
     const isCheckpointAnswer = (): boolean =>
       looksLikeCompactionCheckpoint(extractFinalAnswerText(session, opts.finalAnswerMaxTurns)) && endedWithoutTools();
-    if (isCheckpointAnswer()) {
+    // Jev confirms the text-pattern match before paying for a full LLM turn.
+    const confirmedAnswer =
+      isCheckpointAnswer() &&
+      (await checkpointPrecheck(task, extractFinalAnswerText(session, opts.finalAnswerMaxTurns) ?? "").catch(() => false));
+    if (confirmedAnswer) {
+      log.info("[agent] Checkpoint-looking final text confirmed as a real answer by the classifier — no nudge");
+    }
+    if (!confirmedAnswer && isCheckpointAnswer()) {
       metric.count("agent_summary_as_answer", { provider: provider ?? "spaces" });
       log.warn("[agent] Final text looks like a compaction checkpoint, not an answer — nudging once to continue the task");
       if (!abortSignal?.aborted) {
@@ -3962,10 +4104,35 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
   const maxContinuations = optEnabled("jev_auto_continue")
     ? Math.max(0, Number(process.env["JEV_MAX_CONTINUATIONS"]) || 1)
     : 0;
-  const continuable = structuredOutputRef?.value === undefined && !checkpointSuppressed;
+  // A twin run's only output is twin_deliver (enforced by the reflection stage
+  // above); an auto-continue nudge would reopen a finished delivery.
+  const continuable = structuredOutputRef?.value === undefined && !checkpointSuppressed && !twinDeliverRef;
 
   let text = computeFinalText();
   let answerAssessment: AnswerAssessment | null = null;
+
+  // R12: before the answer is accepted, check the evidence supports it. A
+  // clear gap earns ONE nudge to fetch more context (never on twin runs or
+  // structured output — `continuable` excludes those).
+  if (continuable && text.trim() && optEnabled("jev_context_gate") && !abortSignal?.aborted) {
+    const messages = (session as unknown as { messages?: Array<Record<string, unknown>> }).messages ?? [];
+    const { extractEvidenceDigest } = await import("./verify-response.js");
+    const gate = await contextGate({
+      task,
+      messages,
+      answer: text,
+      evidence: extractEvidenceDigest(messages as Parameters<typeof extractEvidenceDigest>[0], 4_000),
+    }).catch(() => "accept" as const);
+    if (gate === "fetch-more") {
+      pushDebugEvent("auto_continue", { attempt: 0, maxAttempts: 1, verdict: "context-gate" });
+      metric.count("agent_context_gate_nudge", {});
+      log.info("[agent] context gate: evidence does not support the answer — nudging once to fetch more");
+      await promptWithAbort(() => session.prompt(`<system>${CONTEXT_GATE_NUDGE}</system>`));
+      const gq = session as unknown as { _agentEventQueue?: Promise<void> };
+      if (gq._agentEventQueue) await withAbort(gq._agentEventQueue);
+      text = computeFinalText();
+    }
+  }
 
   for (let attempt = 0; ; attempt += 1) {
     answerAssessment = await assessAnswer({
@@ -3986,7 +4153,7 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     if (
       optEnabled("auto_continue_strict") &&
       answerAssessment.verdict === "partial" &&
-      answerAssessment.finished >= jevThreshold("JEV_COMPLETENESS_THRESHOLD", 0.5)
+      answerAssessment.finished >= xorThreshold("JEV_COMPLETENESS_THRESHOLD", 0.5)
     ) {
       break;
     }
@@ -4128,7 +4295,8 @@ export async function runTask(opts: RunTaskOptions): Promise<RunResult> {
     });
     throw new ProviderTerminalError(provider ?? "spaces", lastTurnErrorDetail);
   }
-  return { text, toolsUsed, toolInvocations, tokenUsage, latency: latencyMetrics, sessionClfTokens, ...(streamedReasoning ? { reasoning: streamedReasoning } : {}), ...(twinDeliverRef?.value !== undefined ? { twinDelivery: twinDeliverRef.value } : {}) };
+  const parts = turnParts.finish();
+  return { text, toolsUsed, toolInvocations, tokenUsage, latency: latencyMetrics, sessionClfTokens, ...(streamedReasoning ? { reasoning: streamedReasoning } : {}), ...(parts.length > 0 ? { parts } : {}), ...(twinDeliverRef?.value !== undefined ? { twinDelivery: twinDeliverRef.value } : {}) };
   } finally {
     // Always stop the progress reporter's keep-alive timer so it doesn't keep
     // pinging after the agent finishes — including on thrown errors.

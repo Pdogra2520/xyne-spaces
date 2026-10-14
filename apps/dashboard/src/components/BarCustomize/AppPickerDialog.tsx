@@ -1,6 +1,6 @@
 import { ReactElement, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Search } from 'lucide-react';
+import { Globe, Search } from 'lucide-react';
 import { Dialog } from '../ui/Dialog/Dialog';
 import Input from '../ui/Input/Input';
 import { AppIcon } from '../AppIcon/AppIcon';
@@ -8,6 +8,7 @@ import { ToggleGlyph } from './ToggleGlyph';
 import { listArtifactApps, type ArtifactAppSummary } from '../../services/claw/artifactAppsService';
 import { MAX_APPS_PER_BAR } from '../../hooks/barItems';
 import { cn } from '../../utils/classNames';
+import type { AppPublishOptions } from './useChannelAppPublishing';
 
 interface AppPickerDialogProps {
   open: boolean;
@@ -16,10 +17,26 @@ interface AppPickerDialogProps {
   addedAppIds: ReadonlySet<string>;
   /** The bar has no room for another app. */
   isFull: boolean;
+  /** Published apps; showing one again doesn't need room in the bar. */
+  publishedAppIds?: ReadonlySet<string>;
   /** `next` is the membership the row is being toggled to. */
   onToggle: (app: ArtifactAppSummary, next: boolean) => void;
   trackCategory: string;
+  /** Only rows this accepts are listed, e.g. a desk takes workspace-published apps only. */
+  appFilter?: (app: ArtifactAppSummary) => boolean;
+  /** Replaces the default "saved or published" line under the title. */
+  description?: string;
+  /** Replaces the default "up to N apps per bar" footnote, for a non-bar host. */
+  limitNote?: { normal: string; full: string };
+  /**
+   * Step 2 for channel admins: publish an app to every member's tabs. Absent for
+   * everyone else, who see the picker exactly as before.
+   */
+  publish?: AppPublishOptions;
 }
+
+const DEFAULT_DESCRIPTION =
+  'Apps you saved or that were published to this workspace. Pick as many as you need.';
 
 /**
  * Chooses artifact apps for a bar. Rows toggle, and the dialog stays open until
@@ -35,8 +52,13 @@ export const AppPickerDialog = ({
   onOpenChange,
   addedAppIds,
   isFull,
+  publishedAppIds,
   onToggle,
   trackCategory,
+  appFilter,
+  description = DEFAULT_DESCRIPTION,
+  limitNote,
+  publish,
 }: AppPickerDialogProps): ReactElement => {
   const [query, setQuery] = useState('');
 
@@ -59,12 +81,13 @@ export const AppPickerDialog = ({
     }
     const q = query.trim().toLowerCase();
     return Array.from(byId.values())
+      .filter(a => !appFilter || appFilter(a))
       .filter(
         a =>
           !q || `${a.title} ${a.description ?? ''} ${a.ownerName ?? ''}`.toLowerCase().includes(q),
       )
       .sort((a, b) => a.title.localeCompare(b.title));
-  }, [mine.data, workspace.data, query]);
+  }, [mine.data, workspace.data, query, appFilter]);
 
   const isLoading = mine.isLoading || workspace.isLoading;
   const isError = mine.isError || workspace.isError;
@@ -74,7 +97,7 @@ export const AppPickerDialog = ({
       open={open}
       onOpenChange={onOpenChange}
       title='Add apps'
-      description='Apps you saved or that were published to this workspace. Pick as many as you need.'
+      description={description}
       className='max-w-md'
       mobileVariant='dialog'
     >
@@ -84,9 +107,7 @@ export const AppPickerDialog = ({
       <div className='p-6'>
         <div className='mb-4'>
           <h2 className='text-lg font-semibold text-foreground'>Add apps</h2>
-          <p className='mt-1 text-sm text-muted-foreground'>
-            Apps you saved or that were published to this workspace. Pick as many as you need.
-          </p>
+          <p className='mt-1 text-sm text-muted-foreground'>{description}</p>
         </div>
         <div className='flex flex-col gap-3'>
           <div className='relative'>
@@ -118,9 +139,10 @@ export const AppPickerDialog = ({
                   const added = addedAppIds.has(app.id);
                   // A full bar blocks adding, never un-adding — otherwise the
                   // only way back under the cap would be the bar itself.
-                  const disabled = !added && isFull;
+                  const disabled = !added && isFull && !publishedAppIds?.has(app.id);
+                  const published = publish?.publishedAppIds.has(app.id) ?? false;
                   return (
-                    <li key={app.id}>
+                    <li key={app.id} className='flex items-center'>
                       <button
                         type='button'
                         role='switch'
@@ -128,7 +150,7 @@ export const AppPickerDialog = ({
                         disabled={disabled}
                         onClick={() => onToggle(app, !added)}
                         className={cn(
-                          'flex w-full items-center gap-3 px-3 py-2 text-left transition-colors',
+                          'flex min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left transition-colors',
                           disabled
                             ? 'cursor-not-allowed opacity-50'
                             : 'hover:bg-accent focus-visible:bg-accent focus-visible:outline-none',
@@ -152,6 +174,9 @@ export const AppPickerDialog = ({
                         </span>
                         <ToggleGlyph checked={added} />
                       </button>
+                      {publish && (
+                        <PublishButton app={app} published={published} publish={publish} />
+                      )}
                     </li>
                   );
                 })}
@@ -160,11 +185,59 @@ export const AppPickerDialog = ({
           </div>
           <p className='text-xs text-muted-foreground'>
             {isFull
-              ? 'This bar already holds the maximum number of apps. Switch one off to add another.'
-              : `Up to ${MAX_APPS_PER_BAR} apps per bar.`}
+              ? (limitNote?.full ??
+                'This bar already holds the maximum number of apps. Switch one off to add another.')
+              : (limitNote?.normal ?? `Up to ${MAX_APPS_PER_BAR} apps per bar.`)}
+            {publish &&
+              ` Publish puts an app in the tabs of everyone in this ${publish.audience}; each person can still remove it for themselves.`}
           </p>
         </div>
       </div>
     </Dialog>
+  );
+};
+
+/** The per-row "Publish to channel" control shown to channel admins. */
+const PublishButton = ({
+  app,
+  published,
+  publish,
+}: {
+  app: ArtifactAppSummary;
+  published: boolean;
+  publish: AppPublishOptions;
+}): ReactElement => {
+  // Members see a published app only if they can open it, so a private app
+  // would publish to nobody.
+  const notShared = app.visibility !== 'WORKSPACE';
+  const blocked = !published && (notShared || publish.isFull);
+  const title = published
+    ? `Unpublish: remove it from everyone’s tabs in this ${publish.audience}`
+    : notShared
+      ? 'Publish the app to the workspace first'
+      : publish.isFull
+        ? `This ${publish.audience} already has the maximum number of published apps`
+        : `Add to the tabs of everyone in this ${publish.audience}`;
+  return (
+    <button
+      type='button'
+      disabled={blocked}
+      onClick={() => publish.onToggle(app, !published)}
+      title={title}
+      aria-label={title}
+      aria-pressed={published}
+      className={cn(
+        'mr-3 grid size-7 shrink-0 place-items-center rounded-md border transition-colors',
+        published
+          ? 'border-primary/30 bg-primary/10 text-primary hover:bg-primary/15'
+          : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground',
+        blocked && 'cursor-not-allowed opacity-50 hover:bg-transparent',
+      )}
+      data-track-category='CHANNELS'
+      data-track-name={published ? 'UnpublishChannelApp' : 'PublishChannelApp'}
+      data-track-metadata={JSON.stringify({ appId: app.id })}
+    >
+      <Globe className='size-3.5' aria-hidden='true' />
+    </button>
   );
 };

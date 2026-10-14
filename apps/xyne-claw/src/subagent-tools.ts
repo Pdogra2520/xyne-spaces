@@ -23,8 +23,9 @@ import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import { AGENT, LITELLM, SERVER } from "./config.js";
 import { runWithSubagentMcpId } from "./subagent-mcp-context.js";
 import { ensureSessionDebugDir, sessionDir } from "./session-store.js";
-import { SUBAGENT_DEFINITIONS, findSubagentDefinitionForServer, isPresentationToolSource, getSandboxSession, probeSession, REPO_CONFIGS, buildSandboxStoreKey, forwardChildStderr, type SubagentDefinition, type SetupStep } from "xyne-claw-shared";
+import { SUBAGENT_DEFINITIONS, findSubagentDefinitionForServer, isPresentationToolSource, getSandboxSession, probeSession, buildSandboxStoreKey, forwardChildStderr, type SubagentDefinition, type SetupStep } from "xyne-claw-shared";
 import { acquireFollowUpLock, isValidFollowUpHandle } from "./subagent-followup.js";
+import { matchesDirectPick } from "./tool-resolution.js";
 import { optEnabled } from "./optimizations.js";
 import type { McpToolGroup } from "./mcp.js";
 import { resolveModel, applyCopilotProxyIfNeeded, capCustomToolOutput, pushDebugProgress, pushInvocation, type CopilotConfig, type ClaudeConfig, type CodexConfig, type DebugEventRecord, type ProgressDest, type ToolInvocation } from "./agent.js";
@@ -470,10 +471,18 @@ async function loadMcpTools(
   // Without `timeout`, that internal 60s default wins the race even if we
   // attach a generous AbortSignal. See @modelcontextprotocol/sdk
   // shared/protocol.js:712.
-  const { tools } = await client.listTools(undefined, {
-    timeout: MCP_REQUEST_TIMEOUT_MS,
-    signal: AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS),
-  });
+  let listed: Awaited<ReturnType<Client["listTools"]>>;
+  try {
+    listed = await client.listTools(undefined, {
+      timeout: MCP_REQUEST_TIMEOUT_MS,
+      signal: AbortSignal.timeout(MCP_REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    await client.close().catch(() => {});
+    throw err;
+  }
+  const { tools } = listed;
+
   const toolDefs: ToolDefinition[] = tools.map((t) => ({
     name: `${prefix}__${t.name}`,
     label: `${prefix} / ${t.name}`,
@@ -579,11 +588,13 @@ function makeSubagentTool(def: SubagentDefinition, tools: ToolDefinition[], skil
     `[Subagent — nested LLM run, expensive] ${directFirst}${def.description} ` +
     `(If you have multiple independent questions for this subagent, batch them into ONE call with a single combined question; ` +
     `if you must fire it more than once, fire ALL the calls in the SAME assistant turn so they run in parallel.)`;
-  const tool: ToolDefinition & { progressLabels?: string[] } = {
+  const tool: ToolDefinition & { progressLabels?: string[]; subagent?: true } = {
     name: def.name,
     label: def.name,
     description: taggedDescription,
     progressLabels: def.progressLabels,
+    // Lets the run mark this tool's calls as subagent calls (ToolInvocation.subagentName).
+    subagent: true,
     parameters: Type.Object({
       [def.paramName]: Type.String({ description: def.paramDescription }),
       // Only exposed on the top-level run (where a background registry exists).
@@ -1633,6 +1644,16 @@ function makeSubagentTool(def: SubagentDefinition, tools: ToolDefinition[], skil
         await writeLegacyChildSnapshot("subagent_error", { status: failedStatus, error: msg });
         return { content: [{ type: "text" as const, text: `${def.name} subagent failed: ${msg}` }], details: {} };
       } finally {
+        // Belt-and-braces for the sticky-label interval. The success path
+        // (above) and the catch path both clear it, but an exit that reaches
+        // neither — an early return added later, or a throw from inside the
+        // catch — would leave a 4s timer republishing a stale tool label under
+        // the PARENT's sessionId, long after the parent run finalized. That is
+        // one of the two ways the Spaces "working" pill used to get stuck
+        // (prod 2026-09-28). clearInterval is idempotent, so clearing twice on
+        // the normal paths costs nothing.
+        if (stickyTimer) clearInterval(stickyTimer);
+        stickyLabel = null;
         // Dispose the child session even on the error path — the success path
         // already disposed it (dispose() is idempotent), but the catch path
         // didn't, leaking the session's listeners/extension context on every
@@ -1710,18 +1731,17 @@ function resolveCustomSubagentTools(
   groups: McpToolGroup[],
   customTools: ToolDefinition[] | undefined,
 ): ToolDefinition[] {
-  const directNames = new Set(toolsConfig.direct ?? []);
+  const directPicks = toolsConfig.direct ?? [];
   const customSlugs = new Set(toolsConfig.custom ?? []);
   const out: ToolDefinition[] = [];
 
-  if (directNames.size > 0) {
+  if (directPicks.length > 0) {
     for (const group of groups) {
       for (const t of group.tools) {
-        const name = extractToolName(t);
         // Include write tools too. Their ToolDefinition still queues a signed
         // pendingAction via the parent run's MCP wrapper; it does not execute
         // until the human approval card is approved in claw-auth.
-        if (directNames.has(name)) out.push(t);
+        if (matchesDirectPick(t, directPicks)) out.push(t);
       }
     }
   }
@@ -1735,6 +1755,11 @@ function resolveCustomSubagentTools(
     }
   }
   return out;
+}
+
+export function withoutBuiltinSubagents(tools: ToolDefinition[]): ToolDefinition[] {
+  const builtin = new Set(SUBAGENT_DEFINITIONS.map((d) => d.name));
+  return tools.filter((tool) => !builtin.has(tool.name));
 }
 
 /**
@@ -1777,9 +1802,9 @@ export function buildSubagentTools(
   const subagentTools: ToolDefinition[] = [];
   const directTools: ToolDefinition[] = [];
 
-  const isDirectPick = (toolName: string): boolean => {
+  const isDirectPick = (tool: ToolDefinition): boolean => {
     if (!directPickSuffixes || directPickSuffixes.length === 0) return false;
-    return directPickSuffixes.some((s) => toolName.endsWith(s));
+    return matchesDirectPick(tool, directPickSuffixes);
   };
 
   for (const group of groups) {
@@ -1805,7 +1830,7 @@ export function buildSubagentTools(
         // without going through the `bitbucket` subagent. Picked-as-direct +
         // picked-as-subagent both work; the parent-level filter in run.ts
         // decides which path actually surfaces to the model.
-        const hoisted = group.tools.filter((t) => isDirectPick(t.name));
+        const hoisted = group.tools.filter((t) => isDirectPick(t));
         if (hoisted.length > 0) directTools.push(...hoisted);
       }
       // Writes live in the subagent wrapper above and still queue a signed
@@ -1871,7 +1896,7 @@ export function buildSubagentTools(
         // check that bitbucket/spaces direct picks use — one config knob,
         // one mental model. The tool stays accessible inside the subagent
         // wrapper too.
-        const hoisted = filteredTools.filter((t) => isDirectPick(t.name));
+        const hoisted = filteredTools.filter((t) => isDirectPick(t));
         if (hoisted.length > 0) directTools.push(...hoisted);
         // Backwards compatibility for existing prompts that expect custom write
         // tools to be parent-level approval tools.
@@ -1948,33 +1973,35 @@ export function buildSubagentTools(
 
 // ── DeepWiki & Context7 MCP loaders (stdio transport, cached) ─────────────
 
-let cachedDeepwikiTools: McpToolGroup | null = null;
+const MCP_LOAD_RETRY_MS = 60_000;
 
-export async function loadDeepwikiTools(): Promise<McpToolGroup | null> {
-  if (cachedDeepwikiTools) return cachedDeepwikiTools;
-  try {
-    const { tools } = await loadMcpTools("npx", ["-y", "deepwiki-mcp"], "deepwiki");
-    cachedDeepwikiTools = { serverType: "deepwiki", serverName: "deepwiki", tools, writeTools: [] };
-    log.info(`[deepwiki] Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
-    return cachedDeepwikiTools;
-  } catch (err) {
-    log.warn(`[deepwiki] Failed to load tools: ${err instanceof Error ? err.message : err}`);
-    return null;
-  }
+function cachedStdioMcpLoader(name: string, command: string, args: string[]): () => Promise<McpToolGroup | null> {
+  let loaded: McpToolGroup | null = null;
+  let inflight: Promise<McpToolGroup | null> | null = null;
+  let failedAt = 0;
+  return async () => {
+    if (loaded) return loaded;
+    if (inflight) return inflight;
+    if (Date.now() - failedAt < MCP_LOAD_RETRY_MS) return null;
+    inflight = (async () => {
+      try {
+        const { tools } = await loadMcpTools(command, args, name);
+        loaded = { serverType: name, serverName: name, tools, writeTools: [] };
+        log.info(`[${name}] Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
+        return loaded;
+      } catch (err) {
+        failedAt = Date.now();
+        log.warn(`[${name}] Failed to load tools: ${err instanceof Error ? err.message : err}`);
+        return null;
+      } finally {
+        inflight = null;
+      }
+    })();
+    return inflight;
+  };
 }
 
-let cachedContext7Tools: McpToolGroup | null = null;
+export const loadDeepwikiTools = cachedStdioMcpLoader("deepwiki", "npx", ["-y", "deepwiki-mcp"]);
 
-export async function loadContext7Tools(): Promise<McpToolGroup | null> {
-  if (cachedContext7Tools) return cachedContext7Tools;
-  try {
-    const { tools } = await loadMcpTools("npx", ["-y", "@upstash/context7-mcp@latest"], "context7");
-    cachedContext7Tools = { serverType: "context7", serverName: "context7", tools, writeTools: [] };
-    log.info(`[context7] Loaded ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`);
-    return cachedContext7Tools;
-  } catch (err) {
-    log.warn(`[context7] Failed to load tools: ${err instanceof Error ? err.message : err}`);
-    return null;
-  }
-}
+export const loadContext7Tools = cachedStdioMcpLoader("context7", "npx", ["-y", "@upstash/context7-mcp@latest"]);
 

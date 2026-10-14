@@ -20,11 +20,9 @@ import {
   EmailType,
   DeskType,
   isDeskChannelType,
-  parseTicketEtaManagement,
-  mergeTicketEtaManagement,
 } from '@xyne/shared';
 import { syncConversationTicketMdFromPrismaTicket } from '@/utils/ticketMd';
-import { emitEventToWorkspaceApps } from '../core/eventSubscriptionUtils';
+import { emitEventToChannelApps } from '../core/eventSubscriptionUtils';
 import { AppEventType, AdditionalFormFieldUpdatedPayload, BaseAppEvent } from '../types';
 import { emailService } from '@/services/emailService';
 import { uploadFiles } from '@/services/fileUploadService';
@@ -35,15 +33,15 @@ import { ExternalSourceRepository } from '@/database/repositories/externalSource
 import { ExternalMessageRepository } from '@/database/repositories/externalMessageRepository';
 import { adapterRegistry } from '@/integrations/core/adapterRegistry';
 import { scopeExternalMessageIdToSource } from '@/integrations/core/deskSources';
+import { acquireLock, releaseLock, type LockHandle } from '@/utils/distributedLock';
+import type { CustomRequest } from '@/types/express';
 import { EmailChannelPreferenceRepository } from '@/database/repositories/emailChannelPreferenceRepository';
 import { createTicketCustomFieldActivity } from '@/services/ticketCustomFieldActivityService';
 
 import { resolveChannelId } from '../utils/channelUtils';
 import { decodeCursor, paginateResults } from '../core/paginationUtils';
-import type { MerchantTicketListItem } from '../types';
+import type { MerchantTicketListItem, TicketUserInfo } from '../types';
 import { validateChannelIdsAccess } from '../middelware/channelValidation';
-import { calculateETADeadline } from '@/utils/etaCalculation';
-import { generateKeyBetween } from 'fractional-indexing';
 import { resolveFormFieldDefinitionsForForm } from '@/utils/fieldDefinition';
 import type { TicketCustomFormData } from '@/database/repositories/formsRepository';
 import {
@@ -61,26 +59,19 @@ import {
   type CustomFieldWritePayload,
 } from '@/services/ticketCustomFieldService';
 import { emitTicketUpdated } from '@/automations/triggers/ticket-updated.trigger';
-import { syncStageOverdueFlag } from '@/services/tickets/syncStageOverdueFlag';
 import { getTicketBotActorId } from '@/utils/etaNotificationUtils';
 import {
-  resolveStepEstimate,
-  loadBoardEtaContext,
-  evaluateEta,
-  buildEtaActivityIntents,
-  isTerminalStatus,
   dispatchEtaNotifications,
   etaSignalsFromResult,
-  writeEtaActivitiesPrisma,
 } from '@/services/etaManagement';
-import { lockTicketMetadataAndEta } from '@/bypassAcl/rowLockServices';
+import { transferTicketToBoardTx } from '@/bypassAcl/transactions/controllersTicketController';
 
 const externalSourceRepo = new ExternalSourceRepository();
 const externalMessageRepo = new ExternalMessageRepository();
 const emailChannelPreferenceRepo = new EmailChannelPreferenceRepository();
 const appsFilesBaseUrl = `${config.backendUrl.replace(/\/$/, '')}/api/apps/files`;
 
-const prismaClient = DatabaseClient.getInstance();
+export const prismaClient = DatabaseClient.getInstance();
 
 const CreateTicketBodySchema = z.object({
   title: z.string().min(1, 'Title is required').trim(),
@@ -96,7 +87,6 @@ const CreateTicketBodySchema = z.object({
   stageName: z.string().trim().optional(),
   eta: z.string().datetime({ message: 'ETA must be a valid ISO 8601 date string' }).optional(),
   ticketType: z.string().trim().optional(),
-  merchantId: z.string().trim().min(1, 'Merchant ID cannot be empty').optional(),
   dynamicFields: z.record(z.unknown()).optional(),
 }).refine(
   data => !!data.channelId || !!data.channelName,
@@ -125,8 +115,6 @@ const UpdateTicketBodySchema = z.object({
   boardId: z.string().min(1, 'Board ID cannot be empty').trim().optional(),
   isArchived: z.boolean().optional(),
   tags: z.array(z.string().trim().min(1, 'Tags cannot be empty')).optional(),
-  // null clears the merchant link
-  merchantId: z.string().trim().min(1, 'Merchant ID cannot be empty').nullable().optional(),
   dynamicFields: z.record(z.unknown()).optional(),
 }).refine(
   data => !!data.channelId || !!data.channelName || !!data.conversationId,
@@ -136,8 +124,7 @@ const UpdateTicketBodySchema = z.object({
     data.assigneeId || data.assignedToEmail || data.stageName || data.groupId ||
     data.title || data.description || data.priority || data.eta ||
     data.ticketType || data.statusV2 || data.boardId || data.assignedUserGroupAlias ||
-    data.isArchived !== undefined || data.tags || data.dynamicFields ||
-    data.merchantId !== undefined
+    data.isArchived !== undefined || data.tags || data.dynamicFields
   ),
   { message: 'At least one field to update is required', path: ['assigneeId'] }
 ).refine(
@@ -173,6 +160,7 @@ const AppDeskInboundBodySchema = z.object({
   senderName: z.string().trim().optional(),
   senderEmail: z.string().email('senderEmail must be a valid email when provided').trim().optional(),
   additionalFormFields: z.record(z.unknown()).optional(),
+  timestamp: z.string().datetime({ offset: true, message: 'timestamp must be an ISO 8601 timestamp' }).optional(),
 });
 
 const ListBySenderQuerySchema = z.object({
@@ -259,6 +247,14 @@ const SearchTicketsBodySchema = z.object({
   }
 });
 
+const ListBoardsQuerySchema = z.object({
+  projectId: z.string().min(1, 'projectId must not be empty').trim().optional(),
+});
+
+const BoardIdParamsSchema = z.object({
+  boardId: z.string().min(1, 'boardId is required').trim(),
+});
+
 const TicketConversationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   cursor: z.string().optional(),
@@ -296,6 +292,34 @@ interface TicketConversationCursor {
   id: string;
   createdAt: number;
 }
+/**
+ * Batch-resolve user ids to { userId, email, name, displayName } so ticket
+ * responses can expose who a ticket is assigned to / created by without the
+ * caller making a follow-up users lookup.
+ */
+const getTicketUserInfoMap = async (
+  userIds: Array<string | null | undefined>,
+): Promise<Map<string, TicketUserInfo>> => {
+  const ids = Array.from(new Set(userIds.filter((id): id is string => !!id)));
+  if (ids.length === 0) return new Map();
+
+  const users = await prismaClient.user.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, email: true, name: true, displayName: true },
+  });
+  return new Map(
+    users.map(user => [
+      user.id,
+      { userId: user.id, email: user.email, name: user.name, displayName: user.displayName },
+    ]),
+  );
+};
+
+const userInfoOrNull = (
+  userMap: Map<string, TicketUserInfo>,
+  userId: string | null | undefined,
+): TicketUserInfo | null => (userId ? userMap.get(userId) ?? null : null);
+
 const replaceTicketTags = async (ticketId: string, tags: string[]): Promise<void> => {
   const normalizedTags = Array.from(new Set(tags.map(tag => tag.trim()).filter(Boolean)));
   const ticket = await prismaClient.ticket.findUnique({
@@ -396,149 +420,7 @@ const transferTicketToBoard = async (params: {
   // transactional state, and best kept off the held connection.
   const systemActorId = await getTicketBotActorId(currentTicket.workspaceId);
 
-  const txResult = await prismaClient.$transaction(async tx => {
-    const newBoardStages = await tx.stage.findMany({
-      where: { boardId: targetBoardId },
-      orderBy: { sequenceNumber: 'asc' },
-    });
-
-    if (newBoardStages.length === 0) {
-      throw new Error(`No stages found for board ${targetBoardId}`);
-    }
-
-    const firstStage = newBoardStages[0];
-
-    const firstTicketInStage = await tx.ticket.findFirst({
-      where: {
-        boardId: targetBoardId,
-        stageName: firstStage.name,
-        kanbanPosition: { not: null },
-      },
-      orderBy: { kanbanPosition: 'asc' },
-      select: { kanbanPosition: true },
-    });
-
-    let kanbanPosition: string;
-    try {
-      kanbanPosition = generateKeyBetween(null, firstTicketInStage?.kanbanPosition ?? null);
-    } catch {
-      kanbanPosition = generateKeyBetween(null, null);
-    }
-
-    // `eta` is deliberately left out of this base update - an automatic due date is only
-    // ever set by the domain-service evaluation below, and only when the target board has
-    // opted into automatic ETA management (never a blind stage-eta sum, and never a write
-    // that can shorten the ticket's existing due date).
-    await tx.ticket.update({
-      where: { id: ticketId },
-      data: {
-        boardId: targetBoardId,
-        stageName: firstStage.name,
-        statusV2: firstStage.defaultTicketStatusV2 ?? undefined,
-        kanbanPosition,
-        updatedAt: now,
-        updatedBy,
-      },
-    });
-
-    await tx.ticketStageEta.deleteMany({ where: { ticketId } });
-
-    let newStageEtaEntryId: string | null = null;
-    let stageEtaDeadline: Date | null = null;
-    if (firstStage.eta !== null && firstStage.eta > 0) {
-      stageEtaDeadline = calculateETADeadline(now, firstStage.eta);
-      const newStageEtaEntry = await tx.ticketStageEta.create({
-        data: {
-          ticketId,
-          stageId: firstStage.id,
-          stageEnteredAt: now,
-          stageLeftAt: null,
-          stageEta: stageEtaDeadline,
-          updatedBy,
-          workspaceId: currentTicket.workspaceId,
-        },
-        select: { id: true },
-      });
-      newStageEtaEntryId = newStageEtaEntry.id;
-    }
-
-    await syncStageOverdueFlag(tx, ticketId, now);
-    // ETA domain-service evaluation: forecast (extend-only) + planning-risk state, mirroring
-    // the pattern already used by TicketRepository.updateTicketStage and the Zero
-    // ticket.update board-transfer branch.
-    const effectiveStatusV2 = (firstStage.defaultTicketStatusV2 ?? currentTicket.statusV2) as TicketStatusV2;
-    // metadata AND eta were both read before this transaction opened, so a concurrent write
-    // (e.g. acknowledgeEtaRisk, or a manual due-date edit) landing before ours would be lost.
-    // FOR UPDATE locks the row so that can't happen. Both locked values feed evaluateEta:
-    // eta is the extend-only baseline and a fingerprint input, so a stale one could decide
-    // against - and then overwrite - a due date someone else just moved.
-    const lockedTicket = await lockTicketMetadataAndEta(tx, ticketId);
-    const lockedEta = lockedTicket?.eta ?? null;
-    const boardEtaCtx = await loadBoardEtaContext(tx, targetBoardId);
-    const currentTicketEtaManagement = parseTicketEtaManagement(lockedTicket?.metadata);
-    const stepEstimate = resolveStepEstimate(
-      { id: firstStage.id, eta: firstStage.eta },
-      null,
-      { requireExplicitTransition: false },
-    );
-
-    const etaResult = evaluateEta({
-      ticketId,
-      ticketStatus: effectiveStatusV2,
-      isTerminal: isTerminalStatus(effectiveStatusV2),
-      currentTicketEta: lockedEta,
-      currentTicketEtaManagement,
-      boardType: boardEtaCtx.boardType,
-      boardEtaManagement: boardEtaCtx.boardEtaManagement,
-      currentStageId: firstStage.id,
-      stages: boardEtaCtx.stages,
-      transitions: boardEtaCtx.transitions,
-      activeVisit: {
-        stageVisitId: newStageEtaEntryId,
-        transitionId: null,
-        deadline: stageEtaDeadline,
-        deadlineTracked: newStageEtaEntryId !== null,
-        estimateSource: stepEstimate.source,
-        estimateHours: stepEstimate.incomplete ? null : stepEstimate.hours,
-      },
-      trigger: 'STAGE_TRANSITION',
-      now,
-    });
-
-    const mergedMetadata = mergeTicketEtaManagement(
-      lockedTicket?.metadata,
-      etaResult.ticketEtaManagementPatch,
-    );
-
-    const updatedTicket = await tx.ticket.update({
-      where: { id: ticketId },
-      data: {
-        ...(etaResult.etaDecision.changed && etaResult.etaDecision.newEta
-          ? { eta: etaResult.etaDecision.newEta }
-          : {}),
-        metadata: mergedMetadata as Prisma.InputJsonValue,
-      },
-    });
-
-    const activityIntents = buildEtaActivityIntents(etaResult, {
-      currentStageId: firstStage.id,
-      oldEta: lockedEta ? lockedEta.getTime() : null,
-      trigger: 'STAGE_TRANSITION',
-      systemReason: `Automatic recalculation after moving ticket to board "${targetBoardId}"`,
-      previousRiskFingerprint: currentTicketEtaManagement.planningRisk.fingerprint,
-    });
-    await writeEtaActivitiesPrisma(tx, activityIntents, {
-      ticketId,
-      workspaceId: currentTicket.workspaceId,
-      channelId: currentTicket.channelId,
-      timestamp: now.getTime(),
-      systemActorId,
-    });
-
-    await syncConversationTicketMdFromPrismaTicket(tx, updatedTicket);
-
-    return { updatedTicket, etaResult };
-  });
+  const txResult = await transferTicketToBoardTx(targetBoardId, ticketId, now, updatedBy, currentTicket, systemActorId);
 
   // Post-commit notification dispatch - best-effort, must never affect the already-
   // committed response. Suppressed while the ticket is paused.
@@ -696,7 +578,6 @@ export class TicketController {
         stageName: requestedStageName,
         eta: etaString,
         ticketType,
-        merchantId,
         dynamicFields,
       } = bodyResult.data;
 
@@ -810,7 +691,7 @@ export class TicketController {
             // Full role assignment will be done after ticket creation
             pendingFullRoleAssignment = true;
           } else {
-          const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId);
+          const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId, resolvedChannelId);
           if (assignmentResult.assignedUserId) {
             resolvedAssignedTo = assignmentResult.assignedUserId;
             }
@@ -835,7 +716,6 @@ export class TicketController {
         stageName: resolvedStageName,
         eta: etaDate,
         ticketType,
-        merchantId,
         customFieldValues,
       });
 
@@ -866,6 +746,7 @@ export class TicketController {
             boardId,
             createdBy: userId,
             projectId,
+            channelId: resolvedChannelId,
           });
           const primaryUserId = primaryUserIdOf(fullRoles);
           if (primaryUserId) {
@@ -951,7 +832,6 @@ export class TicketController {
         boardId,
         isArchived,
         tags,
-        merchantId,
         dynamicFields,
       } = bodyResult.data;
 
@@ -975,6 +855,7 @@ export class TicketController {
           statusV2: true,
           userGroupId: true,
           assignedTo: true,
+          channelId: true,
         },
       });
       if (!ticket) {
@@ -1137,7 +1018,6 @@ export class TicketController {
       if (ticketType !== undefined) directUpdates.ticketType = ticketType;
       if (statusV2 !== undefined) directUpdates.statusV2 = statusV2;
       if (isArchived !== undefined) directUpdates.isArchived = isArchived;
-      if (merchantId !== undefined) directUpdates.merchantId = merchantId;
 
       if (Object.keys(directUpdates).length > 0) {
         await repositories.tickets.updateTicketFields(ticketId, directUpdates, userId);
@@ -1183,6 +1063,7 @@ export class TicketController {
               boardId: targetBoardId,
               createdBy: userId,
               projectId: ticket.projectId,
+              channelId: ticket.channelId,
             });
             const primaryUserId = primaryUserIdOf(fullRoles);
             if (primaryUserId) {
@@ -1199,6 +1080,7 @@ export class TicketController {
               undefined,
               undefined,
               ticket.projectId,
+              ticket.channelId ?? null,
             );
             if (assignmentResult.assignedUserId) {
               await ticketService.updateTicketAssignee(ticketId, userId, assignmentResult.assignedUserId);
@@ -1463,6 +1345,8 @@ export class TicketController {
         boardId: true,
         projectId: true,
         merchantId: true,
+        assignedTo: true,
+        createdBy: true,
       } as const;
 
       const hasCustomFieldFilters = !!(customFields && Object.keys(customFields).length > 0);
@@ -1543,6 +1427,11 @@ export class TicketController {
         );
       }
 
+      // Only the page actually returned (limit), not the +1 lookahead row.
+      const userMap = await getTicketUserInfoMap(
+        tickets.slice(0, limit).flatMap(ticket => [ticket.assignedTo, ticket.createdBy]),
+      );
+
       const items: MerchantTicketListItem[] = tickets.map(ticket => {
         return {
           ticketId: ticket.id,
@@ -1558,6 +1447,10 @@ export class TicketController {
           boardId: ticket.boardId,
           projectId: ticket.projectId,
           merchantId: ticket.merchantId,
+          assignedTo: ticket.assignedTo,
+          assignedToUser: userInfoOrNull(userMap, ticket.assignedTo),
+          createdBy: ticket.createdBy,
+          createdByUser: userInfoOrNull(userMap, ticket.createdBy),
           ...(includeCustomFields ? { customFormData: customFormDataByTicketId.get(ticket.id) ?? null } : {}),
         };
       });
@@ -1578,6 +1471,122 @@ export class TicketController {
         res.status(400).json({ error: error.message, code: 'VALIDATION_ERROR' });
         return;
       }
+      res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+    }
+  };
+
+  /**
+   * List boards in the app's workspace, optionally narrowed to one project.
+   * GET /api/apps/ticket/boards?projectId=...
+   */
+  listBoards = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const queryResult = ListBoardsQuerySchema.safeParse(req.query);
+      if (!queryResult.success) {
+        res.status(400).json({
+          error: 'Validation error',
+          code: 'VALIDATION_ERROR',
+          details: queryResult.error.errors,
+        });
+        return;
+      }
+
+      const workspaceId = req.user?.workspaceId;
+      if (!workspaceId) {
+        res.status(400).json({ error: 'Authenticated workspace is required', code: 'VALIDATION_ERROR' });
+        return;
+      }
+
+      const { projectId } = queryResult.data;
+      const boards = await prismaClient.board.findMany({
+        where: { workspaceId, ...(projectId ? { projectId } : {}) },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          boardType: true,
+          description: true,
+          projectId: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+
+      res.status(200).json({
+        boards: boards.map(board => ({
+          boardId: board.id,
+          name: board.name,
+          boardType: board.boardType,
+          description: board.description,
+          projectId: board.projectId,
+          createdAt: board.createdAt,
+          updatedAt: board.updatedAt,
+        })),
+      });
+    } catch (error) {
+      logger.error('[TicketController] listBoards error:', error);
+      res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+    }
+  };
+
+  /**
+   * List the stages of a board, ordered by sequence.
+   * GET /api/apps/ticket/boards/:boardId/stages
+   */
+  listBoardStages = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const paramsResult = BoardIdParamsSchema.safeParse(req.params);
+      if (!paramsResult.success) {
+        res.status(400).json({
+          error: 'Validation error',
+          code: 'VALIDATION_ERROR',
+          details: paramsResult.error.errors,
+        });
+        return;
+      }
+
+      const workspaceId = req.user?.workspaceId;
+      if (!workspaceId) {
+        res.status(400).json({ error: 'Authenticated workspace is required', code: 'VALIDATION_ERROR' });
+        return;
+      }
+
+      const { boardId } = paramsResult.data;
+      const board = await prismaClient.board.findFirst({
+        where: { id: boardId, workspaceId },
+        select: { id: true, name: true, projectId: true },
+      });
+      if (!board) {
+        res.status(404).json({ error: `Board with ID ${boardId} not found`, code: 'BOARD_NOT_FOUND' });
+        return;
+      }
+
+      const stages = await prismaClient.stage.findMany({
+        where: { boardId },
+        orderBy: [{ sequenceNumber: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          name: true,
+          sequenceNumber: true,
+          eta: true,
+          defaultTicketStatusV2: true,
+        },
+      });
+
+      res.status(200).json({
+        boardId: board.id,
+        boardName: board.name,
+        projectId: board.projectId,
+        stages: stages.map(stage => ({
+          stageId: stage.id,
+          name: stage.name,
+          sequenceNumber: stage.sequenceNumber,
+          eta: stage.eta,
+          defaultTicketStatusV2: stage.defaultTicketStatusV2,
+        })),
+      });
+    } catch (error) {
+      logger.error('[TicketController] listBoardStages error:', error);
       res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
     }
   };
@@ -1658,8 +1667,15 @@ export class TicketController {
         return;
       }
 
+      // Same assignee/creator enrichment as POST /list/search so app callers
+      // don't need a follow-up users lookup.
+      const { assignedTo, createdBy } = ticketInfo.ticket;
+      const userMap = await getTicketUserInfoMap([assignedTo, createdBy]);
+
       res.status(200).json({
         ...ticketInfo.ticket,
+        assignedToUser: userInfoOrNull(userMap, assignedTo),
+        createdByUser: userInfoOrNull(userMap, createdBy),
         customFormData: ticketInfo.customFormData,
         history: ticketInfo.history,
       });
@@ -2003,7 +2019,7 @@ export class TicketController {
 
       logger.info(`[TicketController] Form field "${fieldName}" updated to "${stringValue}" on ticket ${ticketId}`);
 
-      // Emit ADDITIONAL_FORM_FIELD_UPDATED event to all apps in the workspace
+      // Emit ADDITIONAL_FORM_FIELD_UPDATED event to the apps in the ticket's channel
       // Apps (like Genius) filter by fieldName and boardName to handle specific cases
       try {
         const board = await prismaClient.board.findUnique({
@@ -2039,7 +2055,7 @@ export class TicketController {
           };
 
           // Fire and forget - don't block the response.
-          void emitEventToWorkspaceApps(workspaceId, event);
+          void emitEventToChannelApps(payload.channelId, event);
           
           logger.info(`[TicketController] Emitted ADDITIONAL_FORM_FIELD_UPDATED for field "${fieldName}" on ticket ${ticketId}`);
         }
@@ -2495,7 +2511,7 @@ export class TicketController {
           if (boardMetadata?.fullRoleAssignment === true) {
             pendingFullRoleAssignment = true;
           } else {
-            const assignmentResult = await evaluateAssignmentRule(userGroupId, ticket.boardId, undefined, undefined, ticket.projectId);
+            const assignmentResult = await evaluateAssignmentRule(userGroupId, ticket.boardId, undefined, undefined, ticket.projectId, ticket.channelId ?? null);
             if (assignmentResult.assignedUserId) {
               resolvedAssignedTo = assignmentResult.assignedUserId;
               const updatedTicket = await prismaClient.ticket.update({
@@ -2518,6 +2534,7 @@ export class TicketController {
             boardId: ticket.boardId,
             createdBy: userId,
             projectId: ticket.projectId,
+            channelId: ticket.channelId ?? null,
           });
           const primaryUserId = primaryUserIdOf(fullRoles);
           if (primaryUserId) {
@@ -2556,6 +2573,7 @@ export class TicketController {
   };
 
   appDeskInbound = async (req: Request, res: Response): Promise<void> => {
+    let creationLock: LockHandle | null = null;
     try {
       const additionalFormFieldValidationErrors: Array<{ error: string; code: 'VALIDATION_ERROR' }> = [];
 
@@ -2604,7 +2622,7 @@ export class TicketController {
       const {
         channelId, threadId, externalId: bodyExternalId, subject, body,
         senderEmail, senderName,
-        additionalFormFields,
+        additionalFormFields, timestamp,
       } = bodyResult.data;
 
       const userId = req.user!.id;
@@ -2685,6 +2703,9 @@ export class TicketController {
       }
 
       const externalThreadId = threadId;
+      // Prefer the app's send time; otherwise request arrival, not processing time, so
+      // lock waits and slow uploads can't reorder a thread.
+      const arrivedAt = timestamp ? new Date(timestamp) : new Date((req as CustomRequest).startTime ?? Date.now());
       const appExternalId = bodyExternalId || randomUUID();
       // Source-namespaced, and written to BOTH Email.externalMessageId and
       // ExternalMessage.externalId. Those two columns are the same identifier
@@ -2760,38 +2781,94 @@ export class TicketController {
         appUserId: userId,
       });
 
+      // `externalId` must identify a message uniquely within the source, not just
+      // within its thread. Email's unique is (externalMessageId, channelId), so an
+      // id reused under a second thread cannot be stored.
+      // Scoped first, then the raw id: source-scoping (#1248) is recent, so an id
+      // this app pushed before it is stored unscoped.
+      const existingLink =
+        (await externalMessageRepo.findByExternalId(externalSource.id, externalMessageId)) ??
+        (await externalMessageRepo.findByExternalId(externalSource.id, appExternalId));
+      if (existingLink && existingLink.externalThreadId !== externalThreadId) {
+        logger.warn('[AppDeskInbound] externalId reused across threads — rejecting', {
+          channelId,
+          externalId: appExternalId,
+          externalMessageId,
+          incomingThreadId: externalThreadId,
+          alreadyUsedByThreadId: existingLink.externalThreadId,
+          externalSourceId: externalSource.id,
+        });
+        res.status(409).json({
+          error:
+            `externalId "${appExternalId}" is already in use by thread "${existingLink.externalThreadId}". ` +
+            'externalId must be unique per app, not per thread — send a globally unique id ' +
+            '(for example your message id combined with your thread id).',
+          code: 'EXTERNAL_ID_NOT_UNIQUE',
+        });
+        return;
+      }
+
       // Thread continuation is source-scoped via the app's ExternalMessage link; the
       // channel-scoped fallback only covers pre-existing threads with a missing link
       // (self-healed by the externalSourceLink write below). Do not remove the fallback.
-      const linkedMessage = await externalMessageRepo.findByThreadId(externalSource.id, externalThreadId, ExternalEntityType.EMAIL);
-      let threadEmail = linkedMessage?.entityId ? await repositories.emails.findById(linkedMessage.entityId) : null;
-      if (!threadEmail) {
-        const candidate = await repositories.emails.findFirstByThreadAndChannel(externalThreadId, channelId);
-        if (candidate) {
-          // The candidate matched on (threadId, channelId) alone, which says nothing
-          // about who owns it. On a shared desk another app — or the mailbox — can
-          // already own that thread, and adopting it would file this app's message
-          // into someone else's ticket. Only adopt a thread no other source claims.
-          const conversationEmails = await repositories.emails.findByConversationId(candidate.conversationId);
-          const foreignLink = await externalMessageRepo.findForeignLinkByEmailIds(
-            conversationEmails.map(e => e.id),
-            externalSource.id,
-          );
-          if (foreignLink) {
-            logger.info('[AppDeskInbound] thread id collides with another source on this channel — starting a new ticket', {
-              channelId,
-              threadId: externalThreadId,
-              externalSourceId: externalSource.id,
-              ownedByExternalSourceId: foreignLink.externalSourceId,
-            });
-          } else {
-            threadEmail = candidate;
-            logger.warn('[AppDeskInbound] legacy channel-scoped thread fallback used (ExternalMessage link missing)', {
-              channelId,
-              threadId: externalThreadId,
-              externalSourceId: externalSource.id,
-            });
+      let collisionLogged = false;
+      const findThreadEmail = async () => {
+        const linkedMessage = await externalMessageRepo.findByThreadId(externalSource.id, externalThreadId, ExternalEntityType.EMAIL);
+        let threadEmail = linkedMessage?.entityId ? await repositories.emails.findById(linkedMessage.entityId) : null;
+        if (!threadEmail) {
+          const candidate = await repositories.emails.findFirstByThreadAndChannel(externalThreadId, channelId);
+          if (candidate) {
+            // The candidate matched on (threadId, channelId) alone, which says nothing
+            // about who owns it. On a shared desk another app — or the mailbox — can
+            // already own that thread, and adopting it would file this app's message
+            // into someone else's ticket. Only adopt a thread no other source claims.
+            const conversationEmails = await repositories.emails.findByConversationId(candidate.conversationId);
+            const foreignLink = await externalMessageRepo.findForeignLinkByEmailIds(
+              conversationEmails.map(e => e.id),
+              externalSource.id,
+            );
+            if (foreignLink) {
+              if (!collisionLogged) {
+                logger.info('[AppDeskInbound] thread id collides with another source on this channel — starting a new ticket', {
+                  channelId,
+                  threadId: externalThreadId,
+                  externalSourceId: externalSource.id,
+                  ownedByExternalSourceId: foreignLink.externalSourceId,
+                });
+                collisionLogged = true;
+              }
+            } else {
+              threadEmail = candidate;
+              logger.warn('[AppDeskInbound] legacy channel-scoped thread fallback used (ExternalMessage link missing)', {
+                channelId,
+                threadId: externalThreadId,
+                externalSourceId: externalSource.id,
+              });
+            }
           }
+        }
+        return threadEmail;
+      };
+
+      let threadEmail = await findThreadEmail();
+      if (!threadEmail) {
+        // Concurrent first messages of one thread would each create a ticket. Serialize
+        // creation per thread and re-check once the lock is held; appends stay unlocked.
+        creationLock = await acquireLock(`lock:app-desk-inbound:${externalSource.id}:${externalThreadId}`, {
+          ttlSeconds: 60,
+          waitTimeoutMs: 60_000,
+        });
+        if (!creationLock) {
+          logger.warn('[AppDeskInbound] thread creation lock not acquired - proceeding unlocked', {
+            channelId,
+            threadId: externalThreadId,
+            externalSourceId: externalSource.id,
+          });
+        }
+        threadEmail = await findThreadEmail();
+        if (threadEmail) {
+          await releaseLock(creationLock);
+          creationLock = null;
         }
       }
 
@@ -2807,7 +2884,7 @@ export class TicketController {
           externalMessageId,
           emailType: EmailType.DEFAULT,
           ...(uploadedFiles.length > 0 && { uploadedFiles }),
-          receivedAt: new Date(),
+          receivedAt: arrivedAt,
         });
         const existingTicket = await prismaClient.ticket.findFirst({
           where: { conversationId: threadEmail.conversationId },
@@ -2941,9 +3018,14 @@ export class TicketController {
             fromEmailAddress: senderEmail,
           }),
         },
-        receivedAt: new Date(),
+        receivedAt: arrivedAt,
         boardId: effectiveBoardId,
         scopeFieldValues,
+        // The thread link is committed here; waiters can find it, so stop holding them.
+        onThreadCommitted: async () => {
+          await releaseLock(creationLock);
+          creationLock = null;
+        },
       });
 
       if (result && 'blocked' in result && result.blocked) {
@@ -3009,7 +3091,10 @@ export class TicketController {
       });
       logger.error('[TicketController] appDeskInbound error:', error);
       res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+    } finally {
+      await releaseLock(creationLock);
     }
   };
 
 }
+

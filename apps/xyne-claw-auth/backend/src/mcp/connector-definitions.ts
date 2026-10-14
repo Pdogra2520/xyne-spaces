@@ -82,6 +82,43 @@ function writeToolsFromPolicy(policy: WriteToolPolicy): readonly string[] {
   return [];
 }
 
+export function isWriteToolUnderPolicy(
+  policy: WriteToolPolicy | undefined,
+  tool: string,
+): boolean {
+  if (!policy) return false;
+  const tools = policy.tools ?? [];
+  switch (policy.mode) {
+    case "allAsk":
+      return true;
+    case "allowAll":
+      return false;
+    case "denylist":
+      return !tools.includes(tool);
+    case "allowlist":
+    default:
+      return tools.includes(tool);
+  }
+}
+
+export function effectiveWriteTools(
+  policy: WriteToolPolicy | undefined,
+  allToolNames: readonly string[],
+): readonly string[] {
+  if (!policy) return [];
+  switch (policy.mode) {
+    case "allAsk":
+      return allToolNames;
+    case "allowAll":
+      return [];
+    case "denylist":
+      return allToolNames.filter((n) => !(policy.tools ?? []).includes(n));
+    case "allowlist":
+    default:
+      return policy.tools ?? [];
+  }
+}
+
 function buildDynamicDefinition(row: McpServer): ResolvedConnectorDefinition {
   const credentialFields = parseCredentialFields(row);
   const healthCheck = parseHealthCheck(row);
@@ -95,6 +132,7 @@ function buildDynamicDefinition(row: McpServer): ResolvedConnectorDefinition {
     credentialFields,
     healthCheck,
     writeTools: writeToolsFromPolicy(writePolicy),
+    writePolicy,
     staticTools: [],
     forwardFiles: row.forwardFiles === true,
     buildStdioCommand(credentials) {
@@ -160,7 +198,9 @@ function fromStaticAdapter(serverType: string): ResolvedConnectorDefinition | un
  * Everything else falls through to DB-first, preserving the pre-XYNE-14952
  * behaviour.
  */
-const STATIC_FIRST_TYPES = new Set<string>(["rapidapi-linkedin"]);
+// clickup: DB row is a dead manual-token form — ClickUp only accepts OAuth
+// PKCE tokens from routes/clickup-oauth.ts, so the code adapter must win.
+const STATIC_FIRST_TYPES = new Set<string>(["rapidapi-linkedin", "clickup", "webflow"]);
 
 export async function resolveConnectorDefinition(serverType: string): Promise<ResolvedConnectorDefinition | undefined> {
   if (STATIC_FIRST_TYPES.has(serverType)) {

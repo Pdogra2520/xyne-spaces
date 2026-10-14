@@ -20,6 +20,7 @@ packages:
   - packages/logger
   - packages/shared
   - packages/storage
+  - packages/secrets-vault
   - packages/icons
   - packages/framework
   - packages/kata-sdk
@@ -28,6 +29,7 @@ packages:
   - packages/xyne-claw-shared
   - packages/xyne-claw-mcp
   - packages/xyne-claw-pi-plugin
+  - packages/xyne-spaces-mcp
 
   - tools/xyne-automation
   - tools/xyne-automation-old

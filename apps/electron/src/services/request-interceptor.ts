@@ -192,8 +192,27 @@ function isFirstPartyUrl(rawUrl: string | undefined): boolean {
     return false;
   }
 }
-function installMediaPermissionGuard(targetSession: Electron.Session, label: string): void {
+/**
+ * Web pages in the in-app browsers may go full screen — a video, a slide deck — as
+ * they can in any browser; nothing else. Chromium grants it only on the reader's own
+ * click or key press, and Esc leaves it.
+ */
+const isPageFullscreen = (
+  allowed: boolean,
+  webContents: Electron.WebContents | null | undefined,
+  permission: string,
+): boolean => allowed && permission === 'fullscreen' && webContents?.getType() === 'webview';
+
+function installMediaPermissionGuard(
+  targetSession: Electron.Session,
+  label: string,
+  { pageFullscreen = false }: { pageFullscreen?: boolean } = {},
+): void {
   targetSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (isPageFullscreen(pageFullscreen, webContents, permission)) {
+      callback(true);
+      return;
+    }
     if (RESTRICTED_MEDIA_PERMISSIONS.has(permission)) {
       const allowed =
         isTopLevelMainWindow(webContents) ||
@@ -223,6 +242,7 @@ function installMediaPermissionGuard(targetSession: Electron.Session, label: str
     callback(false);
   });
   targetSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+    if (isPageFullscreen(pageFullscreen, webContents, permission)) return true;
     if (RESTRICTED_MEDIA_PERMISSIONS.has(permission)) {
       return (
         isTopLevelMainWindow(webContents ?? undefined) ||
@@ -239,7 +259,9 @@ function installMediaPermissionGuard(targetSession: Electron.Session, label: str
 function setupMediaPermissionGuard(): void {
   installMediaPermissionGuard(session.defaultSession, 'default');
   installMediaPermissionGuard(session.fromPartition('persist:xyne-spaces'), 'xyne-spaces');
-  installMediaPermissionGuard(session.fromPartition('persist:browser-tabs'), 'browser-tabs');
+  installMediaPermissionGuard(session.fromPartition('persist:browser-tabs'), 'browser-tabs', {
+    pageFullscreen: true,
+  });
   app.on('session-created', (createdSession) => {
     installMediaPermissionGuard(createdSession, 'dynamic');
   });
@@ -329,16 +351,8 @@ export function setupRequestInterceptor(): void {
   session.defaultSession.webRequest.onHeadersReceived(
     { urls: [`${config.BACKEND_URL}/*`] },
     (details, callback) => {
-      if (details.statusCode === 401) {
-        const contentType = details.responseHeaders?.['content-type']?.[0];
-        if (contentType?.includes('application/json')) {
-          void clearAllCookies();
-          mainWindow?.webContents.send('auth:token-expired');
-        }
-      }
-
       if (details.url.includes('/logout') && details.statusCode === 200) {
-        void clearAllCookies();
+        void clearAllCookies('logout_response');
       }
 
       callback({ responseHeaders: details.responseHeaders });

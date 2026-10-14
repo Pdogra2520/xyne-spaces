@@ -30,9 +30,11 @@ import {
   listAccessibleClawAgents,
   listClawAgentModels,
   deleteClawConversation,
+  patchClawConversation,
   CMDK_ANSWER_AGENT_SLUG,
   type ClawRunRequest,
 } from '@/services/clawAgentService';
+import { attachXyneAiFlowToken } from '@/apps/core/flowToken';
 import { resolveAuthorizedSdlcLinkedContext } from '@/sdlc/SdlcLinkedContextResolver';
 import {
   buildSdlcAskAiContext,
@@ -71,21 +73,31 @@ const SelectionContextSchema = z
 // Attached context item schema - for Add Context feature.
 // `collection`/`folder`/`file` items all arrive as ordinary entries in this
 // list — the dashboard already knows each one's cuid + name client-side.
+// `message`/`user`/`attachment` (a Spaces message, a person, a file shared in
+// a conversation) come from the composer's @ picker; claw-auth resolves them.
+// `app` is an artifact app from the context picker; claw-auth checks the
+// user can read it.
 const AttachedContextItemSchema = z.object({
   type: z.enum([
     'channel',
     'ticket',
     'canvas',
     'call',
+    'app',
     'activity',
     'collection',
     'file',
     'folder',
     'local-folder',
+    'message',
+    'user',
+    'attachment',
   ]),
   id: z.string().min(1),
   title: z.string().min(1),
   threadId: z.string().optional(),
+  // Canvas items only — claw-auth labels a recording's notes vs its AI summary.
+  canvasRole: z.enum(['call-notes', 'call-summary']).optional(),
   // Activity-specific fields
   eventName: z.string().optional(),
   eventCategory: z.string().optional(),
@@ -548,6 +560,9 @@ export class XyneAIControllerV2 {
           createCanvasEnabled,
           // cmd+K shows one answer and takes no reply, so follow-up chips are never drawn.
           generateFollowUpSuggestions: agentSlug !== CMDK_ANSWER_AGENT_SLUG,
+          // Neither cmd+K nor the compose subject helper puts its thread in the
+          // chat list, so a generated name is a completion nobody can ever see.
+          generateTitle: agentSlug !== CMDK_ANSWER_AGENT_SLUG && !draftMode,
           sessionId: effectiveSessionId,
           // Branching: forward intent + tree position to claw-auth. The
           // `parentMessageId` is the JAF/v1-shared name; here it doubles as
@@ -823,7 +838,8 @@ export class XyneAIControllerV2 {
 
   /**
    * GET /api/xyne-ai/v2/conversations
-   * Query param: agentSlug (optional, defaults to 'ask-ai')
+   * Query: allAgents=1 with agentSlug, q, limit, cursor (paged); without
+   * allAgents, agentSlug (defaults to 'ask-ai') for the whole per-agent list.
    */
   listConversations = async (req: Request, res: Response): Promise<void> => {
     const userId = (req as any).user?.id;
@@ -832,10 +848,25 @@ export class XyneAIControllerV2 {
       return;
     }
 
-    const agentSlug = (req.query.agentSlug as string) || 'ask-ai';
+    // allAgents=1: every agent's chats in pages of 50 (agentSlug filters, q
+    // searches titles, cursor continues). Without it: one agent's whole list
+    // (ask-ai by default) — the shape older dashboard builds ask for.
+    const param = (name: string): string | undefined =>
+      typeof req.query[name] === 'string' && req.query[name] ? (req.query[name] as string) : undefined;
+    const allAgents = req.query.allAgents === '1';
 
     try {
-      const result = await listClawConversations({ headers: req.headers, userId }, agentSlug);
+      const result = await listClawConversations(
+        { headers: req.headers, userId },
+        allAgents
+          ? {
+              agentSlug: param('agentSlug'),
+              q: param('q'),
+              limit: param('limit'),
+              cursor: param('cursor'),
+            }
+          : { agentSlug: param('agentSlug') ?? 'ask-ai', fullAgentList: true }
+      );
       res.json(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Internal server error';
@@ -862,15 +893,31 @@ export class XyneAIControllerV2 {
     }
 
     const agentSlug = (req.query.agentSlug as string) || 'ask-ai';
+    const scope = req.query.scope === 'conversation' ? 'conversation' : undefined;
 
     try {
       const result = await getClawConversationMessages(
         { headers: req.headers, userId },
         convId,
-        agentSlug
+        agentSlug,
+        scope
       );
+      const data = Array.isArray((result as { data?: unknown }).data)
+        ? ((result as { data: Array<Record<string, unknown>> }).data).map((message) =>
+            Array.isArray(message['uiFlows'])
+              ? {
+                  ...message,
+                  uiFlows: (message['uiFlows'] as unknown[]).map((flow) =>
+                    attachXyneAiFlowToken(flow, userId),
+                  ),
+                }
+              : message,
+          )
+        : (result as { data?: unknown }).data;
+
       res.json({
         ...result,
+        ...(data !== undefined && { data }),
         ...(result.toolInvocations && { toolInvocations: result.toolInvocations }),
         ...(result.invocationsByMsgId && { invocationsByMsgId: result.invocationsByMsgId }),
         ...(result.runByMsgId && { runByMsgId: result.runByMsgId }),
@@ -1107,6 +1154,7 @@ export class XyneAIControllerV2 {
     try {
       await streamClawConversationLive({ headers: req.headers, userId }, res, convId, agentSlug, {
         signal: upstreamAbort.signal,
+        ...(req.query.scope === 'conversation' ? { scope: 'conversation' as const } : {}),
       });
     } catch (error) {
       logger.error('[XyneAIv2] live proxy error:', error);
@@ -1146,6 +1194,60 @@ export class XyneAIControllerV2 {
       const message = error instanceof Error ? error.message : 'Internal server error';
       logger.error('[XyneAIv2] deleteConversation error:', error);
       res.status(503).json({ success: false, error: message });
+    }
+  };
+
+  /**
+   * PATCH /api/xyne-ai/v2/conversations/:convId
+   * Rename and/or pin a conversation. Ownership is enforced by claw-auth.
+   */
+  updateConversation = async (req: Request, res: Response): Promise<void> => {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      res.status(401).json({ success: false, error: 'Authentication required' });
+      return;
+    }
+
+    const { convId } = req.params;
+    if (!convId) {
+      res.status(400).json({ success: false, error: 'convId is required' });
+      return;
+    }
+
+    const { title, pinned } = (req.body ?? {}) as { title?: unknown; pinned?: unknown };
+    if (title === undefined && pinned === undefined) {
+      res.status(400).json({ success: false, error: 'title or pinned is required' });
+      return;
+    }
+    if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
+      res.status(400).json({ success: false, error: 'title must be a non-empty string' });
+      return;
+    }
+    if (pinned !== undefined && typeof pinned !== 'boolean') {
+      res.status(400).json({ success: false, error: 'pinned must be a boolean' });
+      return;
+    }
+
+    const agentSlug = (req.query.agentSlug as string) || 'ask-ai';
+
+    try {
+      const result = await patchClawConversation(
+        { headers: req.headers, userId },
+        convId,
+        {
+          ...(typeof title === 'string' ? { title } : {}),
+          ...(typeof pinned === 'boolean' ? { pinned } : {}),
+        },
+        agentSlug
+      );
+      res.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      logger.error('[XyneAIv2] updateConversation error:', error);
+      res.status(message === 'Conversation not found' ? 404 : 503).json({
+        success: false,
+        error: message,
+      });
     }
   };
 
@@ -1236,7 +1338,11 @@ export class XyneAIControllerV2 {
     }
 
     try {
-      const result = await listAccessibleClawAgents({ headers: req.headers, userId });
+      const result = await listAccessibleClawAgents({
+        headers: req.headers,
+        userId,
+        workspaceId: (req as any).user?.workspaceId,
+      });
       res.json(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Internal server error';

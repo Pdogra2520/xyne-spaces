@@ -35,6 +35,7 @@ const CallableAgentCard = ({
     <div className='group relative min-w-0'>
       <button
         type='button'
+        aria-current={selected ? 'true' : undefined}
         onClick={onOpen}
         data-track-category='Claw Agents'
         data-track-name='Create agent v2: open callable agent detail'
@@ -206,7 +207,11 @@ export function BrowseCallableAgentsDialog({
             key={entry.slug}
             entry={entry}
             onOpen={() => setOpenSlug(entry.slug)}
-            onToggle={() => (entry.status !== null ? onRemove(entry.slug) : onAdd(entry.slug, ''))}
+            onToggle={() => {
+              if (entry.status !== null) onRemove(entry.slug);
+              else if (entry.needsApproval) setOpenSlug(entry.slug);
+              else onAdd(entry.slug, '');
+            }}
           />
         ))}
       </div>

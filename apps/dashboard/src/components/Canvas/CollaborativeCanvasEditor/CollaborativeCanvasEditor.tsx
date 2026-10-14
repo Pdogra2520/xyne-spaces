@@ -46,6 +46,7 @@ import { logger, Event } from '../../../utils/logger';
 import { useZero } from '../../../hooks/useZero';
 import { queries } from '../../../zero/queries';
 import { useCachedQuery } from '../../../hooks/useCachedQuery';
+import { useCanvasConnectId } from '../../../hooks/useCanvasConnectId';
 import {
   resolveFileUrl,
   extractHeadingsFromBlocks,
@@ -146,6 +147,8 @@ interface CollaborativeCanvasEditorProps {
   currentUserRole?: CanvasRole | null;
   /** Scrolls with the document, above its first block. */
   header?: React.ReactNode;
+  /** Shows the headings as an "On this page" list on the right. */
+  pinnedOutline?: boolean;
 }
 
 export const CollaborativeCanvasEditor = forwardRef<
@@ -174,6 +177,7 @@ export const CollaborativeCanvasEditor = forwardRef<
       canvasCreatedBy,
       currentUserRole,
       header,
+      pinnedOutline = false,
     },
     ref,
   ) => {
@@ -185,9 +189,13 @@ export const CollaborativeCanvasEditor = forwardRef<
     const isXyneAIOpen = useSelector(xyneAIActor, state => state.matches('open'));
     const z = useZero();
     const currentUserId = (user?.id as string) || '';
-    const [queriedParticipants = []] = useCachedQuery(queries.canvasParticipants({ canvasId }), {
-      enabled: Boolean(canvasId) && !preloadedParticipants,
-    });
+    const connectId = useCanvasConnectId(canvasId);
+    const [queriedParticipants = []] = useCachedQuery(
+      queries.canvasParticipants({ canvasId, connectId }),
+      {
+        enabled: Boolean(canvasId) && !preloadedParticipants,
+      },
+    );
     const canvasParticipants = preloadedParticipants ?? queriedParticipants;
     const currentUserName =
       (user?.name ? String(user.name) : undefined) ||
@@ -919,7 +927,11 @@ export const CollaborativeCanvasEditor = forwardRef<
         )}
 
         {/* Table of Contents */}
-        <TableOfContents headings={tocHeadings} onHeadingClick={handleHeadingClick} />
+        <TableOfContents
+          headings={tocHeadings}
+          onHeadingClick={handleHeadingClick}
+          pinned={pinnedOutline}
+        />
 
         {/* Search Overlay */}
         {editor && (

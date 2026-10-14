@@ -128,8 +128,8 @@ export class TagGenerationPipeline extends EventEmitter {
         lazyConnect: false,
       },
       defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 2000 },
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 5_000 },
         removeOnComplete: true,
         removeOnFail: { count: 100 },
       },

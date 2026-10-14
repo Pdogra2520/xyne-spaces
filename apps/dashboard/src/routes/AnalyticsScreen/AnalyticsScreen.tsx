@@ -1,6 +1,8 @@
 import { ReactElement, useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../hooks/useAuth';
+import { useCachedQuery } from '../../hooks/useCachedQuery';
+import { queries } from '../../zero/queries';
 import { analyticsService } from '../../services/Analytics/analyticsService';
 import { getDateRange, formatDateRangeForDisplay } from '../../utils/dateRangeUtils';
 import {
@@ -47,6 +49,13 @@ const AnalyticsScreen = (): ReactElement => {
   });
 
   const { user } = useAuth();
+
+  // Live workspace record so the subtitle reflects the current (and renamed) workspace name.
+  const [workspace] = useCachedQuery(
+    queries.getWorkspaceById({ workspaceId: user?.workspaceId ?? '' }),
+    { enabled: !!user?.workspaceId },
+  );
+  const workspaceName = workspace?.name?.trim();
 
   // Listen for theme changes via data-theme attribute (Settings updates this)
   useEffect(() => {
@@ -275,8 +284,8 @@ const AnalyticsScreen = (): ReactElement => {
           {/* Title and Subtext */}
           <div id='analytics-title-section' className='flex flex-col gap-1'>
             <h1 className='text-xl font-semibold text-foreground'>Analytics</h1>
-            <p className='text-sm text-muted-foreground'>
-              Track and analyze your workspace performance metrics
+            <p className='text-sm text-muted-foreground' data-testid='analytics-subtitle'>
+              Track and analyze {workspaceName || 'your'} workspace performance metrics
             </p>
           </div>
 

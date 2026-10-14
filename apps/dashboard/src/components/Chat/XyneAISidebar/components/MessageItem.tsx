@@ -21,7 +21,6 @@ import {
   Check,
   Loader2,
   Bug,
-  AlertTriangle,
   X,
 } from 'lucide-react';
 import React from 'react';
@@ -85,8 +84,11 @@ import type {
   SelectionContext,
   ToolInvocation as ToolInvocationType,
   ClawCitation,
+  PendingAction,
 } from '../utils/XyneAITypes';
 import { TurnTimeline } from './TurnTimeline';
+import { TurnErrorCard } from './TurnErrorCard';
+import { isErrorOnlyContent } from './turnAnswer';
 import { turnDurationLabel, turnFinishedAt } from './activityShared';
 import { FlowScreenManager } from '../../../flowUI/FlowScreenManager';
 import {
@@ -97,7 +99,10 @@ import {
 import { AgentByline, AgentRecipient } from '../../../AIScreen/ConversationAgents';
 import { FollowUpSuggestions } from '../../../AIScreen/FollowUpSuggestions';
 import { PendingActionBlock } from './PendingActionBlock';
-import { respondToPendingAction } from '../../../../services/XyneAI/XyneAIPendingActionService';
+import {
+  respondToPendingAction,
+  resolvePendingActionLocally,
+} from '../../../../services/XyneAI/XyneAIPendingActionService';
 import { Link2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { AskAiRatingButtons } from '../../../AIScreen/AskAiRatingButtons';
@@ -643,6 +648,7 @@ interface MessageContentProps {
   trackContext?: Record<string, unknown> | undefined;
   /** See MessageItemProps.flowCards — absence means render no cards. */
   flowCards?: { conversationId: string; onActionComplete: () => void } | undefined;
+  onInterceptPendingAction?: ((action: PendingAction, approved: boolean) => boolean) | undefined;
 }
 
 interface SingleStatObject {
@@ -741,6 +747,7 @@ interface MessageItemProps {
    *  is the off switch, so a surface that cannot service a flow action never
    *  shows a card it would leave stuck. */
   flowCards?: { conversationId: string; onActionComplete: () => void } | undefined;
+  onInterceptPendingAction?: ((action: PendingAction, approved: boolean) => boolean) | undefined;
 }
 
 // Image preview component that fetches with auth and creates blob URL
@@ -1174,6 +1181,7 @@ export const MessageItem = React.memo(
     onFollowUpSuggestionClick,
     trackContext,
     flowCards,
+    onInterceptPendingAction,
   }: MessageItemProps): ReactElement => {
     const [copied, setCopied] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
@@ -1331,7 +1339,7 @@ export const MessageItem = React.memo(
               message.type === 'user'
                 ? isEditing
                   ? 'rounded-2xl bg-accent p-3'
-                  : 'flex flex-col items-start gap-3 overflow-hidden px-5 py-3 [border-radius:16px_16px_4px_16px] bg-accent text-foreground md:block md:w-fit'
+                  : 'xyne-user-bubble flex flex-col items-start gap-3 overflow-hidden px-5 py-3 [border-radius:16px_16px_4px_16px] bg-accent text-foreground md:block md:w-fit'
                 : 'bg-transparent text-foreground max-w-full'
             }`}
           >
@@ -1450,7 +1458,7 @@ export const MessageItem = React.memo(
                     ))}
                   </div>
                 )}
-                <div className="text-sm font-['Inter'] whitespace-pre-wrap break-words font-[450] tracking-[0] md:leading-relaxed">
+                <div className="xyne-message-text text-sm font-['Inter'] whitespace-pre-wrap break-words font-[450] tracking-[0] md:leading-relaxed">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
@@ -1534,6 +1542,7 @@ export const MessageItem = React.memo(
                 onSummarizerCitationClick={onSummarizerCitationClick}
                 onOpenToolDebug={onOpenToolDebug}
                 flowCards={flowCards}
+                onInterceptPendingAction={onInterceptPendingAction}
               />
             )}
           </div>
@@ -1550,39 +1559,7 @@ export const MessageItem = React.memo(
 
           {/* Error display for bot messages */}
           {message.type === 'bot' && message.errorInfo && (
-            <div className='mt-3 border border-destructive/20 bg-destructive/5 p-3'>
-              <div className='flex items-start gap-2'>
-                <AlertTriangle size={14} className='mt-0.5 shrink-0 text-destructive' />
-                <div className='flex-1 min-w-0'>
-                  <div className='text-xs font-medium text-destructive'>
-                    {message.errorInfo.title}
-                    {message.errorInfo.code && (
-                      <span className='ml-1 text-[10px] opacity-70'>
-                        ({message.errorInfo.code})
-                      </span>
-                    )}
-                  </div>
-                  <div className='mt-0.5 text-xs text-muted-foreground'>
-                    {message.errorInfo.message}
-                  </div>
-                  {message.errorInfo.helpText && (
-                    <div className='mt-1 text-[11px] text-muted-foreground/80'>
-                      {message.errorInfo.helpText}
-                    </div>
-                  )}
-                  {message.errorInfo.rawError && (
-                    <details className='mt-2'>
-                      <summary className='text-[10px] text-muted-foreground/60 cursor-pointer hover:text-muted-foreground'>
-                        Technical details
-                      </summary>
-                      <pre className='mt-1 max-h-32 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground whitespace-pre-wrap break-all'>
-                        {message.errorInfo.rawError}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-              </div>
-            </div>
+            <TurnErrorCard errorInfo={message.errorInfo} className='mt-3' />
           )}
 
           {/* Branch navigator for user messages (edit branches) - below the bubble */}
@@ -1813,6 +1790,7 @@ const MessageContent = ({
   onOpenToolDebug,
   trackContext,
   flowCards,
+  onInterceptPendingAction,
 }: MessageContentProps): ReactElement => {
   const resolveMention = useMentionResolver(message.userTags);
 
@@ -2044,7 +2022,11 @@ const MessageContent = ({
           );
           return renderAnswerMarkdown(streaming ? linked + '\n' : linked);
         }}
-        legacyAnswer={isGenius && displayContent ? renderAnswerMarkdown(displayContent) : null}
+        legacyAnswer={
+          isGenius && displayContent && !isErrorOnlyContent(message)
+            ? renderAnswerMarkdown(displayContent)
+            : null
+        }
       />
 
       {flowCards &&
@@ -2064,20 +2046,20 @@ const MessageContent = ({
         <PendingActionBlock
           actions={visiblePendingActions}
           onApprove={async action => {
-            await respondToPendingAction(
-              message,
-              action,
-              requirePendingActionIndex(message.pendingActions, action),
-              true,
-            );
+            const index = requirePendingActionIndex(message.pendingActions, action);
+            if (onInterceptPendingAction?.(action, true)) {
+              resolvePendingActionLocally(message, action, index, 'approved');
+              return;
+            }
+            await respondToPendingAction(message, action, index, true);
           }}
           onDecline={async action => {
-            await respondToPendingAction(
-              message,
-              action,
-              requirePendingActionIndex(message.pendingActions, action),
-              false,
-            );
+            const index = requirePendingActionIndex(message.pendingActions, action);
+            if (onInterceptPendingAction?.(action, false)) {
+              resolvePendingActionLocally(message, action, index, 'declined');
+              return;
+            }
+            await respondToPendingAction(message, action, index, false);
           }}
         />
       )}
@@ -2914,6 +2896,22 @@ const MessageActions = ({
           </button>
         </>
       )}
+
+      {/* Regenerate Button - only on the latest bot message */}
+      {onRegenerate && (
+        <button
+          onClick={onRegenerate}
+          data-ph-capture-attribute-track-id='regenerate_message'
+          className='p-1.5 rounded transition-colors hover:bg-accent'
+          title='Regenerate response'
+          data-track-category='XyneAI'
+          data-track-name='REGENERATE_MESSAGE'
+          data-track-metadata={JSON.stringify({ ...trackContext, messageId: message.id })}
+        >
+          <RefreshCw className='h-3.5 w-3.5' aria-hidden strokeWidth={1.75} />
+        </button>
+      )}
+
       {/* Participants avatars - shown for Summarizer messages */}
       {(message.agentType === 'summarizer' || message.agentType === 'genius') &&
         message.participants &&

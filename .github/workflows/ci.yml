@@ -60,11 +60,20 @@ jobs:
           pnpm config set registry "https://asia-south1-npm.pkg.dev/xyne-infra-external/npm-mirror/"
           echo "//asia-south1-npm.pkg.dev/xyne-infra-external/npm-mirror/:_authToken=${{ steps.gcp-auth.outputs.access_token }}" >> .npmrc
 
+      # TEST: higher network concurrency against our own mirror (same
+      # region, low-latency, under our control) — default 16 is tuned for
+      # arbitrary public registries, overly conservative here. Only applied
+      # on self-hosted/mirror, not against the public registry on
+      # ubuntu-latest — don't want to hammer npmjs.org with 64 concurrent
+      # requests.
       - name: Install dependencies
-        run: pnpm install ${{ env.PNPM_FLAGS }} --filter xyne-spaces-backend...
+        run: >-
+          pnpm install ${{ env.PNPM_FLAGS }}
+          ${{ vars.USE_SELF_HOSTED_CI == 'true' && '--network-concurrency 64' || '' }}
+          --filter xyne-spaces-backend...
 
       - name: Build workspace libraries
-        run: pnpm --filter @xyne/shared --filter agentic-framework run build
+        run: pnpm --filter agentic-framework run build
 
       - name: Prisma generate (app + common schemas)
         run: |
@@ -85,7 +94,10 @@ jobs:
   # ---------------------------------------------------------------------------
   dashboard:
     name: Dashboard ${{ matrix.task }}
-    runs-on: ${{ vars.USE_SELF_HOSTED_CI != 'true' && 'ubuntu-latest' || matrix.task == 'build' && 'ci-cluster-github-runners-mini-max' || 'ci-cluster-github-runners-mini' }}
+    # build and lint route to mini-max (lint moved there too — it was the one
+    # consistently causing OOM/eviction pressure on mini earlier in testing).
+    # typecheck stays on mini.
+    runs-on: ${{ vars.USE_SELF_HOSTED_CI != 'true' && 'ubuntu-latest' || (matrix.task == 'build' || matrix.task == 'lint') && 'ci-cluster-github-runners-mini-max' || 'ci-cluster-github-runners-mini' }}
     strategy:
       fail-fast: false
       matrix:
@@ -119,11 +131,19 @@ jobs:
           pnpm config set registry "https://asia-south1-npm.pkg.dev/xyne-infra-external/npm-mirror/"
           echo "//asia-south1-npm.pkg.dev/xyne-infra-external/npm-mirror/:_authToken=${{ steps.gcp-auth.outputs.access_token }}" >> .npmrc
 
+      # TEST: higher network concurrency against our own mirror — see the same
+      # comment on the backend job above.
       - name: Install dependencies
-        run: pnpm install ${{ env.PNPM_FLAGS }} --filter xyne-spaces-dashboard...
+        run: >-
+          pnpm install ${{ env.PNPM_FLAGS }}
+          ${{ vars.USE_SELF_HOSTED_CI == 'true' && '--network-concurrency 64' || '' }}
+          --filter xyne-spaces-dashboard...
 
-      - name: Build workspace libraries
-        run: pnpm --filter @xyne/shared --filter @xyne/icons run build
+      # No "Build workspace libraries" step needed here (unlike backend):
+      # @xyne/shared AND @xyne/icons both have their own `prepare: pnpm run
+      # build` hooks, so pnpm already builds both automatically during
+      # `Install dependencies` above. Backend still needs the step because
+      # agentic-framework has no prepare script of its own.
 
       # --- lint leg ---------------------------------------------------------
       # errors-only (warnings ignored).
@@ -155,7 +175,10 @@ jobs:
 
   test:
     name: Automation tests
-    if: github.event_name == 'merge_group' && vars.RUN_TEST_CASE == 'true'
+    # Runs on every PR and in the merge queue; RUN_TEST_CASE is the kill switch.
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+      && vars.RUN_TEST_CASE == 'true'
     runs-on: ci-cluster-github-runners
     env:
       TEST_ENV: test

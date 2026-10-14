@@ -823,6 +823,8 @@ export enum ChannelType {
   // SDLC repository channel: system-managed, hidden from the chat surfaces
   // the same way SUPPORT channels are (inline type checks).
   SDLC = 'SDLC',
+  // Channels desk: tickets for threads in channels connected to one service account.
+  CHANNELS = 'CHANNELS',
 }
 
 // @ts-ignore TS1294
@@ -833,6 +835,7 @@ export enum DeskType {
   APP = 'APP',
   CALL = 'CALL',
   SOCIAL_MEDIA = 'SOCIAL_MEDIA',
+  CHANNELS = 'CHANNELS',
 }
 
 // @ts-ignore TS1294
@@ -881,6 +884,7 @@ export enum FormContextType {
   BOARD = 'BOARD',
   RELEASE_CHANGE = 'RELEASE_CHANGE',
   STAGE = 'STAGE',
+  WORKSPACE = 'WORKSPACE',
 }
 
 // @ts-ignore TS1294
@@ -895,6 +899,7 @@ export enum BoardType {
 export enum FormEntityType {
   TICKET = 'TICKET',
   SUB_TICKET = 'SUB_TICKET',
+  CHANNEL = 'CHANNEL',
   RELEASE_MIGRATION_FORM = "RELEASE_MIGRATION_FORM",
   RELEASE_ENV_FORM = "RELEASE_ENV_FORM",
 }

@@ -1,7 +1,8 @@
 import type { Request, Response } from 'express';
 import { logger } from '@/utils/logger';
 import { db } from '@/database/client';
-import { runAsServiceActor } from '@/database/tenant/context';
+import type { Prisma } from '@prisma/client';
+import { updateDeskThreadCanvasMetadata } from '@/bypassAcl/deskThreadCanvasServices';
 import { convertMarkdownToBlockNote } from '@/services/canvasService';
 import { readFromYSweetStrict, syncToYSweet } from '@/utils/ysweetUtils';
 import { paragraphBlocks, type CanvasMetadata } from '@/services/deskThreadCanvasService';
@@ -57,16 +58,8 @@ export async function handleDeskThreadCanvasCallback(
   let workspaceId = '';
   let author = FALLBACK_AUTHOR;
 
-  const runScoped = <T>(fn: () => Promise<T>): Promise<T> =>
-    runAsServiceActor('desk-thread-canvas-callback', workspaceId, fn);
-
   const setMetadata = (patch: Partial<CanvasMetadata>) =>
-    runScoped(() =>
-      db.canvas.update({
-        where: { id: canvasId },
-        data: { metadata: { ...metadata, ...patch }, lastEditedAt: new Date() },
-      }),
-    );
+    updateDeskThreadCanvasMetadata(workspaceId, canvasId, { ...metadata, ...patch } as Prisma.InputJsonValue);
 
   // The canvas body is the only place the waiting user is looking, and it
   // still reads "Generating canvas from thread…" — overwrite it, or the run

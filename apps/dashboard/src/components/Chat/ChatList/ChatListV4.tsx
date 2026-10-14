@@ -1083,6 +1083,34 @@ const ChatListV4: React.FC<ChatListProps> = ({
     });
   }, [combinedMessages, isInitialLoadComplete, lastViewedAtOnOpen, user?.id]);
 
+  // The boundary is otherwise only marked seen from onScroll. A list that never
+  // scrolls (content shorter than the viewport, or the initial unread scroll
+  // landing at scrollTop 0 so no scroll event fires) would keep the
+  // "New messages" pill up forever, so check once after layout as well.
+  useEffect(() => {
+    if (!newConversationBoundary || newConversationBoundary.seenConvId !== null) return;
+    // Wait for the initial scroll so a deep-link/restore landing is measured, not scrollTop 0.
+    if (lifecycleRef.current.didInitialScrollAlign === 'none') return;
+    const frame = requestAnimationFrame(() => {
+      const el = parentRef.current;
+      if (!el) return;
+      setNewConversationBoundary(prev => {
+        if (!prev || prev.seenConvId !== null) return prev;
+        const boundaryConvId = combinedMessages[prev.index]?.data.conversationId;
+        const boundaryStart = virtualizer.measurementsCache[prev.index]?.start;
+        if (
+          boundaryConvId &&
+          boundaryStart !== undefined &&
+          boundaryStart < el.scrollTop + el.clientHeight
+        ) {
+          return { index: prev.index, seenConvId: boundaryConvId };
+        }
+        return prev;
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [newConversationBoundary, combinedMessages, virtualizer]);
+
   // ── Initial scroll ────────────────────────────────────────────────────────────
   // Fires as soon as there is data to render (cache or fresh fetch). Runs before
   // the first browser paint so the user never sees the wrong scroll position.
@@ -2102,19 +2130,23 @@ const ChatListV4: React.FC<ChatListProps> = ({
       />
 
       {/* New messages pill */}
-      {newConversationBoundary !== null && newConversationBoundary.seenConvId === null && (
-        <button
-          data-track-category='CHAT_LIST'
-          data-track-name='CLICK_NEW_MESSAGES_PILL'
-          onClick={handleNewMessagesScroll}
-          className='cursor-pointer absolute top-6 left-1/2 -translate-x-1/2 bg-primary text-primary-foreground px-2 py-2 rounded-full flex items-center gap-1 shadow-lg z-50'
-        >
-          <ArrowDown className='w-3 h-3' />
-          <span className='text-xs font-medium'>
-            {`New messages (${combinedMessages.length - newConversationBoundary.index})`}
-          </span>
-        </button>
-      )}
+      {/* Unreads inbox lists only messages after lastViewedAt, so the whole card is
+          already "new" — the pill would just repeat that. */}
+      {!unreadsOnly &&
+        newConversationBoundary !== null &&
+        newConversationBoundary.seenConvId === null && (
+          <button
+            data-track-category='CHAT_LIST'
+            data-track-name='CLICK_NEW_MESSAGES_PILL'
+            onClick={handleNewMessagesScroll}
+            className='cursor-pointer absolute top-6 left-1/2 -translate-x-1/2 bg-primary text-primary-foreground px-2 py-2 rounded-full flex items-center gap-1 shadow-lg z-50'
+          >
+            <ArrowDown className='w-3 h-3' />
+            <span className='text-xs font-medium'>
+              {`New messages (${combinedMessages.length - newConversationBoundary.index})`}
+            </span>
+          </button>
+        )}
 
       {/* Latest messages floating pill */}
       {latestConversationsList.length > 0 && (

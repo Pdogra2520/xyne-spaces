@@ -3,13 +3,6 @@
   "extraMetadata": {
     "APP_ENV": "sandbox"
   },
-  "electronFuses": {
-    "runAsNode": false,
-    "enableNodeOptionsEnvironmentVariable": false,
-    "enableNodeCliInspectArguments": false,
-    "onlyLoadAppFromAsar": true,
-    "enableEmbeddedAsarIntegrityValidation": true
-  },
   "productName": "Xyne Spaces Sandbox",
   "directories": {
     "output": "release/sandbox"
@@ -19,7 +12,8 @@
     "enableNodeOptionsEnvironmentVariable": false,
     "enableNodeCliInspectArguments": false,
     "onlyLoadAppFromAsar": true,
-    "enableEmbeddedAsarIntegrityValidation": true
+    "enableEmbeddedAsarIntegrityValidation": true,
+    "enableCookieEncryption": true
   },
   "protocols": [
     {

@@ -34,21 +34,11 @@
     "icon": "assets/images/xyne.png",
     "category": "public.app-category.productivity",
     "hardenedRuntime": true,
-    "notarize": false,
+    "notarize": true,
     "entitlements": "build/entitlements.mac.plist",
     "entitlementsInherit": "build/entitlements.mac.plist",
     "gatekeeperAssess": false,
     "darkModeSupport": true,
-    "target": [
-      {
-        "target": "pkg",
-        "arch": ["universal"]
-      },
-      {
-        "target": "zip",
-        "arch": ["universal"]
-      }
-    ],
     "extendInfo": {
       "NSMicrophoneUsageDescription": "Xyne Spaces needs access to your microphone for audio calls and meetings",
       "NSCameraUsageDescription": "Xyne Spaces needs access to your camera for video calls and meetings",
@@ -57,7 +47,7 @@
     }
   },
   "dmg": {
-    "sign": false,
+    "sign": true,
     "contents": [
       { "x": 150, "y": 185, "type": "file" },
       { "x": 390, "y": 185, "type": "link", "path": "/Applications" }
@@ -217,7 +207,8 @@
       "--device=dri",
       "--device=all",
       "--filesystem=home",
-      "--talk-name=org.freedesktop.Notifications"
+      "--talk-name=org.freedesktop.Notifications",
+      "--talk-name=org.freedesktop.secrets"
     ],
     "useWaylandFlags": true
   },

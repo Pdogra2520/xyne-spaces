@@ -185,7 +185,15 @@ function isFirstPartyUrl(rawUrl: string | undefined): boolean {
     const { protocol, hostname } = new URL(rawUrl);
     if (protocol.startsWith('xyne-spaces')) return true;              // bundled UI custom scheme
     if (protocol === 'file:') return true;                            // bundled local HTML
-    if (protocol === 'https:' && (hostname === 'xyne.juspay.net' || hostname.endsWith('.xyne.juspay.net'))) return true;
+    if (
+      protocol === 'https:' &&
+      (hostname === 'xyne.juspay.net' ||
+        hostname.endsWith('.xyne.juspay.net') ||
+        hostname === 'xyne.ai' ||
+        hostname.endsWith('.xyne.ai'))
+    ) {
+      return true;
+    }
     if ((protocol === 'http:' || protocol === 'https:') && (hostname === 'localhost' || hostname === '127.0.0.1')) return true;
     return false;
   } catch {
@@ -268,8 +276,8 @@ function setupMediaPermissionGuard(): void {
 }
 
 function installFrontendCsp(): void {
-  const xyneHosts = 'https://*.xyne.juspay.net';
-  const xyneWs = 'wss://*.xyne.juspay.net';
+  const xyneHosts = 'https://*.xyne.juspay.net https://*.xyne.ai';
+  const xyneWs = 'wss://*.xyne.juspay.net wss://*.xyne.ai';
   const googleApis = 'https://apis.google.com https://accounts.google.com';
   const googleFontsCss = 'https://fonts.googleapis.com';
   const googleFontsFiles = 'https://fonts.gstatic.com';

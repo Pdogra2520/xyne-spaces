@@ -62,13 +62,13 @@ const devConfig: AppConfig = {
 };
 
 const prodConfig: AppConfig = {
-  BACKEND_URL: 'https://app.spaces.xyne.juspay.net',
+  BACKEND_URL: 'https://spaces.xyne.ai',
   MTLS_BACKEND_URL: 'https://auth.spaces.xyne.juspay.net',
   MTLS_FRONTEND_URL: 'https://auth.spaces.xyne.juspay.net',
   MTLS_IDENTITY_NAME: 'Web Simulation Client',
-  UNPROTECTED_URL: 'https://spaces.xyne.juspay.net', // Non-mTLS endpoint only reserved for pre-enrollment logs and metrics
-  FRONTEND_URL: 'https://app.spaces.xyne.juspay.net',
-  CLAW_AUTH_URL: 'https://app.spaces.xyne.juspay.net',
+  UNPROTECTED_URL: 'https://spaces.xyne.ai', // Non-mTLS endpoint only reserved for pre-enrollment logs and metrics
+  FRONTEND_URL: 'https://spaces.xyne.ai',
+  CLAW_AUTH_URL: 'https://spaces.xyne.ai',
   DEEP_LINK_PROTOCOL: 'xyne-spaces',
   USER_DATA_SUFFIX: '',             // Empty — prod keeps original path, no migration needed
   APP_NAME: 'Xyne Spaces',
@@ -79,7 +79,7 @@ const prodConfig: AppConfig = {
     height: 800,
     title: 'Xyne Spaces',
   },
-  enableMtls: true,
+  enableMtls: false,
   useBundledUI: false,
   sendLogs: true,
   enableOtelMetrics: true,

@@ -36,8 +36,14 @@ function isTrustedOrigin(): boolean {
     if (protocol.startsWith('xyne-spaces')) return true;
     // Bundled local HTML: loading/error pages, meeting popup, recording pill, recorder
     if (protocol === 'file:') return true;
-    // First-party Xyne web app + auth origins (prod + sandbox live under *.xyne.juspay.net)
-    if (protocol === 'https:' && (hostname === 'xyne.juspay.net' || hostname.endsWith('.xyne.juspay.net'))) {
+    // First-party Xyne web app + auth origins (prod lives under *.xyne.ai, sandbox under *.xyne.juspay.net)
+    if (
+      protocol === 'https:' &&
+      (hostname === 'xyne.juspay.net' ||
+        hostname.endsWith('.xyne.juspay.net') ||
+        hostname === 'xyne.ai' ||
+        hostname.endsWith('.xyne.ai'))
+    ) {
       return true;
     }
     // Local development

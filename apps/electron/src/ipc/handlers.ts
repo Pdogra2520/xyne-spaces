@@ -260,7 +260,11 @@ export function setupIpcHandlers(): void {
     } catch {
       throw new Error('Invalid sync URL');
     }
-    const isXyne = host === 'xyne.juspay.net' || host.endsWith('.xyne.juspay.net');
+    const isXyne =
+      host === 'xyne.juspay.net' ||
+      host.endsWith('.xyne.juspay.net') ||
+      host === 'xyne.ai' ||
+      host.endsWith('.xyne.ai');
     const isLocal = host === 'localhost' || host === '127.0.0.1';
     if (!isXyne && !isLocal) {
       errorLogger.warn('[sync-cookies] Rejected non-Xyne origin');

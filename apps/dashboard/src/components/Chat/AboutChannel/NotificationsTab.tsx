@@ -275,7 +275,6 @@ const NotificationsTab = ({ channel, isParticipant }: NotificationsTabProps): Re
                 </Switch.Root>
               </div>
 
-              {/* Ticket updates */}
               <div className='flex items-center justify-between'>
                 <div>
                   <p className='text-xs font-medium text-foreground'>Ticket updates</p>

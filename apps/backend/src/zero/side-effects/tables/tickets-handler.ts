@@ -9,7 +9,7 @@ import { notificationService } from '@/services/notificationService';
 import { userActivityTrackingService } from '@/services/userActivityTrackingService';
 import { websocketService } from '@/services/websocketService';
 import { maybeCreateEntryApprovalRequest } from '@/services/stageTransition/stageEntryApproval';
-import { clearTicketOptOut, excludeTicketOptOuts, getFormFieldUserActors } from '@/utils/ticketActorUtils';
+import { clearTicketOptOut, getFormFieldUserActors } from '@/utils/ticketActorUtils';
 import {
   dispatchEtaNotifications,
   drainEtaActivityOutbox,
@@ -315,12 +315,12 @@ export class TicketsSideEffectHandler extends BaseSideEffectHandler {
     const extraActors = await fetchTicketActors(ticketId);
 
     // All actors: creator, old/new assignee, role holders, and form field users
-    const allActorIds = await excludeTicketOptOuts(ticketId, [
+    const allActorIds = [
       prev.createdBy,
       prev.assignedTo,
       args.assignedTo,
       ...extraActors,
-    ].filter((id, index, arr): id is string => Boolean(id) && arr.indexOf(id) === index));
+    ].filter((id, index, arr): id is string => Boolean(id) && arr.indexOf(id) === index);
 
     // Fetch subscribed conversation participants for activities
     let subscribedParticipants: string[] = [];
@@ -332,7 +332,6 @@ export class TicketsSideEffectHandler extends BaseSideEffectHandler {
             where: {
               conversationId: ticket.conversationId,
               isSubscribed: true,
-              ticketUpdatesUnsubscribedAt: null,
             },
             select: { userId: true },
           }),

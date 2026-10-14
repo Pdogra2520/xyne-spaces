@@ -4,27 +4,23 @@ import { NotificationBellOn, NotificationBellOff } from '@xyne/icons';
 import { useZero } from '../../../hooks/useZero';
 import { mutators } from '../../../zero/mutators';
 import { DropdownMenuItem } from '../../ui/dropdown-menu';
-import { useIsTicketStakeholder } from '../../../hooks/useIsTicketStakeholder';
 
 const UNSUBSCRIBE_LABEL = 'Unsubscribe from ticket updates';
 const SUBSCRIBE_LABEL = 'Subscribe to ticket updates';
 
 interface TicketUpdatesSubscriptionProps {
   conversationId: string;
-  ticketId: string;
   participant: { ticketUpdatesUnsubscribedAt?: number | null } | null | undefined;
 }
 
 export const TicketUpdatesSubscription = ({
   conversationId,
-  ticketId,
   participant,
 }: TicketUpdatesSubscriptionProps): React.JSX.Element | null => {
   const zero = useZero();
-  const { isStakeholder, isResolving } = useIsTicketStakeholder(ticketId, true);
   const isUnsubscribed = Boolean(participant?.ticketUpdatesUnsubscribedAt);
 
-  if (participant === undefined || isResolving || (!isStakeholder && !isUnsubscribed)) return null;
+  if (participant === undefined) return null;
 
   const label = isUnsubscribed ? SUBSCRIBE_LABEL : UNSUBSCRIBE_LABEL;
 

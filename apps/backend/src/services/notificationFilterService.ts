@@ -2,6 +2,7 @@ import { DatabaseClient } from '@/database/client';
 import { logger } from '@/utils/logger';
 import { parseNotificationKeywords, NotificationLevel, NotificationType } from '@xyne/shared';
 import { withWorkspaceScope } from '@/database/tenant/context';
+import { TICKET_UPDATE_TYPES } from '@/constants/ticketUpdates';
 
 const prisma = DatabaseClient.getInstance();
 
@@ -9,22 +10,6 @@ const prisma = DatabaseClient.getInstance();
 const DEFAULT_CHANNEL_NOTIFICATION_LEVEL = NotificationLevel.MENTIONS_ONLY;
 // 1:1 DMs always notify unless explicitly muted.
 const DEFAULT_DM_NOTIFICATION_LEVEL: NotificationLevel = NotificationLevel.ALL;
-
-const TICKET_UPDATE_TYPES: ReadonlySet<NotificationType> = new Set([
-  NotificationType.TICKET_STATUS_CHANGE,
-  NotificationType.TICKET_PRIORITY_CHANGED,
-  NotificationType.TICKET_DUE_DATE_CHANGED,
-  NotificationType.TICKET_REASSIGNMENT,
-  NotificationType.TICKET_TITLE_CHANGED,
-  NotificationType.TICKET_DESCRIPTION_CHANGED,
-  NotificationType.TICKET_USER_GROUP_CHANGED,
-  NotificationType.TICKET_RCA_CREATED,
-  NotificationType.TICKET_RCA_UPDATED,
-  NotificationType.TICKET_SUBTICKET_ADDED,
-  NotificationType.TICKET_RELATED_TICKET_ADDED,
-  NotificationType.TICKET_RELATED_TICKET_REMOVED,
-  NotificationType.TICKET_ETA_PLANNING_RISK,
-]);
 
 // ── Targeted notification-decision tracing ────────────────────────
 // Concrete-proof instrumentation for the question "is user X actually eligible

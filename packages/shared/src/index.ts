@@ -29,7 +29,6 @@ export * from './types/callChat';
 export * from './utils/etaCalculation';
 export * from './utils/formFieldBranching';
 export * from './utils/formFieldOptions';
-export * from './utils/formFieldUserIds';
 export * from './utils/slaCalculator';
 export * from './utils/relatedContextDraft';
 export * from './utils/project';

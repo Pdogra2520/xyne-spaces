@@ -1413,7 +1413,6 @@ export const ThreadMessages = ({
               {derivedConversationId && derivedTicketId && (
                 <TicketUpdatesSubscription
                   conversationId={derivedConversationId}
-                  ticketId={derivedTicketId}
                   participant={ownParticipant}
                 />
               )}
@@ -1650,7 +1649,6 @@ export const ThreadMessages = ({
                   {derivedConversationId && derivedTicketId && (
                     <TicketUpdatesSubscription
                       conversationId={derivedConversationId}
-                      ticketId={derivedTicketId}
                       participant={ownParticipant}
                     />
                   )}

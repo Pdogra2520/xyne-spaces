@@ -1,7 +1,6 @@
 import { ActivityClassification, ActivityType, TicketStatusV2 } from '@xyne/shared';
 import { db } from '@/database/client';
 import { logger } from '@/utils/logger';
-import { excludeTicketOptOuts } from '@/utils/ticketActorUtils';
 import { withWorkspaceScope } from '@/database/tenant/context';
 import { recordTicketTimelineEvent } from '@/services/ticketTimelineEventService';
 import { activityService } from '@/services/activity/activityService';
@@ -108,17 +107,17 @@ async function notifyDevTicketsOnReleaseStatusChange(params: NotifyParams): Prom
         },
       });
 
-      // Actors follow the ticket unless they unsubscribed from its ticket updates.
-      const actorIds = await excludeTicketOptOuts(dev.id, [dev.createdBy, dev.assignedTo].filter(
+      // Actors follow the ticket regardless of thread subscription.
+      const actorIds = [dev.createdBy, dev.assignedTo].filter(
         (id): id is string => Boolean(id) && id !== bot.id,
-      ));
+      );
 
       // Activity feed (Activity panel -> Tickets tab): subscribed thread
       // participants + actors. Mirrors the tickets-handler recipient pattern.
       try {
         const participants = await withWorkspaceScope(() =>
           db.conversationParticipant.findMany({
-            where: { conversationId: dev.conversationId!, isSubscribed: true, ticketUpdatesUnsubscribedAt: null },
+            where: { conversationId: dev.conversationId!, isSubscribed: true },
             select: { userId: true },
           }),
         );

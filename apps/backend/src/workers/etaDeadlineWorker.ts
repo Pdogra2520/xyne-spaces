@@ -1,5 +1,4 @@
 import { logger } from '@/utils/logger';
-import { excludeTicketOptOuts } from '@/utils/ticketActorUtils';
 import { db } from '@/database/client';
 import { createEtaBreachSystemMessage } from '@/bypassAcl/ticketEtaServices';
 import { etaDeadlineQueue } from '@/queues/etaDeadlineQueue';
@@ -89,11 +88,11 @@ class EtaDeadlineWorker {
             continue;
           }
 
-          const usersToNotify = await excludeTicketOptOuts(ticket.id, await getUsersToNotifyForTicket(
+          const usersToNotify = await getUsersToNotifyForTicket(
             ticket.id,
             ticket.assignedTo,
             ticket.createdBy
-          ));
+          );
 
           await TicketsSideEffectHandler.createEtaBreachActivities({
             ticketId: ticket.id,

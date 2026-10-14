@@ -1,6 +1,6 @@
 import { db } from '@/database/client';
 import { withWorkspaceScope } from '@/database/tenant/context';
-import { FormContextType, FormEntityType, FormFieldType, extractFormFieldUserIds } from '@xyne/shared';
+import { FormContextType, FormEntityType, FormFieldType } from '@xyne/shared';
 import { logger } from '@/utils/logger';
 
 /**
@@ -61,11 +61,27 @@ export async function getFormFieldUserActors(ticketId: string): Promise<string[]
       select: { fieldValue: true, actualFieldValue: true },
     });
 
-    const userIds = formValues.flatMap(value => extractFormFieldUserIds(value.actualFieldValue, value.fieldValue));
+    const userIds: string[] = [];
+
+    for (const value of formValues) {
+      // Try actualFieldValue first (structured JSON), fall back to fieldValue
+      if (value.actualFieldValue) {
+        const parsed = value.actualFieldValue as any;
+        if (Array.isArray(parsed)) {
+          userIds.push(...parsed.filter((id): id is string => typeof id === 'string'));
+        } else if (typeof parsed === 'string') {
+          userIds.push(parsed);
+        }
+      } else if (value.fieldValue) {
+        // fieldValue might be a comma-separated list or single ID
+        const parts = value.fieldValue.split(',').map(s => s.trim()).filter(Boolean);
+        userIds.push(...parts);
+      }
+    }
 
     return [...new Set(userIds)];
   } catch (error) {
-    logger.error(`Failed to fetch form field users for ticket ${ticketId.replace(/[\r\n]/g, '')}`, error);
+    logger.error(`Failed to fetch form field users for ticket ${ticketId}`, error);
     return [];
   }
 }
@@ -75,33 +91,28 @@ export async function excludeTicketOptOuts(ticketId: string, userIds: string[]):
     return userIds;
   }
 
-  try {
-    const ticket = await db.ticket.findUnique({
-      where: { id: ticketId },
-      select: { conversationId: true },
-    });
+  const ticket = await db.ticket.findUnique({
+    where: { id: ticketId },
+    select: { conversationId: true },
+  });
 
-    if (!ticket?.conversationId) {
-      return userIds;
-    }
-
-    const optedOut = await withWorkspaceScope(() =>
-      db.conversationParticipant.findMany({
-        where: {
-          conversationId: ticket.conversationId,
-          userId: { in: userIds },
-          ticketUpdatesUnsubscribedAt: { not: null },
-        },
-        select: { userId: true },
-      }),
-    );
-
-    const optedOutIds = new Set(optedOut.map(p => p.userId));
-    return userIds.filter(id => !optedOutIds.has(id));
-  } catch (error) {
-    logger.error(`Failed to filter notification opt-outs for ticket ${ticketId.replace(/[\r\n]/g, '')}`, error);
+  if (!ticket?.conversationId) {
     return userIds;
   }
+
+  const optedOut = await withWorkspaceScope(() =>
+    db.conversationParticipant.findMany({
+      where: {
+        conversationId: ticket.conversationId,
+        userId: { in: userIds },
+        ticketUpdatesUnsubscribedAt: { not: null },
+      },
+      select: { userId: true },
+    }),
+  );
+
+  const optedOutIds = new Set(optedOut.map(p => p.userId));
+  return userIds.filter(id => !optedOutIds.has(id));
 }
 
 export async function clearTicketOptOut(ticketId: string, userId: string): Promise<void> {

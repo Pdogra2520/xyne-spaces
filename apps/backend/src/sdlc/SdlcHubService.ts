@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { createRepositoryTx, createChannelTx, addChannelRepositoriesTx, createArtifactFromClawTx, updateArtifactTitleOrLinksTx, writeArtifactContentTx, moveArtifactFromClawTx, createTrackFolderFromClawTx, createTrackTx } from '@/bypassAcl/transactions/SdlcHubService';
+import { createRepositoryTx, createChannelTx, addChannelRepositoriesTx, createArtifactFromClawTx, updateArtifactTitleOrLinksTx, writeArtifactContentTx, moveArtifactFromClawTx, createTrackFolderFromClawTx, createTrackTx, unlinkContextTx } from '@/bypassAcl/transactions/SdlcHubService';
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import {
@@ -581,9 +581,13 @@ export class SdlcHubService implements SdlcHub {
         channelId,
         sdlcArtifact: { isNot: null },
       },
-      select: { id: true, viewAccessId: true, title: true },
+      select: { id: true, viewAccessId: true, title: true, folder: { select: { name: true } } },
     });
     if (!existing) throw new AppError('SDLC artifact not found', 404);
+    if (existing.folder?.name === SDLC_HUB_KNOWLEDGE_FOLDER) {
+      // Same rule as creating one: every member's runs read Hub Knowledge.
+      await this.requireChannelRole(actor, channelId, true);
+    }
     const existingEntity = await this.prisma.sdlcArtifact.findUnique({
       where: { artifactId: existing.id },
       select: { repoId: true },
@@ -674,9 +678,13 @@ export class SdlcHubService implements SdlcHub {
     await this.requireChannelRole(actor, channelId, false);
     const canvas = await this.prisma.canvas.findFirst({
       where: { id: canvasId, channelId, sdlcArtifact: { isNot: null } },
-      select: { id: true, createdBy: true, content: true },
+      select: { id: true, createdBy: true, content: true, folder: { select: { name: true } } },
     });
     if (!canvas) throw new AppError('SDLC artifact not found', 404);
+    if (canvas.folder?.name === SDLC_HUB_KNOWLEDGE_FOLDER) {
+      // Same rule as creating one: every member's runs read Hub Knowledge.
+      await this.requireChannelRole(actor, channelId, true);
+    }
     return { ...canvas, channelId };
   }
 
@@ -901,7 +909,7 @@ export class SdlcHubService implements SdlcHub {
     );
     const link = await this.prisma.sdlcEntityLink.findFirst({
       where: { id: linkId, channelId: repo.channelId, workspaceId: actor.workspaceId },
-      select: { relationType: true },
+      select: { id: true, relationType: true, targetType: true, targetId: true },
     });
     if (!link) {
       throw new AppError('SDLC relationship not found', 404);
@@ -912,10 +920,8 @@ export class SdlcHubService implements SdlcHub {
     if ((SDLC_STRUCTURAL_RELATIONS as readonly string[]).includes(link.relationType)) {
       throw new AppError('Structural SDLC edges are not deleted through the link API', 400);
     }
-    const result = await this.prisma.sdlcEntityLink.deleteMany({
-      where: { id: linkId, channelId: repo.channelId, workspaceId: actor.workspaceId },
-    });
-    if (result.count === 0) {
+    const removed = await unlinkContextTx(this, actor, repo.channelId, link);
+    if (removed === 0) {
       throw new AppError('SDLC relationship not found', 404);
     }
   }

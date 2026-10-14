@@ -37,10 +37,9 @@ import {
 } from '../../components/ui/dropdown-menu';
 import { useActiveUsers, useActiveUserSearch, useUsers } from '../../hooks/useUsers';
 import { useAllChannels } from '../../hooks/useChannels';
-import { useZero } from '../../hooks/useZero';
+import { useMarkMissedCallsReadOnVisit } from '../../hooks/useMissedCallCount';
 import { cn } from '../../utils/classNames';
 import { isSameDay } from '../../utils/dateUtils';
-import { mutators } from '../../zero/mutators';
 import { CallCard } from './CallCard';
 import {
   hasExternalChatAccess,
@@ -59,6 +58,7 @@ import { useResolvedRecordingLabels } from '../../hooks/useResolvedRecordingLabe
 import { normalizeRecordingTags } from '../../utils/recordingUtils';
 import { CallExternalChatDialog } from '../../components/Call/CallExternalChatDialog/CallExternalChatDialog';
 import { ParticipantsModal } from './ParticipantsModal';
+import { getCalendarWindow } from './CalenderViewUtils';
 import CalendarWeekView from './CalendarWeekView';
 import CalendarDayView from './CalendarDayView';
 import CalendarMonthView from './CalenderMonthView';
@@ -133,10 +133,30 @@ const CallHistoryScreen = (): ReactElement => {
     return d;
   });
 
+  // Date range for the currently displayed calendar view. Declared up here because it
+  // is what useCallHistory fetches the calendar's calls for — the grid asks for the
+  // window it is about to draw rather than filtering down a list-shaped pool.
+  // Each sub-view tracks its own anchor date, so pick the anchor and let
+  // getCalendarWindow decide the span.
+  const { from: calendarFrom, to: calendarTo } = useMemo(() => {
+    const anchor =
+      calendarSubView === 'week'
+        ? currentWeekStart
+        : calendarSubView === 'day'
+          ? currentDayStart
+          : currentMonthStart;
+    return getCalendarWindow(calendarSubView, anchor);
+  }, [calendarSubView, currentWeekStart, currentDayStart, currentMonthStart]);
+
+  const calendarWindow = useMemo(
+    () => ({ from: calendarFrom.getTime(), to: calendarTo.getTime() }),
+    [calendarFrom, calendarTo],
+  );
+
   const {
     calls,
     scheduledCalls,
-    calendarScheduledCalls,
+    calendarRangeCalls,
     missedCalls,
     isLoading,
     isScheduledCallsLoading,
@@ -169,7 +189,9 @@ const CallHistoryScreen = (): ReactElement => {
     closeEditModal,
     showChannelCalls,
     setShowChannelCalls,
-  } = useCallHistory(user?.id, { isCalendarView: viewMode === 'calendar' });
+  } = useCallHistory(user?.id, {
+    ...(viewMode === 'calendar' ? { calendarWindow } : {}),
+  });
 
   const allUsers = useUsers();
   const activeUsers = useActiveUsers();
@@ -373,20 +395,6 @@ const CallHistoryScreen = (): ReactElement => {
     },
     [],
   );
-  // Compute date range for the currently displayed calendar view
-  const calendarFrom = useMemo(() => {
-    if (calendarSubView === 'week') return currentWeekStart;
-    if (calendarSubView === 'day') return currentDayStart;
-    return currentMonthStart;
-  }, [calendarSubView, currentWeekStart, currentDayStart, currentMonthStart]);
-
-  const calendarTo = useMemo(() => {
-    const d = new Date(calendarFrom);
-    if (calendarSubView === 'week') d.setDate(d.getDate() + 7);
-    else if (calendarSubView === 'day') d.setDate(d.getDate() + 1);
-    else d.setMonth(d.getMonth() + 1);
-    return d;
-  }, [calendarFrom, calendarSubView]);
 
   useEffect(() => {
     setCallSearchActiveTab(TabType.CALL);
@@ -410,7 +418,6 @@ const CallHistoryScreen = (): ReactElement => {
     [otherUsersCalls],
   );
 
-  const zero = useZero();
   const callHistoryLoadStartTimeRef = useRef<number | null>(null);
   const [scrollContainer, setScrollContainer] = useState<HTMLDivElement | null>(null);
 
@@ -428,8 +435,6 @@ const CallHistoryScreen = (): ReactElement => {
   }, [isLoading]);
 
   const showRecentCallsLoader = isLoading || (showMinLoader && (calls?.length ?? 0) === 0);
-
-  const endedCallsCount = calls?.filter(c => c.status === CallStatus.ENDED).length ?? 0;
 
   const searchParams = new URLSearchParams(location.search);
   const callIdParam = searchParams.get('callId');
@@ -470,11 +475,7 @@ const CallHistoryScreen = (): ReactElement => {
     });
   }, [callIdParam, calls, scheduledCalls]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (endedCallsCount === 0) return;
-
-    void zero.mutate(mutators.activities.markMissedCallsAsRead({}));
-  }, [endedCallsCount]);
+  useMarkMissedCallsReadOnVisit();
 
   useEffect(() => {
     if (queryDetails.type === 'unknown') {
@@ -685,10 +686,6 @@ const CallHistoryScreen = (): ReactElement => {
     );
   }, [hasCallSearch, scheduledCalls, showChannelCalls, user?.id, vespaScheduledCallRows]);
 
-  const filteredCalendarScheduledCalls = hasCallSearch
-    ? visibleScheduledCalls
-    : calendarScheduledCalls;
-
   const limitedScheduledCalls = useMemo(() => {
     if (!visibleScheduledCalls) return visibleScheduledCalls;
     return visibleScheduledCalls.filter(call => !isExternalCalendarEvent(call));
@@ -743,14 +740,16 @@ const CallHistoryScreen = (): ReactElement => {
   )?.filter(call => !isExternalCalendarEvent(call));
 
   const calendarCalls = useMemo(() => {
-    const combined = [...(filteredRecentCalls || []), ...(filteredCalendarScheduledCalls || [])];
+    if (!hasCallSearch) return calendarRangeCalls ?? [];
+
+    const combined = [...(filteredRecentCalls || []), ...(visibleScheduledCalls || [])];
     const seenCallIds = new Set<string>();
     return combined.filter(call => {
       if (seenCallIds.has(call.id)) return false;
       seenCallIds.add(call.id);
       return true;
     });
-  }, [filteredRecentCalls, filteredCalendarScheduledCalls]);
+  }, [hasCallSearch, calendarRangeCalls, filteredRecentCalls, visibleScheduledCalls]);
 
   const displayRecentCalls = useMemo(() => {
     const base = filteredRecentCallsNoGcal || [];
@@ -832,7 +831,7 @@ const CallHistoryScreen = (): ReactElement => {
         )}
       >
         {/* Sticky header */}
-        <div className='max-w-[860px] w-full sticky top-0 bg-background z-50 flex flex-col gap-3 pt-4 pb-6 sm:pb-3'>
+        <div className='max-w-[852px] w-full sticky top-0 bg-background z-50 flex flex-col gap-3 pt-4 pb-6 sm:pb-3'>
           {/* Row 1: Title + calendar sync */}
           <CallHistorySearchPanel
             calendarProvider={calendarProvider}
@@ -866,7 +865,7 @@ const CallHistoryScreen = (): ReactElement => {
         {/* Page body */}
         <div
           className={cn(
-            'max-w-[860px] w-full flex flex-col gap-6',
+            'max-w-[852px] w-full flex flex-col gap-6',
             viewMode === 'calendar' ? 'flex-1 min-h-0' : 'pb-6',
           )}
         >

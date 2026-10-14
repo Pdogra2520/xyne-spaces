@@ -12,6 +12,10 @@ import { ChannelParticipantRepository } from '../database/repositories/channelPa
 import { MessageRepository } from '../database/repositories/messageRepository';
 import { MessageAttachmentRepository } from '../database/repositories/messageAttachmentRepository';
 import { EmailRepository } from '../database/repositories/emailRepository';
+import { telephonyEmailService } from '@/services/ozonetel/telephonyEmailService';
+import { findCallTranscriptAttachment } from '@/services/ozonetel/callTranscript';
+import { callTranscriptionService } from '@/services/ozonetel/callTranscriptionService';
+import { callTranscriptionQueue } from '@/queues/callTranscriptionQueue';
 import { ReleaseRepository } from '../database/repositories/releaseRepository';
 import { getGroupedTagsWithConfig, DESK_EMAIL_SOURCE_TYPE, deskEmailConfigKey } from '@/tags';
 import {
@@ -34,6 +38,7 @@ import {
 } from '../services/ticketCustomFieldService';
 import { buildCreationFormFieldChanges } from '../services/ticketCustomFieldService';
 import {
+  resolveBoardTicketFormId,
   resolveFormFieldDefinitionsForForm,
   type ResolvedFormFieldDefinition,
 } from '@/utils/fieldDefinition';
@@ -63,6 +68,8 @@ import { versionReleaseMappingService } from '@/services/release/versionReleaseM
 import { BaseTicketType,
   FormContextType,
   FormEntityType,
+  parseFieldOptionValues,
+  resolveParentOption,
   ReleaseTrackingMode,
   TicketStatusV2,
   TicketPriority,
@@ -90,9 +97,10 @@ import { unifiedBotUserService } from '@/bots/unified';
 import { workflowManager } from '@/workflows/services/workflowManager';
 import { WorkflowType } from '@/workflows/types/workflow-enums';
 import { ticketService } from '@/services/ticketService';
+import { emailService } from '@/services/emailService';
 import { dualWriteTicketTags } from '@/services/ticketTagDualWriteService';
 import { createTicketWithConversationTx } from '@/bypassAcl/transactions/controllersTicketController';
-import { createTicketTx } from '@/bypassAcl/transactions/controllersTicketController';
+import { createTicketTx, TicketCreateAccessError } from '@/bypassAcl/transactions/controllersTicketController';
 import { mergeTicketTx } from '@/bypassAcl/transactions/controllersTicketController';
 import { unmergeTicketTx } from '@/bypassAcl/transactions/controllersTicketController';
 import { acquireLock, releaseLock } from '@/utils/distributedLock';
@@ -106,6 +114,27 @@ type MyTicketBoardOption = {
   id: string;
   name: string;
   projectId?: string;
+};
+
+const MAX_DUPLICATE_DECISIONS = 20;
+
+const duplicateDecisionsOf = (raw: unknown): { sameAs: string | null; notSame: string[] } => {
+  let value = raw;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return { sameAs: null, notSame: [] };
+    }
+  }
+  if (!value || typeof value !== 'object') return { sameAs: null, notSame: [] };
+  const { sameAs, notSame } = value as { sameAs?: unknown; notSame?: unknown };
+  return {
+    sameAs: typeof sameAs === 'string' && sameAs.length > 0 ? sameAs : null,
+    notSame: (Array.isArray(notSame) ? notSame : [])
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+      .slice(0, MAX_DUPLICATE_DECISIONS),
+  };
 };
 
 export class TicketController {
@@ -361,8 +390,65 @@ export class TicketController {
     }
   };
 
+  getBoardTicketFields = async (req: Request, res: Response): Promise<void> => {
+    try {
+      const boardId = String(req.query.boardId ?? '').trim();
+      if (!boardId) {
+        res.status(400).json({ error: 'boardId is required' });
+        return;
+      }
+      if (!req.user?.id) {
+        res.status(401).json({ error: 'User not authenticated' });
+        return;
+      }
+
+      // Workspace-scoped by the tenant ACL extension, so a board in another
+      // workspace reads as missing rather than leaking its form.
+      const board = await db.board.findUnique({
+        where: { id: boardId },
+        select: { id: true, name: true },
+      });
+      if (!board) {
+        res.status(404).json({ error: 'Board not found' });
+        return;
+      }
+
+      const formId = await resolveBoardTicketFormId(db, boardId);
+      if (!formId) {
+        res.status(200).json({ boardId, boardName: board.name, formId: null, fields: [] });
+        return;
+      }
+
+      const definitions = await resolveFormFieldDefinitionsForForm(db, formId);
+      const fields = definitions.map(field => {
+        const parent = field.parentOptionId
+          ? resolveParentOption(definitions, field.parentOptionId)
+          : undefined;
+        return {
+          fieldName: field.fieldName,
+          fieldType: field.fieldType,
+          required: !field.isOptional,
+          options: parseFieldOptionValues(field.fieldEnum),
+          ...(parent
+            ? { shownWhen: { fieldName: parent.parentField.fieldName, equals: parent.option.value } }
+            : {}),
+        };
+      });
+
+      res.status(200).json({ boardId, boardName: board.name, formId, fields });
+    } catch (error) {
+      logger.error('[TicketController] Failed to fetch board ticket fields', {
+        boardId: req.query.boardId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      res.status(500).json({ error: 'Failed to fetch board ticket fields' });
+    }
+  };
+
   createTicket = async (req: Request, res: Response): Promise<void> => {
     try {
+      // Set only from server config below; the x-support-ticket header alone never trusts a channel.
+      let supportChannelId: string | undefined;
       // If this is a support/error-report ticket, resolve channel+board from CAC
       if (req.headers['x-support-ticket'] === 'true') {
         const cacConfig = await superpositionClient.getObjectValue(
@@ -385,6 +471,7 @@ export class TicketController {
         const SUPPORT_TAG = 'Support Ticket';
         const existingTags: string[] = Array.isArray(req.body.tags) ? req.body.tags : [];
         req.body.channelId = cacConfig.channelId;
+        supportChannelId = cacConfig.channelId;
         if (cacConfig.boardId) {
           req.body.boardId = cacConfig.boardId;
           const board = await this.boardRepository.findBoardById(cacConfig.boardId);
@@ -430,7 +517,6 @@ export class TicketController {
         excludedChatAttachmentIds,
         draftAttachmentIds,
         tags,
-        merchantId,
         parentTicketId,
         ticketType,
         stageName
@@ -590,9 +676,16 @@ export class TicketController {
 
       // Determine the actual channel to check its type
       let actualChannelId = channelId;
-      if (!actualChannelId && sourceConversationId) {
+      if (sourceConversationId) {
         const sourceConv = await this.conversationRepository.findById(sourceConversationId);
         if (sourceConv) {
+          if (channelId && channelId !== sourceConv.channelId) {
+            res.status(400).json({
+              error: 'channelId does not match the channel of sourceConversationId',
+              code: 'CHANNEL_CONVERSATION_MISMATCH',
+            });
+            return;
+          }
           actualChannelId = sourceConv.channelId;
         }
       }
@@ -743,7 +836,9 @@ export class TicketController {
             // Full role assignment will be done after ticket creation
             pendingFullRoleAssignment = true;
           } else {
-            const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId);
+            // The ticket lands in the source conversation's channel when one is given, else in channelId.
+            const ticketChannelId: string | null = (sourceConversationId ? validatedConversation?.channelId : channelId) ?? null;
+            const assignmentResult = await evaluateAssignmentRule(userGroupId, boardId, undefined, undefined, projectId, ticketChannelId);
             if (assignmentResult.assignedUserId) {
               finalAssignedTo = assignmentResult.assignedUserId;
             }
@@ -785,8 +880,27 @@ export class TicketController {
         }
       }
 
+      // The one channel this ticket is created in. Everything below (the access check and the
+      // attachment rows written inside the transaction) uses this, never the raw request channelId.
+      const effectiveChannelId = sourceConversationId ? validatedConversation?.channelId : channelId;
+
       // Wrap all database operations in a transaction for data integrity
-      const { ticket } = await createTicketTx(projectId, sourceConversationId, validatedConversation, this, requestedTicketId, title, description, userId, finalAssignedTo, userGroupId, boardId, effectiveStatusV2, priority, eta, metadata, closedAt, closedBy, merchantId, sourceMessageId, effectiveTicketType, effectiveStageName, dynamicFields, formFieldChangesForEmit, channelId, excludedChatAttachmentIds, entityLinkOwner, fromTicketsTab, initialMessageId, board, uploadedFiles, draftAttachmentIds);
+      let ticket: Awaited<ReturnType<typeof createTicketTx>>['ticket'];
+      try {
+        ({ ticket } = await createTicketTx(projectId, sourceConversationId, validatedConversation, this, requestedTicketId, title, description, userId, finalAssignedTo, userGroupId, boardId, effectiveStatusV2, priority, eta, metadata, closedAt, closedBy, sourceMessageId, effectiveTicketType, effectiveStageName, dynamicFields, formFieldChangesForEmit, effectiveChannelId, excludedChatAttachmentIds, entityLinkOwner, fromTicketsTab, initialMessageId, board, uploadedFiles, draftAttachmentIds, (req.user.isApiKeyUser && req.user.role === 'admin') ? undefined : {
+          workspaceId: req.user.workspaceId,
+          channelId: effectiveChannelId,
+          boardId,
+          isGuest: req.user.role === 'GUEST',
+          trustedChannelId: supportChannelId,
+        }));
+      } catch (error) {
+        if (error instanceof TicketCreateAccessError) {
+          res.status(403).json({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
 
       // Ticket committed on its initial stage — auto-create the on-entry approval
       // request if that stage's single outgoing transition is configured for it.
@@ -812,6 +926,28 @@ export class TicketController {
             `[createTicket] Skipped last-activity update for channel ${String(ticketChannelId).replace(/[\r\n]/g, '')}: ${(err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')}`,
           );
         }
+
+        // A ticket raised on an email desk from somewhere other than the
+        // mailbox — WhatsApp, a chat message, the ticket form — has nobody
+        // written to yet, so the agent who opens it finds an empty composer.
+        // Draft that first email now, exactly as an inbound email would have.
+        // No-ops unless the channel has auto-draft switched on; fire-and-forget,
+        // because a draft is a convenience and must never fail or delay the
+        // ticket.
+        void emailService
+          .triggerOpeningAutoDraft({
+            ticketId: ticket.id,
+            conversationId: ticket.conversationId,
+            channelId: ticketChannelId,
+            title: ticket.title,
+            description: description ?? '',
+          })
+          .catch(err =>
+            logger.warn('[createTicket] opening auto-draft failed', {
+              ticketId: ticket.id,
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
       }
 
       // Create TicketTag records for each tag
@@ -890,6 +1026,7 @@ export class TicketController {
             boardId,
             createdBy: userId,
             projectId: ticket.projectId,
+            channelId: ticket.channelId,
           });
           const primaryUserId = primaryUserIdOf(fullRoles);
           if (primaryUserId) {
@@ -974,22 +1111,26 @@ export class TicketController {
         userName: req.user?.name ?? null,
       });
 
-      ticketDuplicateService.persistDuplicateReferences({
-        ticketId: ticket.id,
-        ticketCreatedBy: ticket.createdBy,
-        title,
-        description,
-        projectId,
-        userId,
-        parentTicketId,
-        channelId: ticket.channelId,
-        scopeFieldValues: duplicateScopeValues,
-      }).catch(error => {
-        logger.error('Failed to persist duplicate references for ticket', {
+      const duplicateDecisions = duplicateDecisionsOf(req.body.duplicateDecisions);
+      if (!duplicateDecisions.sameAs) {
+        ticketDuplicateService.persistDuplicateReferences({
           ticketId: ticket.id,
-          error,
+          ticketCreatedBy: ticket.createdBy,
+          title,
+          description,
+          projectId,
+          userId,
+          parentTicketId,
+          channelId: ticket.channelId,
+          scopeFieldValues: duplicateScopeValues,
+          excludeTicketIds: duplicateDecisions.notSame,
+        }).catch(error => {
+          logger.error('Failed to persist duplicate references for ticket', {
+            ticketId: ticket.id,
+            error,
+          });
         });
-      });
+      }
 
       const response: GetTicketDetailsResponse = {
         id: ticket.id,
@@ -1353,6 +1494,7 @@ export class TicketController {
         projectId,
         userId,
         limit,
+        jevOnly: true,
       });
 
       const response: TicketDuplicateCheckResponse = {
@@ -1506,6 +1648,150 @@ export class TicketController {
     } catch (error) {
       logger.error('[TicketController] getLatestEmailTags failed:', error);
       res.status(500).json({ error: 'Failed to fetch email tags' });
+    }
+  };
+
+  /**
+   * POST /api/tickets/:ticketId/emails/:emailId/transcribe
+   * Manual trigger: transcribe the Ozonetel recording attached to a call email in
+   * this ticket's thread. Enqueues a `call-transcription` job (consumed in this API
+   * process, see app.ts) and returns 202. Progress is written into the call email body (`transcription`)
+   * and the finished transcript arrives as an EMAIL attachment; both sync via Zero.
+   */
+  transcribeCallRecording = async (req: Request, res: Response): Promise<void> => {
+    const { ticketId, emailId } = req.params;
+    const userId = req.user?.id;
+    const workspaceId = req.user?.workspaceId;
+    if (!userId || !workspaceId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    try {
+      const ticket = await prisma.ticket.findUnique({
+        where: { id: ticketId },
+        select: { conversationId: true, channelId: true, workspaceId: true },
+      });
+      if (!ticket || ticket.workspaceId !== workspaceId) {
+        res.status(404).json({ error: 'Ticket not found' });
+        return;
+      }
+
+      // ACL: Private channels require membership; public channels are open
+      const channel = await this.channelRepository.findById(ticket.channelId);
+      if (channel && channel.visibility === 'PRIVATE') {
+        const isParticipant = await this.channelParticipantRepository.isParticipant(ticket.channelId, userId);
+        if (!isParticipant) {
+          res.status(403).json({ error: 'Access denied - you do not have permission to access this conversation' });
+          return;
+        }
+      }
+
+      const email = await telephonyEmailService.getCallEmailWithPayload(emailId, workspaceId);
+      if (!email || email.conversationId !== ticket.conversationId) {
+        res.status(404).json({ error: 'Call not found in this ticket' });
+        return;
+      }
+      if (!email.payload.recording?.trim()) {
+        res.status(400).json({ error: 'This call has no recording to transcribe' });
+        return;
+      }
+
+      const attachments = await this.messageAttachmentRepository.findByEntityIdAndType(
+        emailId,
+        AttachmentEntityType.EMAIL,
+      );
+      const existing = findCallTranscriptAttachment(attachments);
+      if (existing) {
+        res.status(409).json({ error: 'This call already has a transcript', attachmentId: existing.id });
+        return;
+      }
+
+      // Bull is the source of truth for "in progress"; the body status is only for the UI.
+      if (await callTranscriptionQueue.isInProgress(emailId)) {
+        res.status(409).json({ error: 'Transcription is already in progress' });
+        return;
+      }
+
+      await telephonyEmailService.setTranscriptionState(emailId, workspaceId, { status: 'queued' });
+      let enqueued: boolean;
+      try {
+        enqueued = await callTranscriptionQueue.enqueue({ emailId, workspaceId, userId });
+      } catch (enqueueError) {
+        // Enqueue failed (e.g. Redis down): don't leave the body stuck at "queued" with no job behind it.
+        await telephonyEmailService.setTranscriptionState(emailId, workspaceId, { status: 'failed', error: 'Could not start transcription. Please try again.' });
+        throw enqueueError;
+      }
+      if (!enqueued) {
+        res.status(409).json({ error: 'Transcription is already in progress' });
+        return;
+      }
+
+      logger.info(`[TicketController] call transcription queued | ticketId=${ticketId} | emailId=${emailId} | userId=${userId}`);
+      res.status(202).json({ status: 'queued' });
+    } catch (error) {
+      logger.error('[TicketController] transcribeCallRecording failed:', error);
+      res.status(500).json({ error: 'Failed to start transcription' });
+    }
+  };
+
+  /**
+   * POST /api/tickets/:ticketId/emails/:emailId/summarize
+   * Manual trigger: generate the AI summary for a call that already has a
+   * transcript (transcribed before summaries existed, or whose automatic summary
+   * failed). Synchronous: one LLM round trip, the summary is written into the call
+   * email body (`transcription.summary`) and returned.
+   */
+  summarizeCallTranscript = async (req: Request, res: Response): Promise<void> => {
+    const { ticketId, emailId } = req.params;
+    const userId = req.user?.id;
+    const workspaceId = req.user?.workspaceId;
+    if (!userId || !workspaceId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    try {
+      const ticket = await prisma.ticket.findUnique({
+        where: { id: ticketId },
+        select: { conversationId: true, channelId: true, workspaceId: true },
+      });
+      if (!ticket || ticket.workspaceId !== workspaceId) {
+        res.status(404).json({ error: 'Ticket not found' });
+        return;
+      }
+      const channel = await this.channelRepository.findById(ticket.channelId);
+      if (channel && channel.visibility === 'PRIVATE') {
+        const isParticipant = await this.channelParticipantRepository.isParticipant(ticket.channelId, userId);
+        if (!isParticipant) {
+          res.status(403).json({ error: 'Access denied - you do not have permission to access this conversation' });
+          return;
+        }
+      }
+      const email = await telephonyEmailService.getCallEmailWithPayload(emailId, workspaceId);
+      if (!email || email.conversationId !== ticket.conversationId) {
+        res.status(404).json({ error: 'Call not found in this ticket' });
+        return;
+      }
+
+      const outcome = await callTranscriptionService.summarizeExistingTranscript(emailId, workspaceId);
+      if (!outcome.ok) {
+        const responses: Record<typeof outcome.code, { status: number; error: string }> = {
+          call_not_found: { status: 404, error: 'Call not found in this ticket' },
+          no_transcript: { status: 409, error: 'Transcribe the call before summarizing it' },
+          empty_transcript: { status: 409, error: 'The transcript is empty, nothing to summarize' },
+          generation_failed: { status: 502, error: 'Summary could not be generated right now' },
+        };
+        const { status, error } = responses[outcome.code];
+        res.status(status).json({ error });
+        return;
+      }
+
+      logger.info(`[TicketController] call summary ${outcome.alreadyExisted ? 'reused' : 'generated'} | ticketId=${ticketId} | emailId=${emailId} | userId=${userId}`);
+      res.status(200).json({ summary: outcome.summary });
+    } catch (error) {
+      logger.error('[TicketController] summarizeCallTranscript failed:', error);
+      res.status(500).json({ error: 'Failed to generate summary' });
     }
   };
 

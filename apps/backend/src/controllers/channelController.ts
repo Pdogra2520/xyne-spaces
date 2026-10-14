@@ -4,6 +4,7 @@ import { ExternalSourcePlatform } from '@/integrations/core/types';
 import {
   SOCIAL_MEDIA_PLATFORMS,
   isSocialMediaPlatform,
+  isMetaMessagingPlatform,
 } from '@/integrations/social-media/constants';
 import {
   buildSlackDeskSourceName,
@@ -61,7 +62,8 @@ import { hasProjectAdminAccess } from '@/database/acl/admin-access';
 import { NAMESPACE } from '@/vespa/vespaConfig';
 import {logger} from '@/utils/logger';
 import { messageMetadataService } from '@/services/messageMetadataService';
-import { extractSpecialMentions, getChannelParticipantsForMention, getOnlineChannelParticipants } from '@/utils/mentionUtils';
+import { extractAllUsersForNotification, extractSpecialMentions, getChannelParticipantsForMention, getOnlineChannelParticipants } from '@/utils/mentionUtils';
+import { mentionRecipients } from '@/zero/side-effects/tables/mention-delivery';
 import { activityService } from '@/services/activity/activityService';
 import { encrypt, decrypt } from '@/services/encryptionService';
 import { vespaService } from '@/services/vespaSearch';
@@ -313,7 +315,19 @@ export class ChannelController {
       }
     };
 
-    const senderInfo = await this.getUserInfo(senderId);
+    // Post-commit: the message is already persisted, so a failed sender lookup
+    // must degrade to a fallback identity rather than report a failed send
+    // (a failed send makes callers retry and duplicate the message).
+    const senderInfo = await this.getUserInfo(senderId).catch((error) => {
+      logger.error('Initial message persisted but sender lookup failed', {
+        channelId,
+        conversationId,
+        messageId,
+        error,
+      });
+      // Same shape as getUserInfo's own not-found fallback.
+      return { id: senderId, name: 'User', email: 'user@example.com', picture: undefined };
+    });
     const targetChannel = await this.channelRepository.findById(channelId).catch(() => null);
     if (targetChannel) {
       await runPostCommitStep('conversation author participant sync', () =>
@@ -359,23 +373,37 @@ export class ChannelController {
       await runPostCommitStep('notification delivery', async () => {
         if (isGroupDm && mentionType) {
           const channel = await this.channelRepository.findById(channelId);
-          await notificationService.createMentionNotifications(
-            recipientIds,
-            createdMessage.messageId,
-            conversation.conversationId,
-            channelId,
-            channel?.name ?? channelId,
-            senderId,
-            senderInfo.name,
-            cleanContent,
-            workspaceId,
-            mentionType,
-            false,
-            false,
-            senderInfo.picture ?? '',
-            undefined,
-            true,
-          );
+          // Personally mentioned members are sent without mentionType so the
+          // @channel/@here toggle can't suppress their mention.
+          const personalIds = mentionRecipients(
+            await extractAllUsersForNotification(messageContent, workspaceId),
+            { participantIds: new Set(recipientIds), senderId },
+          ).map(u => u.userId);
+          const personalSet = new Set(personalIds);
+          const sendMentions = (userIds: string[], groupMentionType: '@channel' | '@here' | undefined) =>
+            userIds.length === 0
+              ? Promise.resolve()
+              : notificationService.createMentionNotifications(
+                  userIds,
+                  createdMessage.messageId,
+                  conversation.conversationId,
+                  channelId,
+                  channel?.name ?? channelId,
+                  senderId,
+                  senderInfo.name,
+                  cleanContent,
+                  workspaceId,
+                  groupMentionType,
+                  false, // isDMChannel
+                  false, // isThreadMessage
+                  senderInfo.picture ?? '',
+                  undefined, // prefetchedData
+                  true, // isGroupDM
+                );
+          await Promise.all([
+            sendMentions(personalIds, undefined),
+            sendMentions(recipientIds.filter(id => !personalSet.has(id)), mentionType),
+          ]);
 
           const audience = mentionType === '@channel'
             ? await getChannelParticipantsForMention(channelId)
@@ -892,11 +920,12 @@ export class ChannelController {
       }
 
       // Create channel
+      const isDmScope = scopeType === ChannelScopeType.DM || scopeType === ChannelScopeType.GROUP_DM;
       const channelData: CreateChannelInput = {
         scopeType,
         name: channelName,
         description,
-        visibility: (visibility || 'PUBLIC') as ChannelVisibility,
+        visibility: (isDmScope ? 'PRIVATE' : (visibility || 'PUBLIC')) as ChannelVisibility,
         createdBy: userId,
         projectId,
         workspaceId: req.user!.workspaceId!,
@@ -1414,7 +1443,7 @@ export class ChannelController {
         );
       } else if (source?.sourceType === ExternalSourcePlatform.SLACK_DESK) {
         connectedLabel = extractSlackChannelId(source.name);
-      } else if (sourceType && isSocialMediaPlatform(sourceType)) {
+      } else if (sourceType && isSocialMediaPlatform(sourceType) && !isMetaMessagingPlatform(sourceType)) {
         const reviewSources = await db.externalSource.findMany({
           where: { channelId, workspaceId, sourceType: { in: [...SOCIAL_MEDIA_PLATFORMS] } },
           select: {
@@ -1437,6 +1466,28 @@ export class ChannelController {
         connectedLabel = activeReviewSources
           .map(reviewSource => reviewSource.displayName)
           .join(', ') || 'No active apps';
+      } else if (source && isMetaMessagingPlatform(source.sourceType)) {
+        const igSources = await db.externalSource.findMany({
+          where: { channelId, workspaceId, sourceType: source.sourceType },
+          select: {
+            id: true,
+            displayName: true,
+            externalIdentifier: true,
+            isActive: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        });
+        const activeIgSources = igSources.filter(s => s.isActive);
+        isConnected = activeIgSources.length > 0;
+        deskApps = igSources.map(s => ({
+          id: s.id,
+          displayName: s.displayName ?? s.externalIdentifier ?? '',
+          externalIdentifier: s.externalIdentifier,
+          packageName: s.externalIdentifier,
+          isActive: s.isActive,
+        }));
+        const handlePrefix = source.sourceType === ExternalSourcePlatform.INSTAGRAM ? '@' : '';
+        connectedLabel = activeIgSources.map(s => s.displayName ? `${handlePrefix}${s.displayName}` : s.externalIdentifier).join(', ') || null;
       }
 
       const fromDisplay = (source?.displayName ?? '').match(/[\w.+-]+@[\w.-]+\.[\w.-]+/)?.[0];

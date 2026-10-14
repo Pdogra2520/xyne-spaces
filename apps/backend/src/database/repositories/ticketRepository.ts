@@ -1,3 +1,4 @@
+import { emitDomainEvent } from '@/events/emitDomainEvent';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { extractEmailAddress } from '@/utils/email';
 import { CreateTicketRequest, ActivitySource } from '../../types/ticket';
@@ -20,7 +21,6 @@ import {
 } from '@xyne/shared';
 import { syncConversationTicketMdFromPrismaTicket } from '@/utils/ticketMd';
 import { generateKeyBetween } from 'fractional-indexing';
-import { eventRouter } from '@/automations/engine/event-router';
 import { TICKET_CREATED_EVENT } from '@/automations/triggers/ticket-created.trigger';
 import {
   emitTicketUpdated,
@@ -123,16 +123,27 @@ const makeFallbackCountsSnapshot = (ticket: {
  * board/project/channel filter fail closed and the run get SKIPPED.
  */
 export async function emitTicketCreated(
-  ticket: { id: string; workspaceId: string },
+  ticket: {
+    id: string;
+    workspaceId: string;
+    boardId?: string | null;
+    projectId?: string | null;
+    channelId?: string | null;
+  },
   formFieldChanges: FormFieldChanges | undefined,
   createdBy: string,
 ): Promise<void> {
   try {
-    await eventRouter.emit(
+    await emitDomainEvent(
       {
         type: TICKET_CREATED_EVENT,
         payload: {
           ticketId: ticket.id,
+          scope: {
+            boardId: ticket.boardId ?? null,
+            projectId: ticket.projectId ?? null,
+            channelId: ticket.channelId ?? null,
+          },
           formFieldChanges,
           performedBy: { id: createdBy },
         },
@@ -221,19 +232,6 @@ export class TicketRepository {
     } catch {
       kanbanPosition = generateKeyBetween(null, null);
     }
-
-    // Upsert merchant if merchantId is provided
-    if (data.merchantId) {
-      await db.merchant.upsert({
-        where: { mid: data.merchantId },
-        update: {}, // No update needed if exists
-        create: {
-          mid: data.merchantId,
-        }
-      });
-      logger.info(`[TicketRepository] Upserted merchant with mid: ${data.merchantId}`);
-    }
-
 
     // Ticket creation + initial stage visit + the ETA domain-service evaluation must commit atomically.
     // Reuses the caller's transaction when one was passed in; otherwise opens its own.
@@ -832,7 +830,6 @@ export class TicketRepository {
       closedAt?: Date | null;
       closedBy?: string | null;
       aiPriority?: string;
-      merchantId?: string | null;
     },
     updatedBy: string,
     options: { cascadeFlow?: boolean } = {},
@@ -848,7 +845,6 @@ export class TicketRepository {
     if (fields.closedAt !== undefined) data.closedAt = fields.closedAt;
     if (fields.closedBy !== undefined) data.closedBy = fields.closedBy;
     if (fields.aiPriority !== undefined) data.aiPriority = fields.aiPriority;
-    if (fields.merchantId !== undefined) data.merchantId = fields.merchantId;
 
     if (Object.keys(data).length <= 2) {
       return;
@@ -898,15 +894,6 @@ export class TicketRepository {
         : null;
     }
     const previousStatus: TicketStatusV2 | null = prevSnapshot?.statusV2 ?? null;
-
-    // Same as createTicket: make sure the merchant row exists before linking to it.
-    if (fields.merchantId) {
-      await prisma.merchant.upsert({
-        where: { mid: fields.merchantId },
-        update: {},
-        create: { mid: fields.merchantId },
-      });
-    }
 
     const updatedTicket = await prisma.ticket.update({ where: { id: ticketId }, data });
     if (fields.description !== undefined) {

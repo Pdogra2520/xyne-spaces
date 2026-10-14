@@ -21,6 +21,7 @@ import { Channel } from '@xyne/shared';
 import { useWorkerUserSearch } from './useWorkerUserSearch';
 import { useWorkerChannelSearch } from './useWorkerChannelSearch';
 import type { MentionHighlightsBuilder } from '../search/mentionHighlights';
+import type { SearchSurface } from '../types/searchEvents';
 import { ChannelCategory } from '../components/Chat/ChatDirectory/ChatDirectory.types';
 import {
   parseSearchFilters,
@@ -36,6 +37,13 @@ import { useCmdkDefaultRankProfiles, useCmdkFlatAllRankProfiles } from './useCmd
 import type { StructuredSearchFilters } from './useSearchResultsScreen';
 import { resolveDateKeyword } from '../search/filterModel';
 import { unwrapExactSearchQuery } from '../utils/exactSearch';
+import {
+  addViewFiltersToRequest,
+  type TicketSearchView,
+  type TicketZeroQueryArgs,
+} from '../search/ticketSearchScope';
+import { useZero } from './useZero';
+import { queries } from '../zero/queries';
 
 type SearchTrigger = 'keyboard_shortcut' | 'click' | 'auto_focus';
 type SearchLocation = 'global' | 'channel' | 'dm';
@@ -92,6 +100,9 @@ function deriveMentionBuckets(selectedMentions: SelectedMention[]): MentionBucke
 
 interface UseSearchMetricsOptions {
   searchLocation?: SearchLocation;
+  // Which search UI is running the session, sent as `surface` on every sudoQuery search event
+  // and on the session-start / click log lines. Surfaces that leave it unset send no `surface`.
+  surface?: SearchSurface;
   allChannels?: Array<{ channel: Channel; category: ChannelCategory; searchableNames?: string[] }>;
   onSearchComplete?: (results: DisplaySearchResult[], query: string) => void;
   mentionSearchType?: ChipType | null;
@@ -120,6 +131,9 @@ interface UseSearchMetricsOptions {
   buildMentionHighlights?: MentionHighlightsBuilder;
   // Cmd-K only: skip the people/channel search on tabs that don't show those results.
   searchLocalOnlyOnShownTabs?: boolean;
+  // The ticket screen view the palette was opened on (search button / Cmd+F): its filters
+  // apply to Tickets-tab requests. Null in plain Cmd+K, whose Tickets tab searches every ticket.
+  ticketView?: TicketSearchView | null;
 }
 
 const NO_CHANNELS: NonNullable<UseSearchMetricsOptions['allChannels']> = [];
@@ -129,6 +143,57 @@ const INTENT_DEBOUNCE_MS = 300;
 // Load-more uses a fixed-size window (constant `limit`, advancing `offset`). Vespa caps the
 // query offset at maxOffset (1000), so stop paginating before `offset` would cross it.
 const MAX_BACKEND_OFFSET = 1000;
+
+// A ticket-screen search scans Vespa in batches this size, keeping the hits Zero's filters
+// pass, until a page is full.
+const SCOPED_TICKET_BATCH = 100;
+
+/**
+ * A page of ticket-screen search results. Vespa matches the text with the filters it can
+ * express; Zero then applies the screen's whole filter set to those ids, and the survivors
+ * keep Vespa's order. Batches continue from `startOffset` until a page is full or Vespa runs
+ * out, so a narrow Zero filter still fills the page.
+ */
+async function searchScopedTickets(
+  zero: ReturnType<typeof useZero>,
+  filters: VespaSearchFilters,
+  zeroQueryArgs: TicketZeroQueryArgs,
+  startOffset: number,
+  signal?: AbortSignal,
+): Promise<{ results: DisplaySearchResult[]; nextOffset: number; hasMore: boolean }> {
+  const kept: DisplaySearchResult[] = [];
+  let offset = startOffset;
+  let total = Number.POSITIVE_INFINITY;
+  while (kept.length < BACKEND_RESULTS_LIMIT && offset < total && offset < MAX_BACKEND_OFFSET) {
+    const batch = await searchService.vespaSearch(
+      { ...filters, offset, limit: SCOPED_TICKET_BATCH },
+      signal,
+      { cache: true },
+    );
+    total = batch.totalCount;
+    // Advance by the window asked for, not the rows that came back: the backend drops archived
+    // tickets after Vespa answers, so a window can return fewer rows (or none) than it covered.
+    offset += SCOPED_TICKET_BATCH;
+    if (batch.results.length === 0) continue;
+    const ids = batch.results.map(result => result.id);
+    const rows = await zero.run(
+      queries.tableTicketsPage({
+        ...zeroQueryArgs,
+        vespaTicketIds: ids,
+        limit: ids.length,
+        start: null,
+      }),
+      { type: 'complete' },
+    );
+    const matching = new Set((rows as ReadonlyArray<{ id: string }>).map(row => row.id));
+    kept.push(...batch.results.filter(result => matching.has(result.id)));
+  }
+  return {
+    results: kept,
+    nextOffset: offset,
+    hasMore: offset < total && offset < MAX_BACKEND_OFFSET,
+  };
+}
 
 /**
  * Cap on user rows fetched for any Cmd+K user surface (plain-search USERS
@@ -231,6 +296,25 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
   const maxQueryLengthTextRef = useRef<string>('');
   const previousTabRef = useRef<TabType>(TabType.ALL);
 
+  // The user's starred channel ids, for `starredCount` on session start and `isStarred` on click.
+  // Null when the surface passes no channels (e.g. call history), so those events omit the fields
+  // rather than report a starred count of 0. Read through a ref to keep the session callbacks stable.
+  const starredChannelIds = useMemo(
+    () =>
+      options.allChannels
+        ? new Set(
+            options.allChannels
+              .filter(({ category }) => category === ChannelCategory.STARRED)
+              .map(({ channel }) => channel.id),
+          )
+        : null,
+    [options.allChannels],
+  );
+  const starredChannelIdsRef = useRef(starredChannelIds);
+  starredChannelIdsRef.current = starredChannelIds;
+  const surfaceRef = useRef(options.surface);
+  surfaceRef.current = options.surface;
+
   // Clipboard tracking state
   const querySourceRef = useRef<QuerySource>('KEYBOARD');
   const isModifiedRef = useRef<boolean>(false);
@@ -281,7 +365,13 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
   // into the query. Merged over whatever `parseSearchFilters` finds in the text, so typed
   // syntax keeps working and an explicit pick wins.
   const [structuredFilters, setStructuredFilters] = useState<StructuredSearchFilters>({});
+  // Read through a ref so the search callbacks see the view of the current open.
+  const ticketViewRef = useRef(options.ticketView);
+  ticketViewRef.current = options.ticketView;
+  const zero = useZero();
   const structuredFiltersKey = JSON.stringify(structuredFilters);
+  // Removing the view (the ticket screen's scope) has to re-run the search it narrowed.
+  const ticketViewKey = JSON.stringify(options.ticketView?.vespaFilters ?? null);
   // Compare mode: request per-result matchfeatures/rankfeatures for ranking debug.
   const [includeDebugInfo, setIncludeDebugInfo] = useState(false);
   // Load More Ref
@@ -397,15 +487,20 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       // Reset session filters tracking
       sessionFiltersRef.current.clear();
 
-      searchMetricsService.trackSessionStart(
-        newSessionId,
-        String(context.userID),
-        previousTabRef.current,
-      );
+      const starredCount = starredChannelIdsRef.current?.size;
+      searchMetricsService.trackSessionStart({
+        searchSessionId: newSessionId,
+        userId: String(context.userID),
+        tab: previousTabRef.current,
+        ...(starredCount !== undefined && { starredCount }),
+        ...(surfaceRef.current && { surface: surfaceRef.current }),
+      });
       sudoQueryService.track('search_session_start', {
         searchSessionId: newSessionId,
         tab: previousTabRef.current,
         trigger,
+        ...(surfaceRef.current && { surface: surfaceRef.current }),
+        ...(starredCount !== undefined && { starredCount }),
       });
 
       return newSessionId;
@@ -488,6 +583,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         });
         sudoQueryService.track('search_session_end', {
           searchSessionId,
+          ...(surfaceRef.current && { surface: surfaceRef.current }),
           queryText: queryTextForEnd || '',
           totalImpressions: impressionCountRef.current,
           dwellTimeMs,
@@ -547,6 +643,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       });
       sudoQueryService.track('search_impression', {
         searchSessionId,
+        ...(surfaceRef.current && { surface: surfaceRef.current }),
         queryText: params.queryText,
         totalHits: params.totalHits,
         latencyMs,
@@ -656,6 +753,10 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       }
 
       const scrollDepth = calculateScrollDepth();
+      const starredIds = starredChannelIdsRef.current;
+      const isStarred = starredIds
+        ? params.clickedDocType === 'channel' && starredIds.has(params.clickedDocId)
+        : undefined;
 
       searchMetricsService.trackClick({
         searchSessionId,
@@ -668,10 +769,13 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         ...(scrollDepth !== undefined && { scrollDepth }),
         ...(params.resultUrl && { resultUrl: params.resultUrl }),
         ...(params.relevanceScore !== undefined && { relevanceScore: params.relevanceScore }),
+        ...(isStarred !== undefined && { isStarred }),
+        ...(surfaceRef.current && { surface: surfaceRef.current }),
         tab: previousTabRef.current,
       });
       sudoQueryService.track('search_click', {
         searchSessionId,
+        ...(surfaceRef.current && { surface: surfaceRef.current }),
         queryText: params.queryText,
         clickedDocId: params.clickedDocId,
         clickedDocType: params.clickedDocType,
@@ -682,10 +786,13 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         ...(params.relevanceScore !== undefined && { relevanceScore: params.relevanceScore }),
         tab: previousTabRef.current,
         isPreview: params.isPreview ?? false,
+        ...(isStarred !== undefined && { isStarred }),
       });
 
-      // End the session with 'click' reason after tracking the click
-      endSession('click');
+      // End the session with 'click' reason after tracking the click. The full-page results
+      // screen stays open after a click (the result opens beside the list), so its session runs
+      // until the page unmounts and later clicks still land in it.
+      if (surfaceRef.current !== 'search_screen') endSession('click');
     },
     [searchSessionId, context.userID, calculateScrollDepth, endSession],
   );
@@ -713,7 +820,9 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       // in-flight popup → full-screen → back handoff should. Back-navigation restores the
       // palette without calling onOpen, so its cached result survives.
       // debugger;
-      clearVespaSearchCache();
+      // The results screen is the handoff's receiving end: clearing here would make it re-fetch
+      // the search the popup just ran.
+      if (surfaceRef.current !== 'search_screen') clearVespaSearchCache();
       startSession(trigger);
     },
     [startSession],
@@ -908,7 +1017,9 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         stageFilter ||
         statusFilter ||
         typeFilter ||
-        selectedMentions.length > 0;
+        selectedMentions.length > 0 ||
+        // A ticket view is a filter too: with nothing typed, the palette lists its tickets.
+        (activeTab === TabType.TICKETS && !!ticketViewRef.current);
 
       // Handle type filter - users/channels use filtered local results (shown as grouped in UI)
       const types = parseTypeFilter(typeFilter);
@@ -1163,6 +1274,16 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
               searchFilters.groupMentions = mentionUserGroups.map(g => g.id).join(',');
             }
 
+            // Opened from a ticket screen: tickets only, within that screen's filters.
+            if (activeTab === TabType.TICKETS && ticketViewRef.current) {
+              searchFilters.apps = VespaApps.TICKET;
+              searchFilters.type = VespaDocTypes.TICKETS;
+              // Bot and my-channels scoping only shape chat results; a tickets-only search has none.
+              delete searchFilters.includeBotMessages;
+              delete searchFilters.onlyMyChannels;
+              addViewFiltersToRequest(searchFilters, ticketViewRef.current.vespaFilters);
+            }
+
             // Highlight-only phrases: the injected builder resolves every display form a mention
             // could render as; absent (ContextPicker/CallHistory), fall back to the chip's name.
             const mentionHighlights = options.buildMentionHighlights
@@ -1253,6 +1374,26 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
                 vespaResponse.results.length >= BACKEND_RESULTS_LIMIT &&
                 currentOffset < vespaResponse.totalCount &&
                 currentOffset + BACKEND_RESULTS_LIMIT <= MAX_BACKEND_OFFSET;
+            } else if (activeTab === TabType.TICKETS && ticketViewRef.current?.zeroQueryArgs) {
+              const page = await searchScopedTickets(
+                zero,
+                {
+                  ...searchFilters,
+                  searchId: searchSessionId || '',
+                  presentationSummary: 'lean',
+                },
+                ticketViewRef.current.zeroQueryArgs,
+                0,
+                abortController.signal,
+              );
+
+              // A newer search superseded this one — drop this out-of-order response.
+              if (isStale()) return;
+
+              mergedResults = page.results;
+              totalCount = page.results.length;
+              currentOffset = page.nextOffset;
+              hasMore = page.hasMore;
             } else {
               const currentSessionId = searchSessionId || '';
               const results = await searchService.vespaSearch(
@@ -1357,6 +1498,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
     flatAllRankProfilesKey: string;
     includeDebugInfo: boolean;
     structuredFiltersKey: string;
+    ticketViewKey: string;
   }>({
     text: '',
     activeTab: TabType.ALL,
@@ -1370,6 +1512,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
     flatAllRankProfilesKey: '',
     includeDebugInfo: false,
     structuredFiltersKey: '{}',
+    ticketViewKey: 'null',
   });
 
   // Debounced backend search with pagination reset
@@ -1406,7 +1549,8 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       allDefaultRankProfile === lastSearchedParamsRef.current.allDefaultRankProfile &&
       flatAllRankProfilesKey === lastSearchedParamsRef.current.flatAllRankProfilesKey &&
       includeDebugInfo === lastSearchedParamsRef.current.includeDebugInfo &&
-      structuredFiltersKey === lastSearchedParamsRef.current.structuredFiltersKey
+      structuredFiltersKey === lastSearchedParamsRef.current.structuredFiltersKey &&
+      ticketViewKey === lastSearchedParamsRef.current.ticketViewKey
     ) {
       // Terminal exit with no dispatch — no performSearch().finally runs to disarm the loader.
       // Reconcile to the real in-flight state so a cancelled arm can't strand the spinner true.
@@ -1430,6 +1574,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         flatAllRankProfilesKey,
         includeDebugInfo,
         structuredFiltersKey,
+        ticketViewKey,
         mentionsKey: currentMentionsKey,
       };
       // Mint this dispatch's run identity here (not in the effect body) so the abort fires at
@@ -1476,6 +1621,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
     flatAllRankProfilesKey,
     includeDebugInfo,
     structuredFiltersKey,
+    ticketViewKey,
   ]);
 
   // Intent classification for the inline AI answer: its own request and abort handle, so a
@@ -1546,7 +1692,9 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
       stageFilter ||
       statusFilter ||
       typeFilter ||
-      selectedMentions.length > 0;
+      selectedMentions.length > 0 ||
+      // A ticket view is a filter too: with nothing typed, the palette lists its tickets.
+      (activeTab === TabType.TICKETS && !!ticketViewRef.current);
 
     // Check for local/incomplete types - don't call backend for users/channels or partial typing
     const loadMoreTypes = parseTypeFilter(typeFilter);
@@ -1695,6 +1843,16 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
           searchFilters.groupMentions = mentionUserGroups.map(g => g.id).join(',');
         }
 
+        // Opened from a ticket screen: tickets only, within that screen's filters.
+        if (activeTab === TabType.TICKETS && ticketViewRef.current) {
+          searchFilters.apps = VespaApps.TICKET;
+          searchFilters.type = VespaDocTypes.TICKETS;
+          // Bot and my-channels scoping only shape chat results; a tickets-only search has none.
+          delete searchFilters.includeBotMessages;
+          delete searchFilters.onlyMyChannels;
+          addViewFiltersToRequest(searchFilters, ticketViewRef.current.vespaFilters);
+        }
+
         // Highlight-only phrases — mirrors the initial search (injected builder, else chip name).
         const mentionHighlights = options.buildMentionHighlights
           ? options.buildMentionHighlights(mentionUserMentions, mentionChannels, mentionUserGroups)
@@ -1706,6 +1864,26 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
         }
 
         const currentSessionId = searchSessionId || '';
+        if (activeTab === TabType.TICKETS && ticketViewRef.current?.zeroQueryArgs) {
+          const page = await searchScopedTickets(
+            zero,
+            { ...searchFilters, searchId: currentSessionId, presentationSummary: 'lean' },
+            ticketViewRef.current.zeroQueryArgs,
+            currentOffset,
+          );
+          setSearchResults(prev => [...prev, ...page.results]);
+          setPaginationState(prev => ({
+            ...prev,
+            [activeTab]: {
+              ...prev[activeTab],
+              hasMore: page.hasMore,
+              total: prev[activeTab].cumulativeCount + page.results.length,
+              offset: page.nextOffset,
+              cumulativeCount: prev[activeTab].cumulativeCount + page.results.length,
+            },
+          }));
+          return;
+        }
         const results = await searchService.vespaSearch({
           ...searchFilters,
           searchId: currentSessionId,
@@ -1810,6 +1988,7 @@ export function useSearchMetrics(options: UseSearchMetricsOptions = {}) {
     sudoQueryService.track('search_tab_click', {
       searchSessionId,
       tab: previousTabRef.current,
+      ...(surfaceRef.current && { surface: surfaceRef.current }),
     });
   }, [searchSessionId, context.userID, activeTab]);
 

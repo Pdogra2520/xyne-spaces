@@ -1,4 +1,4 @@
-import { ReactElement, useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import { ReactElement, useMemo, useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { createPortal } from 'react-dom';
 import { activitySkipMarkAsReadThreadRef } from '../Activity/activitySkipMarkAsRead';
 import { useEphemeralThreadMessages } from '../../hooks/useEphemeralMessages';
@@ -17,7 +17,15 @@ import { useIsDmReadOnly } from '../../hooks/useIsDmReadOnly';
 import { useRouteContext } from '../../hooks/useRouteContext';
 import { usePlatform } from '../../hooks/usePlatform';
 import { useIsInPanelWebview } from '../../hooks/useIsInPanelWebview';
-import { X, FileText, ClipboardCheck, Hash, Tag as TagIcon, ChevronRight } from 'lucide-react';
+import {
+  X,
+  FileText,
+  ClipboardCheck,
+  Hash,
+  Lock,
+  Tag as TagIcon,
+  ChevronRight,
+} from 'lucide-react';
 import {
   ArrowLeft,
   ArrowTurnDownRight,
@@ -68,6 +76,7 @@ import {
   MessageType,
   ChannelScopeType,
   ChannelType,
+  ChannelVisibility,
   BaseTicketType,
   parseTicketMd,
 } from '@xyne/shared';
@@ -112,6 +121,7 @@ import { ThreadRecordingButton } from '../Call/ThreadRecordingButton/ThreadRecor
 import { sendRecordingEvent, useRecordingStore } from '../../hooks/useRecordingStore';
 import { getRecordingDefaultLayout } from '../../hooks/useRecordingDefaultLayout';
 import { ConversationTabContext } from './ConversationTabContext';
+import { ThreadNavigationContext } from './ThreadNavigationContext';
 
 const VALID_TABS = ['thread', 'details', 'files', 'rca', 'relationships', 'release'] as const;
 type TabType = (typeof VALID_TABS)[number];
@@ -193,6 +203,7 @@ export const ThreadMessages = ({
   const shareableOrigin = useShareableOrigin();
 
   const outletContext = useOutletContext<{ onClose?: () => void } | null>();
+  const threadNavigation = useContext(ThreadNavigationContext);
   const resolvedOnClose = onClose ?? outletContext?.onClose;
 
   // Restore Electron window dragging on the thread header — but ONLY when this is the
@@ -367,6 +378,7 @@ export const ThreadMessages = ({
   const { displayName: channelDisplayName } = useChannelDisplayName(channel, currentUser?.id ?? '');
   const isDmThread =
     channel?.scopeType === ChannelScopeType.DM || channel?.scopeType === ChannelScopeType.GROUP_DM;
+  const isPrivateChannel = !isDmThread && channel?.visibility === ChannelVisibility.PRIVATE;
 
   // Tab state - default to 'details' when opening from a ticket card
   const [activeTab, setActiveTab] = useState<TabType>(selectedTab);
@@ -989,7 +1001,7 @@ export const ThreadMessages = ({
 
   const showBreadcrumb = (isFocusedThread || showChannelLink) && !isStandaloneWindow() && !!channel;
   const focusedChannelBreadcrumb = showBreadcrumb ? (
-    <Tooltip content={`Open ${isDmThread ? '' : '#'}${channelDisplayName}`}>
+    <Tooltip content={`Open ${isDmThread || isPrivateChannel ? '' : '#'}${channelDisplayName}`}>
       <button
         type='button'
         onClick={onChannelLinkClick ?? handleOpenInChannel}
@@ -999,9 +1011,18 @@ export const ThreadMessages = ({
         className='group/chan flex shrink-0 items-center gap-1 max-w-[180px] rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground'
         style={APP_NO_DRAG_STYLE}
       >
-        {!isDmThread && (
-          <Hash className='size-3.5 shrink-0 opacity-60 transition-opacity group-hover/chan:opacity-100' />
-        )}
+        {!isDmThread &&
+          (isPrivateChannel ? (
+            <Lock
+              data-testid='thread-breadcrumb-private-icon'
+              className='size-3.5 shrink-0 opacity-60 transition-opacity group-hover/chan:opacity-100'
+            />
+          ) : (
+            <Hash
+              data-testid='thread-breadcrumb-public-icon'
+              className='size-3.5 shrink-0 opacity-60 transition-opacity group-hover/chan:opacity-100'
+            />
+          ))}
         <span className='truncate text-sm font-medium group-hover/chan:underline'>
           {channelDisplayName}
         </span>
@@ -1011,6 +1032,11 @@ export const ThreadMessages = ({
 
   const openTicketDetailsExpandedView = (): void => {
     if (!ticket?.channelId || !ticket.conversationId) return;
+
+    if (threadNavigation.openTicket) {
+      threadNavigation.openTicket(ticket.id);
+      return;
+    }
 
     // An SDLC ticket has its own page under the hub, not a panel over the chat channel.
     if (channel?.type === ChannelType.SDLC) {

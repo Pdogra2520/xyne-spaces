@@ -1,4 +1,4 @@
-import type { JevAnswer, JevQuestion } from "./jev.js";
+import type { XorAnswer, XorQuestion } from "./xor.js";
 
 const SYSTEM_PROMPT = [
   "You are a strict evaluator. You are given a STATE and a set of QUESTIONS about it.",
@@ -6,7 +6,7 @@ const SYSTEM_PROMPT = [
   'Reply with one JSON object: {"answers": {"<question id>": <answer>}}.',
   'A "noul" question is yes/no: answer {"noul": p} where p is the probability from 0 to 1 that the answer is yes.',
   'A "choice" question lists options: answer {"choice": "<option key>"} using exactly one listed key.',
-  'A "score" question: answer {"score": s} where s is from 0 to 1.',
+  'A "score" question lists criteria as ordered levels from low to high: answer {"score": s} where s is from 0 (first level) to 1 (last level).',
 ].join("\n");
 
 export function llmJudgeConfig(): { url: string; key: string; model: string; timeoutMs: number } {
@@ -27,7 +27,7 @@ export function llmJudgeConfig(): { url: string; key: string; model: string; tim
   };
 }
 
-function renderQuestions(questions: Record<string, JevQuestion>): string {
+function renderQuestions(questions: Record<string, XorQuestion>): string {
   return Object.entries(questions)
     .map(([id, q]) => {
       if (q.type === "choice") {
@@ -52,14 +52,14 @@ function clamp01(value: unknown): number | undefined {
 
 export function parseLlmJudgeReply(
   raw: string,
-  questions: Record<string, JevQuestion>,
-): Record<string, JevAnswer> {
+  questions: Record<string, XorQuestion>,
+): Record<string, XorAnswer> {
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("judge-llm reply had no JSON object");
   const parsed = JSON.parse(raw.slice(start, end + 1)) as { answers?: Record<string, unknown> };
   const source = parsed.answers && typeof parsed.answers === "object" ? parsed.answers : {};
-  const out: Record<string, JevAnswer> = {};
+  const out: Record<string, XorAnswer> = {};
   for (const [id, q] of Object.entries(questions)) {
     const entry = source[id];
     const fields = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
@@ -81,9 +81,9 @@ export function parseLlmJudgeReply(
 
 export async function llmJudgePost(
   state: string,
-  questions: Record<string, JevQuestion>,
+  questions: Record<string, XorQuestion>,
   signal: AbortSignal,
-): Promise<Record<string, JevAnswer>> {
+): Promise<Record<string, XorAnswer>> {
   const cfg = llmJudgeConfig();
   const res = await fetch(cfg.url, {
     method: "POST",

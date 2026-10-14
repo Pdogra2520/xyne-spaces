@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { AWAKENING_SEND_TOOL } from "../awakening/send-tool.js";
 import { errMsg } from "../lib/errors.js";
-import { withSdlcRunTools } from "../lib/sdlc-run-tools.js";
+import { sdlcRunChannelId, withSdlcRunTools } from "../lib/sdlc-run-tools.js";
 import crypto from "node:crypto";
 import { prisma } from "../db.js";
 import { decrypt } from "../crypto.js";
@@ -9,14 +9,23 @@ import { CONFIG } from "../config.js";
 import { listToolsForUser, callTool } from "../mcp/runner.js";
 import { agentRunRepository } from "../repositories/index.js";
 import type { McpToolInfo, McpServerTools } from "../mcp/types.js";
-import { hasConnectorDefinition, resolveConnectorDefinition } from "../mcp/connector-definitions.js";
+import { hasConnectorDefinition, resolveConnectorDefinition, isWriteToolUnderPolicy } from "../mcp/connector-definitions.js";
 import { BITBUCKET_CUSTOM_TOOLS, handleUploadPrScreenshot, handleGetPrComments, handleGetPrTemplate, handleListPullRequests, buildUpstreamBitbucketCitation } from "../mcp/adapters/bitbucket.js";
 import { GITHUB_CUSTOM_TOOLS, handleUploadPrAttachment } from "../mcp/adapters/github.js";
 import { GITHUB_INSIGHTS_TOOLS, isGithubInsightsTool, handleGithubInsightsTool } from "../mcp/adapters/github-insights.js";
 import { GRAFANA_CUSTOM_TOOLS, handleGrafanaQueryLogs, handleGrafanaListMetrics, handleGrafanaQueryMetrics, handleGrafanaQueryDatabase, buildUpstreamGrafanaCitation, prefixChunk } from "../mcp/adapters/grafana.js";
 import { type Citation } from "xyne-claw-shared";
 import { SLACK_CUSTOM_TOOLS, handleSlackFindChannel } from "../mcp/adapters/slack.js";
-import { channelAgentTools, handleChannelAgentTool, isChannelAgentTool } from "../surfaces/messaging/agent-tools.js";
+import {
+  channelAgentTools,
+  findNotifyTarget,
+  handleChannelAgentTool,
+  isChannelAgentTool,
+  NOTIFY_SERVER_TYPE,
+  NOTIFY_TOOL,
+  NOTIFY_TOOL_NAME,
+  notifyUser,
+} from "../surfaces/messaging/agent-tools.js";
 import { getChannel, isMessagingChannelKey, MESSAGING_CHANNEL_KEYS } from "../surfaces/messaging/plugin.js";
 import { POSTMAN_CUSTOM_TOOLS, handleRunMonitor } from "../mcp/adapters/postman.js";
 import {
@@ -70,18 +79,21 @@ import {
   parseGatewayToolSelectionKey,
 } from "../mcpgateway/key-format.js";
 import { requiresGatewayToolApproval } from "../mcpgateway/tool-approval.js";
-import { buildAgentCallProposalFlow, parseToolsConfig, type AgentToolsConfig } from "xyne-claw-shared";
+import { buildAgentCallProposalFlow, isEmptyToolsSelection, parseToolsConfig, resolveAgentToolsConfig, type AgentToolsConfig } from "xyne-claw-shared";
+import { findUnresolvedConfiguredServers, visibleConnectors, type UnresolvedConfiguredServer } from "../lib/connector-access.js";
 import { visibleAgentWhereForRunningUser } from "../lib/callable-agent-resolver.js";
+import { loadKnownMcpTools } from "../lib/mcp-tool-name-index.js";
 import { isClawAdmin } from "../middleware/agent-acl.js";
 import {
   buildSubagentToolRefs,
   filterMcpServerToolsForAgentConfig,
   isMcpToolAllowedByAgentConfig,
+  mcpServerMayServeAgentConfig,
   shouldBypassMcpToolAgentFilter,
   subagentReferencingTool,
   type SubagentToolRefs,
 } from "./mcp-agent-tools.js";
-import { listTools, searchTools } from "../services/tool-index/index.js";
+import { keywordQueryWords, listTools, searchToolsWithFallback } from "../services/tool-index/index.js";
 
 const log = createLogger("mcp");
 
@@ -282,7 +294,15 @@ function isGatewayToolEnabledInConfig(
 type SessionAgentToolsContext = {
   id: string;
   slug: string;
+  delegationTier: string;
+  /**
+   * The selection this run enforces (resolveAgentToolsConfig): the stored one,
+   * `{}` for a standard agent with nothing selected, `undefined` only for an
+   * orchestrator with nothing selected (unrestricted).
+   */
   toolsConfig: AgentToolsConfig | undefined;
+  /** Whether the agent has a saved selection at all (vs. "0 selected"). */
+  hasStoredSelection: boolean;
   /**
    * Tool references from the agent's enabled CUSTOM subagent definitions.
    * Strict enforcement must keep these alive even when the agent's own
@@ -301,18 +321,17 @@ async function loadSessionAgentToolsContext(
   const agent = spacesAppId
     ? await prisma.agent.findUnique({
         where: { spacesAppId },
-        select: { id: true, slug: true, config: true, orgId: true },
+        select: { id: true, slug: true, config: true, orgId: true, delegationTier: true },
       })
     : agentSlug && agentOrgId
       ? await prisma.agent.findUnique({
           where: { orgId_slug: { orgId: agentOrgId, slug: agentSlug } },
-          select: { id: true, slug: true, config: true, orgId: true },
+          select: { id: true, slug: true, config: true, orgId: true, delegationTier: true },
         })
       : null;
   if (!agent) return null;
-  const toolsConfig = parseToolsConfig(
-    (agent.config as Record<string, unknown> | null | undefined) ?? undefined,
-  );
+  const storedConfig = (agent.config as Record<string, unknown> | null | undefined) ?? undefined;
+  const toolsConfig = resolveAgentToolsConfig(storedConfig, agent.delegationTier);
 
   let subagentToolRefs: SubagentToolRefs[] = [];
   const subagentNames = (toolsConfig?.subagents ?? []).filter(
@@ -339,7 +358,12 @@ async function loadSessionAgentToolsContext(
   return {
     id: agent.id,
     slug: agent.slug,
+    delegationTier: agent.delegationTier,
     toolsConfig,
+    hasStoredSelection: (() => {
+      const stored = parseToolsConfig(storedConfig);
+      return stored !== undefined && !isEmptyToolsSelection(stored);
+    })(),
     subagentToolRefs,
   };
 }
@@ -441,6 +465,36 @@ function hmac(key: string | Buffer, payload: string): string {
 
 export function signAction(action: Record<string, unknown>): string {
   return hmac(CONFIG.actionSigningKey, canonicalActionPayload(action));
+}
+
+export type WriteActionCore = {
+  serverType: string;
+  tool: string;
+  params: Record<string, unknown>;
+  userId: string;
+  subagentId?: string;
+};
+
+/** The fields a pending write action's HMAC covers — mint and every verifier
+ *  build it here. `subagentId` is bound only when a subagent's own credential
+ *  decided the call (EffectiveCredentials.viaSubagent): approval re-resolves
+ *  that identity from it, so it must be tamper-proof, and a surface that drops
+ *  it then fails verification instead of running on the parent's account.
+ *  Every other action keeps the four-field payload it was always signed over. */
+export function writeActionPayload(action: {
+  serverType: string;
+  tool: string;
+  params: Record<string, unknown>;
+  userId: string;
+  subagentId?: unknown;
+}): WriteActionCore {
+  return {
+    serverType: action.serverType,
+    tool: action.tool,
+    params: action.params,
+    userId: action.userId,
+    ...(typeof action.subagentId === "string" && action.subagentId ? { subagentId: action.subagentId } : {}),
+  };
 }
 
 function candidateSignatures(action: Record<string, unknown>): string[] {
@@ -591,6 +645,30 @@ function serverToolsKey(serverType: string, serverName: string): string {
   return `${serverType}\u0000${serverName}`;
 }
 
+async function serverTypesAgentCannotUse(
+  entries: ListEntry[],
+  userId: string,
+  config: AgentToolsConfig | undefined,
+  sessionAgentTools: { slug: string; subagentToolRefs: SubagentToolRefs[] } | null | undefined,
+): Promise<Set<string>> {
+  const skipped = new Set<string>();
+  if (!config || !sessionAgentTools) return skipped;
+  const known = await loadKnownMcpTools(userId, [...new Set(entries.map((e) => e.serverType))]);
+  for (const entry of entries) {
+    if (CUSTOM_TOOL_INJECTIONS.some((inj) => inj.match(entry.serverType))) continue;
+    const keep = mcpServerMayServeAgentConfig({
+      config,
+      serverType: entry.serverType,
+      serverName: entry.serverName,
+      knownTools: known.get(entry.serverType) ?? null,
+      parseGatewayServerType,
+      subagentRefs: sessionAgentTools.subagentToolRefs,
+    });
+    if (!keep) skipped.add(entry.serverType);
+  }
+  return skipped;
+}
+
 function enforceMcpToolsListing(
   data: McpServerTools[],
   config: AgentToolsConfig,
@@ -668,14 +746,36 @@ const CUSTOM_TOOL_INJECTIONS: ReadonlyArray<{
   { match: (t) => t === "slack", tools: SLACK_CUSTOM_TOOLS, createIfMissing: true },
   // Messaging channels (WhatsApp over Baileys, WhatsApp Cloud API, …): fully
   // virtual — no upstream MCP server, every tool executes in claw-auth against
-  // the account's connection.
+  // the account's connection. A getter, not a value: the list depends on the
+  // channel plugin's capabilities, and plugins register at boot, after this
+  // module loads — computed here it saw no plugin, so only the
+  // capability-free send tool was ever offered.
   ...MESSAGING_CHANNEL_KEYS.map((key) => ({
     match: (t: string) => t === key,
-    tools: channelAgentTools(key),
+    get tools() {
+      return channelAgentTools(key);
+    },
     createIfMissing: true,
   })),
+  // "Message me on WhatsApp" for runs that did not start in a chat — granted
+  // per run only when the user can be reached (canNotifyOnWhatsApp below).
+  { match: (t) => t === NOTIFY_SERVER_TYPE, tools: [NOTIFY_TOOL], createIfMissing: true },
   { match: isGrafanaFamilyType, tools: GRAFANA_CUSTOM_TOOLS, createIfMissing: true },
 ];
+
+/**
+ * Whether this run gets the WhatsApp notify tool: it did not start in a chat
+ * (those reply with the channel's own send tool) and its user has a WhatsApp
+ * to be reached on. Shared by the listing, the call gate and start-run's
+ * forwarded config, so the three can never disagree.
+ */
+export async function canNotifyOnWhatsApp(
+  userId: string | undefined,
+  runCtx: { channelDelivery?: unknown; agentOrgId?: string | null | undefined } | null | undefined,
+): Promise<boolean> {
+  if (!userId || runCtx?.channelDelivery) return false;
+  return (await findNotifyTarget(userId, runCtx?.agentOrgId ?? null).catch(() => null)) !== null;
+}
 
 /**
  * Append each injection's custom tools to every matching server in `data`,
@@ -796,6 +896,7 @@ export async function withSurfaceDefaultToolsConfig(
   config: AgentToolsConfig | undefined,
   sessionId: string,
   sessionSpacesAppId?: string,
+  sessionUserId?: string,
 ): Promise<AgentToolsConfig | undefined> {
   if (!config) return undefined;
 
@@ -854,6 +955,11 @@ export async function withSurfaceDefaultToolsConfig(
   // permitted — see awakening/write-policy.ts, enforced at /mcp/call.
   if (runCtx?.triggerSource === "heartbeat" || runCtx?.triggerSource === "reflex") {
     effective = withDirectTool(effective, AWAKENING_SEND_TOOL);
+  }
+
+  // A run that can reach its user on WhatsApp may message them there.
+  if (await canNotifyOnWhatsApp(sessionUserId, runCtx)) {
+    effective = withDirectTool(effective, NOTIFY_TOOL_NAME);
   }
 
   // A run in an SDLC hub gets the SDLC tools; start-run adds the same ones to the config claw filters by.
@@ -932,6 +1038,220 @@ const router = Router();
 router.use("/:sessionId/mcp", requireStrictS2S, requireSessionToken);
 router.use("/:sessionId/actions", requireStrictS2S, requireSessionToken);
 
+/**
+ * Every server this session has a credential path to, in resolution order —
+ * the candidates `/mcp/tools` lists and the set tool search reports as
+ * "connected". Built before agent-selection enforcement, so it answers "can this
+ * user/agent reach it", not "is the agent granted it".
+ */
+async function buildMcpResolutionEntries(args: {
+  userId: string;
+  sessionId: string;
+  agentSlug: string | undefined;
+  spacesAppId: string | undefined;
+  sessionAgentTools: SessionAgentToolsContext | null;
+}): Promise<{
+  entries: ListEntry[];
+  automationAppSwap: boolean;
+  runCtx: Awaited<ReturnType<typeof import("./webhook.js").getSession>> | null;
+}> {
+  const { userId, sessionId, agentSlug, spacesAppId, sessionAgentTools } = args;
+  // User connections + global-fallback servers (servers with allowGlobalFallback
+  // = true AND a global cred row, where this user has NO personal connection).
+  // Resolve as the union: the user gets to call tools for any server they
+  // have credentials for, whether their own or admin-shared.
+  const userConnections = await prisma.userMcpConnection.findMany({
+    where: { userId },
+    include: { mcpServer: true },
+  });
+  const userServerIds = new Set(userConnections.map((c) => c.mcpServerId));
+
+  const globalServers = await prisma.mcpServer.findMany({
+    where: {
+      allowGlobalFallback: true,
+      // Org-scoped global creds: ANY row (org override or NULL-org default)
+      // makes the server listable; the loader picks the right row at call
+      // time (org override first, default second).
+      globalCredentials: { some: {} },
+      id: { notIn: Array.from(userServerIds) },
+    },
+  });
+
+  const entries: ListEntry[] = [
+    ...userConnections.map((c) => ({
+      type: "user" as const,
+      serverType: c.mcpServer.type,
+      serverName: c.mcpServer.name,
+    })),
+    ...globalServers.map((s) => ({ type: "global" as const, serverType: s.type, serverName: s.name })),
+  ];
+
+  // Add MCPs the agent has pinned (only when this session is running an
+  // agent). Agent-pinned servers get added with type=agent and prepended
+  // to the resolution list so the resolver picks them first. If the user
+  // also has a connection for the same type, we still add the agent
+  // entry but the dedupe below keeps the agent one (it's pre-pended
+  // before user/global of the same type).
+  if (agentSlug || spacesAppId) {
+    const agentConns = await prisma.agentMcpConnection.findMany({
+      where: sessionAgentTools?.id
+        ? { agentId: sessionAgentTools.id }
+        : { agent: { id: "__missing_session_agent__" } },
+      include: { mcpServer: true },
+    });
+    for (const c of agentConns) {
+      const alreadyListed = entries.some((e) => e.serverType === c.mcpServer.type);
+      if (!alreadyListed) {
+        entries.unshift({ type: "agent", serverType: c.mcpServer.type, serverName: c.mcpServer.name });
+      }
+    }
+  }
+
+  // ── Automation app-mode Spaces (decided HERE, at entry build) ──────────
+  // Automation (app-user) runs get Spaces served in APP MODE: the
+  // xyne-spaces-app-tools server (full registry, app token, see
+  // xyne-spaces-app-tools-server.ts) replaces the user xyne-spaces server.
+  // The decision is made once, where server entries are assembled — not by
+  // splicing the listing afterwards. `isAutomation` is the explicit dispatch
+  // flag; resolveMentions/externalResultCallback is the legacy proxy kept
+  // for sessions dispatched before the flag existed.
+  const { getSession } = await import("./webhook.js");
+  const runCtx = await getSession(sessionId).catch(() => null);
+  const isAutomationRun =
+    runCtx?.isAutomation === true ||
+    runCtx?.resolveMentions === true ||
+    !!runCtx?.externalResultCallback;
+  let automationAppSwap = false;
+  if (isAutomationRun) {
+    // Only swap when the app token actually resolves AND the app-tools
+    // server row exists — otherwise we'd strip Spaces access and silently
+    // break the run. Keep the user server and log loudly instead.
+    const appCreds = await getAppTokenCredentials(userId);
+    const appToolsRow = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces-app-tools" } });
+    if (appCreds && appToolsRow) {
+      automationAppSwap = true;
+      let dropped = 0;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i]!.serverType === "xyne-spaces") {
+          entries.splice(i, 1);
+          dropped++;
+        }
+      }
+      log.info(
+        `[mcp/tools] automation app-mode: xyne-spaces-app-tools serves Spaces for userId=${userId} ` +
+        `(dropped ${dropped} xyne-spaces entr${dropped === 1 ? "y" : "ies"})`,
+      );
+    } else {
+      log.warn(
+        `[mcp/tools] automation app-mode SKIPPED for userId=${userId}: ` +
+        `appCreds=${!!appCreds} appToolsRow=${!!appToolsRow}. ` +
+        "Keeping xyne-spaces user MCP to avoid stripping Spaces access. " +
+        "If this is an automation run, the agent's app is likely not installed / app token missing.",
+      );
+    }
+  }
+
+  // Virtual xyne-spaces entry: if SPACES_DB_URL is configured the user can
+  // use Spaces tools without ever clicking "Connect" — loadEffectiveCredentials
+  // synthesizes the creds from the live session row. Only add when there's
+  // no existing user/global row for xyne-spaces (else we'd duplicate).
+  // Skipped under the automation app-mode swap — Spaces is served by
+  // xyne-spaces-app-tools for those runs.
+  const hasSpacesEntry = entries.some((e) => e.serverType === "xyne-spaces");
+  if (!hasSpacesEntry && !automationAppSwap && CONFIG.spacesDbUrl) {
+    const spacesServer = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces" } });
+    log.info(`[mcp/tools] spaces virtual-entry check: mcpServerRow=${!!spacesServer}`);
+    if (spacesServer) {
+      entries.push({
+        type: "user",
+        serverType: "xyne-spaces",
+        serverName: spacesServer.name,
+        enforcementType: "virtual",
+      });
+      log.info(`[mcp/tools] added virtual xyne-spaces entry for userId=${userId}`);
+    }
+  }
+
+  // Virtual xyne-spaces-app-tools entry: same pattern as xyne-spaces above.
+  // The adapter declares credentialFields: [] (the app_token is auto-sourced
+  // from the default agent's spacesAppToken, not user-supplied), so existing
+  // users have no user_mcp_connections row for this server. Without this
+  // virtual fallback they'd never see apps-send-message in the picker, and
+  // the runtime listToolsForUser path would never spawn the MCP server.
+  const hasAppToolsEntry = entries.some((e) => e.serverType === "xyne-spaces-app-tools");
+  if (!hasAppToolsEntry) {
+    const appToolsServer = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces-app-tools" } });
+    if (appToolsServer) {
+      entries.push({
+        type: "user",
+        serverType: "xyne-spaces-app-tools",
+        serverName: appToolsServer.name,
+        enforcementType: "virtual",
+      });
+      log.info(`[mcp/tools] added virtual xyne-spaces-app-tools entry for userId=${userId}`);
+    }
+  }
+  // Virtual research-agent-mcp entry: global stdio proxy configured by env.
+  // No user connection row is needed; credentials-loader sources the API key
+  // from RESEARCH_AGENT_MCP_API_KEY for every agent/user.
+  const hasResearchAgentMcpEntry = entries.some((e) => e.serverType === "research-agent-mcp");
+  if (!hasResearchAgentMcpEntry && CONFIG.researchAgentMcpApiKey) {
+    const researchAgentMcpServer = await prisma.mcpServer.findUnique({
+      where: { type: "research-agent-mcp" },
+    });
+    if (researchAgentMcpServer) {
+      entries.push({
+        type: "global",
+        serverType: "research-agent-mcp",
+        serverName: researchAgentMcpServer.name,
+        enforcementType: "virtual",
+      });
+      log.info(`[mcp/tools] added virtual research-agent-mcp entry for userId=${userId}`);
+    }
+  }
+  // Virtual Heisenberg entry: the internal pipeline service has no user
+  // credentials. Its reviewed static adapter uses the deployment-wide
+  // HEISENBERG_BASE_URL (with a code default), so every agent can select it
+  // without creating a user_mcp_connections row.
+  const hasHeisenbergEntry = entries.some((e) => e.serverType === "heisenberg");
+  if (!hasHeisenbergEntry) {
+    const heisenbergServer = await prisma.mcpServer.findUnique({ where: { type: "heisenberg" } });
+    if (heisenbergServer?.enabled) {
+      entries.push({ type: "global", serverType: "heisenberg", serverName: heisenbergServer.name, enforcementType: "virtual" });
+      log.info(`[mcp/tools] added virtual heisenberg entry for userId=${userId}`);
+    }
+  }
+
+  // Slack-surface runs do not require a separately configured MCP
+  // connection. The verified workspace install supplies credentials.
+  const hasSlackEntry = entries.some((entry) => entry.serverType === "slack");
+  if (!hasSlackEntry) {
+    // runCtx fetched once above (automation app-mode block).
+    if (runCtx?.slackDelivery?.surfaceAgentId && runCtx.slackDelivery.teamId) {
+      const slackServer = await prisma.mcpServer.findUnique({ where: { type: "slack" } });
+      if (slackServer) {
+        entries.push({ type: "user", serverType: "slack", serverName: slackServer.name, enforcementType: "virtual" });
+        log.info(`[mcp/tools] added virtual slack entry (surface bot token) for userId=${userId}`);
+      }
+    }
+  }
+
+  // Messaging-channel runs get their channel's action tools (send, react,
+  // list groups) as a virtual server; execution is local (agent-tools.ts).
+  if (runCtx?.channelDelivery && !entries.some((entry) => entry.serverType === runCtx.channelDelivery?.channel)) {
+    const channel = runCtx.channelDelivery.channel;
+    entries.push({ type: "user", serverType: channel, serverName: getChannel(channel)?.displayName ?? channel, enforcementType: "virtual" });
+    log.info(`[mcp/tools] added virtual ${channel} entry (channel account) for userId=${userId}`);
+  }
+
+  if (await canNotifyOnWhatsApp(userId, runCtx)) {
+    entries.push({ type: "user", serverType: NOTIFY_SERVER_TYPE, serverName: "WhatsApp", enforcementType: "virtual" });
+  }
+
+  log.info(`[mcp/tools] final entries=${entries.map((e) => `${e.serverType}:${e.type}`).join(",")}`);
+  return { entries, automationAppSwap, runCtx };
+}
+
 router.get("/:sessionId/mcp/tools", async (req: Request<{ sessionId: string }>, res: Response) => {
   try {
     const userId = req.session!.userId;
@@ -940,199 +1260,17 @@ router.get("/:sessionId/mcp/tools", async (req: Request<{ sessionId: string }>, 
     const sessionAgentOrgId = await resolveSessionAgentOrgId(userId, spacesAppId);
     const sessionAgentTools = await loadSessionAgentToolsContext(agentSlug, spacesAppId, sessionAgentOrgId);
     const strictAgentToolsConfig = isStrictAgentToolsEnabled()
-      ? await withSurfaceDefaultToolsConfig(sessionAgentTools?.toolsConfig, req.params.sessionId, spacesAppId)
+      ? await withSurfaceDefaultToolsConfig(sessionAgentTools?.toolsConfig, req.params.sessionId, spacesAppId, userId)
       : undefined;
     const tenantUniqueId = resolveGatewayTenantForRequest();
 
-    // User connections + global-fallback servers (servers with allowGlobalFallback
-    // = true AND a global cred row, where this user has NO personal connection).
-    // Resolve as the union: the user gets to call tools for any server they
-    // have credentials for, whether their own or admin-shared.
-    const userConnections = await prisma.userMcpConnection.findMany({
-      where: { userId },
-      include: { mcpServer: true },
+    const { entries, automationAppSwap, runCtx } = await buildMcpResolutionEntries({
+      userId,
+      sessionId: req.params.sessionId,
+      agentSlug,
+      spacesAppId,
+      sessionAgentTools,
     });
-    const userServerIds = new Set(userConnections.map((c) => c.mcpServerId));
-
-    const globalServers = await prisma.mcpServer.findMany({
-      where: {
-        allowGlobalFallback: true,
-        // Org-scoped global creds: ANY row (org override or NULL-org default)
-        // makes the server listable; the loader picks the right row at call
-        // time (org override first, default second).
-        globalCredentials: { some: {} },
-        id: { notIn: Array.from(userServerIds) },
-      },
-    });
-
-    const entries: ListEntry[] = [
-      ...userConnections.map((c) => ({
-        type: "user" as const,
-        serverType: c.mcpServer.type,
-        serverName: c.mcpServer.name,
-      })),
-      ...globalServers.map((s) => ({ type: "global" as const, serverType: s.type, serverName: s.name })),
-    ];
-
-    // Add MCPs the agent has pinned (only when this session is running an
-    // agent). Agent-pinned servers get added with type=agent and prepended
-    // to the resolution list so the resolver picks them first. If the user
-    // also has a connection for the same type, we still add the agent
-    // entry but the dedupe below keeps the agent one (it's pre-pended
-    // before user/global of the same type).
-    if (agentSlug || spacesAppId) {
-      const agentConns = await prisma.agentMcpConnection.findMany({
-        where: sessionAgentTools?.id
-          ? { agentId: sessionAgentTools.id }
-          : { agent: { id: "__missing_session_agent__" } },
-        include: { mcpServer: true },
-      });
-      for (const c of agentConns) {
-        const alreadyListed = entries.some((e) => e.serverType === c.mcpServer.type);
-        if (!alreadyListed) {
-          entries.unshift({ type: "agent", serverType: c.mcpServer.type, serverName: c.mcpServer.name });
-        }
-      }
-    }
-
-    // ── Automation app-mode Spaces (decided HERE, at entry build) ──────────
-    // Automation (app-user) runs get Spaces served in APP MODE: the
-    // xyne-spaces-app-tools server (full registry, app token, see
-    // xyne-spaces-app-tools-server.ts) replaces the user xyne-spaces server.
-    // The decision is made once, where server entries are assembled — not by
-    // splicing the listing afterwards. `isAutomation` is the explicit dispatch
-    // flag; resolveMentions/externalResultCallback is the legacy proxy kept
-    // for sessions dispatched before the flag existed.
-    const { getSession } = await import("./webhook.js");
-    const runCtx = await getSession(req.params.sessionId).catch(() => null);
-    const isAutomationRun =
-      runCtx?.isAutomation === true ||
-      runCtx?.resolveMentions === true ||
-      !!runCtx?.externalResultCallback;
-    let automationAppSwap = false;
-    if (isAutomationRun) {
-      // Only swap when the app token actually resolves AND the app-tools
-      // server row exists — otherwise we'd strip Spaces access and silently
-      // break the run. Keep the user server and log loudly instead.
-      const appCreds = await getAppTokenCredentials(userId);
-      const appToolsRow = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces-app-tools" } });
-      if (appCreds && appToolsRow) {
-        automationAppSwap = true;
-        let dropped = 0;
-        for (let i = entries.length - 1; i >= 0; i--) {
-          if (entries[i]!.serverType === "xyne-spaces") {
-            entries.splice(i, 1);
-            dropped++;
-          }
-        }
-        log.info(
-          `[mcp/tools] automation app-mode: xyne-spaces-app-tools serves Spaces for userId=${userId} ` +
-          `(dropped ${dropped} xyne-spaces entr${dropped === 1 ? "y" : "ies"})`,
-        );
-      } else {
-        log.warn(
-          `[mcp/tools] automation app-mode SKIPPED for userId=${userId}: ` +
-          `appCreds=${!!appCreds} appToolsRow=${!!appToolsRow}. ` +
-          "Keeping xyne-spaces user MCP to avoid stripping Spaces access. " +
-          "If this is an automation run, the agent's app is likely not installed / app token missing.",
-        );
-      }
-    }
-
-    // Virtual xyne-spaces entry: if SPACES_DB_URL is configured the user can
-    // use Spaces tools without ever clicking "Connect" — loadEffectiveCredentials
-    // synthesizes the creds from the live session row. Only add when there's
-    // no existing user/global row for xyne-spaces (else we'd duplicate).
-    // Skipped under the automation app-mode swap — Spaces is served by
-    // xyne-spaces-app-tools for those runs.
-    const hasSpacesEntry = entries.some((e) => e.serverType === "xyne-spaces");
-    if (!hasSpacesEntry && !automationAppSwap && CONFIG.spacesDbUrl) {
-      const spacesServer = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces" } });
-      log.info(`[mcp/tools] spaces virtual-entry check: mcpServerRow=${!!spacesServer}`);
-      if (spacesServer) {
-        entries.push({
-          type: "user",
-          serverType: "xyne-spaces",
-          serverName: spacesServer.name,
-          enforcementType: "virtual",
-        });
-        log.info(`[mcp/tools] added virtual xyne-spaces entry for userId=${userId}`);
-      }
-    }
-
-    // Virtual xyne-spaces-app-tools entry: same pattern as xyne-spaces above.
-    // The adapter declares credentialFields: [] (the app_token is auto-sourced
-    // from the default agent's spacesAppToken, not user-supplied), so existing
-    // users have no user_mcp_connections row for this server. Without this
-    // virtual fallback they'd never see apps-send-message in the picker, and
-    // the runtime listToolsForUser path would never spawn the MCP server.
-    const hasAppToolsEntry = entries.some((e) => e.serverType === "xyne-spaces-app-tools");
-    if (!hasAppToolsEntry) {
-      const appToolsServer = await prisma.mcpServer.findUnique({ where: { type: "xyne-spaces-app-tools" } });
-      if (appToolsServer) {
-        entries.push({
-          type: "user",
-          serverType: "xyne-spaces-app-tools",
-          serverName: appToolsServer.name,
-          enforcementType: "virtual",
-        });
-        log.info(`[mcp/tools] added virtual xyne-spaces-app-tools entry for userId=${userId}`);
-      }
-    }
-    // Virtual research-agent-mcp entry: global stdio proxy configured by env.
-    // No user connection row is needed; credentials-loader sources the API key
-    // from RESEARCH_AGENT_MCP_API_KEY for every agent/user.
-    const hasResearchAgentMcpEntry = entries.some((e) => e.serverType === "research-agent-mcp");
-    if (!hasResearchAgentMcpEntry && CONFIG.researchAgentMcpApiKey) {
-      const researchAgentMcpServer = await prisma.mcpServer.findUnique({
-        where: { type: "research-agent-mcp" },
-      });
-      if (researchAgentMcpServer) {
-        entries.push({
-          type: "global",
-          serverType: "research-agent-mcp",
-          serverName: researchAgentMcpServer.name,
-          enforcementType: "virtual",
-        });
-        log.info(`[mcp/tools] added virtual research-agent-mcp entry for userId=${userId}`);
-      }
-    }
-    // Virtual Heisenberg entry: the internal pipeline service has no user
-    // credentials. Its reviewed static adapter uses the deployment-wide
-    // HEISENBERG_BASE_URL (with a code default), so every agent can select it
-    // without creating a user_mcp_connections row.
-    const hasHeisenbergEntry = entries.some((e) => e.serverType === "heisenberg");
-    if (!hasHeisenbergEntry) {
-      const heisenbergServer = await prisma.mcpServer.findUnique({ where: { type: "heisenberg" } });
-      if (heisenbergServer?.enabled) {
-        entries.push({ type: "global", serverType: "heisenberg", serverName: heisenbergServer.name, enforcementType: "virtual" });
-        log.info(`[mcp/tools] added virtual heisenberg entry for userId=${userId}`);
-      }
-    }
-
-    // Slack-surface runs do not require a separately configured MCP
-    // connection. The verified workspace install supplies credentials.
-    const hasSlackEntry = entries.some((entry) => entry.serverType === "slack");
-    if (!hasSlackEntry) {
-      // runCtx fetched once above (automation app-mode block).
-      if (runCtx?.slackDelivery?.surfaceAgentId && runCtx.slackDelivery.teamId) {
-        const slackServer = await prisma.mcpServer.findUnique({ where: { type: "slack" } });
-        if (slackServer) {
-          entries.push({ type: "user", serverType: "slack", serverName: slackServer.name, enforcementType: "virtual" });
-          log.info(`[mcp/tools] added virtual slack entry (surface bot token) for userId=${userId}`);
-        }
-      }
-    }
-
-    // Messaging-channel runs get their channel's action tools (send, react,
-    // list groups) as a virtual server; execution is local (agent-tools.ts).
-    if (runCtx?.channelDelivery && !entries.some((entry) => entry.serverType === runCtx.channelDelivery?.channel)) {
-      const channel = runCtx.channelDelivery.channel;
-      entries.push({ type: "user", serverType: channel, serverName: getChannel(channel)?.displayName ?? channel, enforcementType: "virtual" });
-      log.info(`[mcp/tools] added virtual ${channel} entry (channel account) for userId=${userId}`);
-    }
-
-    log.info(`[mcp/tools] final entries=${entries.map((e) => `${e.serverType}:${e.type}`).join(",")}`);
 
     // Servers whose ONLY credentials live on one of the agent's custom
     // subagents. Without this the group never reaches the run, the subagent
@@ -1174,8 +1312,17 @@ router.get("/:sessionId/mcp/tools", async (req: Request<{ sessionId: string }>, 
       }
     }
 
+    const prefilterSkips = await serverTypesAgentCannotUse(entries, userId, strictAgentToolsConfig, sessionAgentTools);
+    const listingEntries = entries.filter((entry) => !prefilterSkips.has(entry.serverType));
+    if (prefilterSkips.size > 0) {
+      log.info(
+        `[mcp/tools] prefilter agent=${sessionAgentTools?.slug ?? "-"} ` +
+        `entries=${entries.length} skip=${prefilterSkips.size} [${[...prefilterSkips].join(",")}]`,
+      );
+    }
+
     const results = await Promise.allSettled(
-      entries.map(async (entry) => {
+      listingEntries.map(async (entry) => {
         if (!(await hasConnectorDefinition(entry.serverType))) return null;
         const effective = entry.serverType === "slack"
           ? await loadEffectiveCredentialsWithSpacesFallback(
@@ -1445,7 +1592,36 @@ router.get("/:sessionId/mcp/tools", async (req: Request<{ sessionId: string }>, 
       );
     }
 
-    res.json({ success: true, data });
+    // Servers the agent's selection grants that never reached `data`: no
+    // credential path for this user, or a listing that failed. Dropping them
+    // silently left the agent unaware that its config promised those tools, so
+    // it could not offer the one fix — the user connecting the server.
+    let unresolvedConfigured: UnresolvedConfiguredServer[] = [];
+    if (sessionAgentTools?.hasStoredSelection && sessionAgentTools.toolsConfig) {
+      try {
+        unresolvedConfigured = await findUnresolvedConfiguredServers({
+          userId,
+          config: sessionAgentTools.toolsConfig,
+          resolvedServerTypes: new Set(data.map((server) => server.serverType)),
+          credentialedServerTypes: new Set([
+            ...entries.map((entry) => entry.serverType),
+            ...subagentListingEntries.map((entry) => entry.serverType),
+          ]),
+        });
+      } catch (err) {
+        log.warn(`[mcp/tools] unresolved-configured lookup failed (non-fatal) agent=${sessionAgentTools.slug}:`, err);
+      }
+      if (unresolvedConfigured.length > 0) {
+        log.info(
+          `[mcp/tools] configured-but-unresolved agent=${sessionAgentTools.slug} ` +
+          unresolvedConfigured.map((u) => `${u.serverType}:${u.reason}`).join(","),
+        );
+      }
+    }
+
+    // `unresolvedConfigured` rides beside `data`, not inside it: older claw
+    // builds read only `data` and keep working unchanged.
+    res.json({ success: true, data, ...(unresolvedConfigured.length > 0 ? { unresolvedConfigured } : {}) });
   } catch (err) {
     log.error("[mcp/tools] error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });
@@ -1461,7 +1637,7 @@ router.post("/:sessionId/mcp/call", async (req: Request<{ sessionId: string }>, 
     const sessionAgentOrgId = await resolveSessionAgentOrgId(userId, spacesAppId);
     const sessionAgentTools = await loadSessionAgentToolsContext(agentSlug, spacesAppId, sessionAgentOrgId);
     const strictAgentToolsConfig = isStrictAgentToolsEnabled()
-      ? await withSurfaceDefaultToolsConfig(sessionAgentTools?.toolsConfig, req.params.sessionId, spacesAppId)
+      ? await withSurfaceDefaultToolsConfig(sessionAgentTools?.toolsConfig, req.params.sessionId, spacesAppId, userId)
       : undefined;
     const { serverType, tool, params, permission, backendId, subagentId } = req.body as {
       serverType?: string;
@@ -1611,6 +1787,28 @@ router.post("/:sessionId/mcp/call", async (req: Request<{ sessionId: string }>, 
       !subagentReferencingTool(sessionAgentTools?.subagentToolRefs ?? [], { name: tool })
     ) {
       res.status(403).json({ success: false, error: "MCP tool is not enabled for this agent" });
+      return;
+    }
+
+    // WhatsApp notify — virtual server. The recipient is the session's own
+    // user, never a parameter, and the grant is re-checked here because the
+    // listing is not the authority.
+    if (serverType === NOTIFY_SERVER_TYPE) {
+      const { getSession } = await import("./webhook.js");
+      const notifyCtx = await getSession(req.params.sessionId).catch(() => null);
+      if (tool !== NOTIFY_TOOL_NAME || !(await canNotifyOnWhatsApp(userId, notifyCtx))) {
+        res.status(403).json({ success: false, error: "WhatsApp notifications are not available for this run" });
+        return;
+      }
+      const text = typeof (params as Record<string, unknown> | undefined)?.["text"] === "string"
+        ? ((params as Record<string, unknown>)["text"] as string).trim()
+        : "";
+      if (!text) {
+        res.json({ success: true, data: { content: JSON.stringify({ ok: false, error: "text is required" }) } });
+        return;
+      }
+      const sent = await notifyUser({ userId, orgId: notifyCtx?.agentOrgId ?? null, text });
+      res.json({ success: true, data: { content: JSON.stringify(sent) } });
       return;
     }
 
@@ -1879,7 +2077,9 @@ router.post("/:sessionId/mcp/call", async (req: Request<{ sessionId: string }>, 
 
     // Write tools always require approval — cannot be overridden by agent config
     const definition = await resolveConnectorDefinition(serverType);
-    const isWriteTool = definition?.writeTools?.includes(tool) ?? false;
+    const isWriteTool = definition?.writePolicy
+      ? isWriteToolUnderPolicy(definition.writePolicy, tool)
+      : (definition?.writeTools?.includes(tool) ?? false);
     const effectivePermission = isWriteTool ? "ask" : (permission ?? "allow");
 
     log.info(
@@ -1919,7 +2119,13 @@ router.post("/:sessionId/mcp/call", async (req: Request<{ sessionId: string }>, 
         res.json({ success: true, data: { content: `Cannot ${tool}: ${validationError}` } });
         return;
       }
-      const action = { serverType, tool, params: effectiveParams, userId };
+      const action = writeActionPayload({
+        serverType,
+        tool,
+        params: effectiveParams,
+        userId,
+        subagentId: effective.viaSubagent,
+      });
       const signature = signAction(action);
       res.json({
         success: true,
@@ -2162,7 +2368,7 @@ router.post("/:sessionId/mcp/call", async (req: Request<{ sessionId: string }>, 
     const upstreamResult =
       serverType === "bitbucket"
         ? await callBitbucketThrottled(userId, credentials, tool, effectiveParams, agentSlug)
-        : await callTool(userId, serverType, credentials, tool, effectiveParams, agentSlug);
+        : await callTool(userId, serverType, credentials, tool, effectiveParams, agentSlug, undefined, effective.instance);
     let result = upstreamResult;
 
     // Upstream mcp-grafana query tools (query_elasticsearch, …) run through
@@ -2275,9 +2481,11 @@ router.post("/:sessionId/actions/sign", async (req: Request<{ sessionId: string 
     let serverType: string | undefined;
     let tool: string | undefined;
     let actionParams: Record<string, unknown>;
-    // Preserve the subagent-pinned credential identity across the write-approval
-    // replay: use whichever shape carried it (undefined = normal cascade).
-    const subagentId = body.subagentId ?? body.pendingAction?.subagentId;
+    // The subagent whose credential the action runs under (undefined = normal
+    // cascade). A re-sign keeps the one the pending action was signed with; a
+    // fresh signature binds whatever the resolver reports below.
+    let subagentId = body.subagentId;
+    let signedSubagentId: string | undefined;
 
     if (body.pendingAction && typeof body.pendingAction === "object") {
       // Re-sign shape: verify the existing signature before re-issuing.
@@ -2293,11 +2501,19 @@ router.post("/:sessionId/actions/sign", async (req: Request<{ sessionId: string 
         return;
       }
       actionParams = params ?? {};
-      const action = { serverType: st, tool: t, params: actionParams, userId: pendingUserId };
+      const action = writeActionPayload({
+        serverType: st,
+        tool: t,
+        params: actionParams,
+        userId: pendingUserId,
+        subagentId: body.pendingAction.subagentId,
+      });
       if (!verifyActionSignature(action, signature)) {
         res.status(400).json({ success: false, error: "Invalid pendingAction signature" });
         return;
       }
+      subagentId = action.subagentId;
+      signedSubagentId = action.subagentId;
       serverType = st;
       tool = t;
     } else if (typeof body.serverType === "string" && typeof body.tool === "string") {
@@ -2391,6 +2607,11 @@ router.post("/:sessionId/actions/sign", async (req: Request<{ sessionId: string 
       );
       if (customWriteTool) {
         // Registry match is the validation; fall through to signing.
+        if (tool === "create-skill") {
+          // Signed with the action, so the approval links the skill to the hub it was proposed in.
+          const sdlcChannelId = await sdlcRunChannelId(req.params.sessionId);
+          if (sdlcChannelId) actionParams = { ...actionParams, sdlcChannelId };
+        }
       } else {
         // Revalidate non-gateway actions before issuing a signature.
         if (!(await hasConnectorDefinition(serverType))) {
@@ -2418,6 +2639,7 @@ router.post("/:sessionId/actions/sign", async (req: Request<{ sessionId: string 
         res.status(404).json({ success: false, error: `No connection found for user and server type: ${serverType}` });
         return;
       }
+      if (!body.pendingAction) signedSubagentId = effective?.viaSubagent;
 
         const validationError = await validateWriteAction(serverType, tool, actionParams, {
           ...credentials,
@@ -2430,7 +2652,7 @@ router.post("/:sessionId/actions/sign", async (req: Request<{ sessionId: string 
       }
     }
 
-    const signedAction = { serverType, tool, params: actionParams, userId };
+    const signedAction = writeActionPayload({ serverType, tool, params: actionParams, userId, subagentId: signedSubagentId });
     const signedSignature = signAction(signedAction);
 
     log.info(`[actions/sign] Signed write action: user=${userId} server=${serverType} tool=${tool}`);
@@ -2471,8 +2693,78 @@ router.get("/:sessionId/mcp/tools/search", async (req: Request<{ sessionId: stri
       limit,
     };
 
-    const matches = query ? await searchTools(query, opts) : await listTools(opts);
-    res.json({ success: true, data: { mode: query ? "search" : "list", matches } });
+    // Degrades to keyword ranking when the memory backend is down, rather than
+    // 500ing — the agent would read that as "the catalog is unreachable".
+    const searched = query ? await searchToolsWithFallback(query, opts) : null;
+    const matches = searched ? searched.matches : await listTools(opts);
+
+    // Connection state per connector, for THIS session: "connected" means the
+    // user/agent has a credential path (the same entries /mcp/tools resolves
+    // from), "not_connected" means the user would have to connect it first.
+    // Tools of connectors this user cannot see (or that are disabled) are
+    // dropped — search must not advertise what the Connect card cannot offer.
+    const agentSlug = req.session?.agentSlug;
+    const spacesAppId = req.session?.spacesAppId;
+    const sessionAgentTools = await loadSessionAgentToolsContext(agentSlug, spacesAppId, orgId);
+    const { entries } = await buildMcpResolutionEntries({
+      userId,
+      sessionId: req.params.sessionId,
+      agentSlug,
+      spacesAppId,
+      sessionAgentTools,
+    });
+    const connectedTypes = new Set(entries.map((entry) => entry.serverType));
+    const connectors = await visibleConnectors(userId);
+    const connectorByType = new Map(connectors.map((c) => [c.type, c]));
+    const connectionOf = (type: string): "connected" | "not_connected" =>
+      connectedTypes.has(type) ? "connected" : "not_connected";
+
+    type AnnotatedMatch = (typeof matches)[number] & {
+      connection: "builtin" | "connected" | "not_connected";
+      connector?: { type: string; name: string };
+    };
+    const annotated = matches.flatMap((match): AnnotatedMatch[] => {
+      if (!match.source.startsWith("mcp:")) return [{ ...match, connection: "builtin" }];
+      const type = match.source.slice("mcp:".length);
+      const connector = connectorByType.get(type);
+      if (!connector) return [];
+      return [{ ...match, connector: { type, name: connector.name }, connection: connectionOf(type) }];
+    });
+
+    // A connector nobody has connected yet has no rows in the tool index (rows
+    // are written from a live tool listing), so tool search can never surface
+    // it. Match those connectors themselves on name/description instead.
+    const indexedSources = await prisma.tool.findMany({
+      where: { source: { startsWith: "mcp:" } },
+      distinct: ["source"],
+      select: { source: true },
+    });
+    const indexedTypes = new Set(indexedSources.map((row) => row.source.slice("mcp:".length)));
+    // Generic words ("integration", "list", "tools") appear in most connector
+    // descriptions, so a connector must match on its own name/type, or on at
+    // least two distinct description words.
+    const words = keywordQueryWords(query);
+    const unindexedConnectors = connectors
+      .filter((c) => !indexedTypes.has(c.type))
+      .filter((c) => (integrations.length ? integrations.includes(c.type) : true))
+      .filter((c) => {
+        if (!query) return true;
+        const head = `${c.type} ${c.name}`.toLowerCase();
+        const body = c.description.toLowerCase();
+        return words.some((w) => head.includes(w)) || words.filter((w) => body.includes(w)).length >= 2;
+      })
+      .slice(0, limit)
+      .map((c) => ({ type: c.type, name: c.name, description: c.description, connection: connectionOf(c.type) }));
+
+    res.json({
+      success: true,
+      data: {
+        mode: query ? "search" : "list",
+        ...(searched ? { ranking: searched.ranking } : {}),
+        matches: annotated,
+        connectors: unindexedConnectors,
+      },
+    });
   } catch (err) {
     log.error("[tools/search] error:", err);
     res.status(500).json({ success: false, error: "Internal server error" });

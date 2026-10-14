@@ -17,7 +17,9 @@ export class AuditResolution {
   private readonly roleNameById = new Map<string, string>();
   private readonly formNameById = new Map<string, string>();
   private readonly globalFieldNameById = new Map<string, string>();
+  private readonly userGroupNameById = new Map<string, string>();
   private readonly boardIdsByFormId = new Map<string, string[]>();
+  private readonly isDeskByChannelId = new Map<string, boolean>();
 
   constructor(private readonly lookup: AuditLookup) {}
 
@@ -181,6 +183,21 @@ export class AuditResolution {
     return this.globalFieldNameById.get(globalFieldId) ?? globalFieldId;
   }
 
+  async warmUserGroups(ids: Iterable<string>): Promise<void> {
+    const missing = [...new Set(ids)].filter(id => !this.userGroupNameById.has(id));
+    if (missing.length === 0) return;
+    const userGroups = await this.lookup.userGroupsByIds(missing);
+    for (const id of missing) {
+      const userGroup = userGroups.find(candidate => candidate.id === id);
+      this.userGroupNameById.set(id, userGroup?.name ?? id);
+    }
+  }
+
+  userGroupName(userGroupId: string | null | undefined): string {
+    if (!userGroupId) return '';
+    return this.userGroupNameById.get(userGroupId) ?? userGroupId;
+  }
+
   async warmFormBoards(formIds: Iterable<string>): Promise<void> {
     const missing = [...new Set(formIds)].filter(id => !this.boardIdsByFormId.has(id));
     if (missing.length === 0) return;
@@ -189,6 +206,15 @@ export class AuditResolution {
       const binding = bindings.find(candidate => candidate.formId === id);
       this.boardIdsByFormId.set(id, binding?.boardIds ?? []);
     }
+  }
+
+  async isDeskChannel(channelId: string): Promise<boolean> {
+    if (!channelId) return false;
+    const cached = this.isDeskByChannelId.get(channelId);
+    if (cached !== undefined) return cached;
+    const isDesk = (await this.lookup.deskChannelIds([channelId])).includes(channelId);
+    this.isDeskByChannelId.set(channelId, isDesk);
+    return isDesk;
   }
 
   boardIdsForForm(formId: string): string[] {

@@ -1,8 +1,8 @@
 import { logger, Event as LogEvent } from '../../../utils/logger';
 import React, { ReactElement, useEffect, useMemo, useState, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Command } from 'cmdk';
-import { CalendarDays, LayoutGrid, SignalHigh, X, ChevronDown } from 'lucide-react';
+import { CalendarDays, LayoutGrid, MessageSquare, SignalHigh, X, ChevronDown } from 'lucide-react';
 import {
   ChatDefault,
   UserTwo,
@@ -79,7 +79,7 @@ import {
   openSearchResult,
 } from '../../../utils/searchNavigation';
 import { isElectronApp } from '../../../utils/electronApp';
-import { useAllChannels } from '../../../hooks/useChannels';
+import { useAllChannels, useChannelByName } from '../../../hooks/useChannels';
 import { useAffinityCallback } from '../../../hooks/useAffinityCallback';
 import { useDeskContacts } from '../../../hooks/useDeskContacts';
 import { useDeskPeople, ALL_DESK } from '../../../hooks/useDeskPeople';
@@ -99,6 +99,7 @@ import { CallConfirmationModal } from '../../Call/CallConfirmationModal';
 import { ActionModal } from '../../Call/ActionModal';
 import { cn } from '../../../utils/classNames';
 import SearchResultItem from './SearchResultItem';
+import SearchSectionSkeleton from './SearchSectionSkeleton';
 import { getUserDisplayName, isUserDeactivated } from '../../../utils/userDisplayName';
 import { LexicalSearchInput, type InitialQueryData } from './LexicalSearchInput';
 import { StatusIndicator } from '../../ui/StatusIndicator';
@@ -138,6 +139,7 @@ import { resolveDateKeyword } from '../../../search/filterModel';
 import { hasExactSearchQuotes } from '../../../utils/exactSearch';
 import { apiInstance } from '../../../services/clients/apiClient';
 import { MergeTicketsDialog } from '../../Tickets/MergeTicketsDialog/MergeTicketsDialog';
+import { CmdkFeedbackView, useCanPostSearchFeedback } from '../SearchFeedback';
 import { toast } from 'sonner';
 import Button from '../../ui/Button';
 import { AiAnswerCard } from './AiAnswerCard';
@@ -364,6 +366,17 @@ const MENTION_GROUPS = [
 
 type MentionGroupKey = (typeof MENTION_GROUPS)[number]['key'];
 
+/**
+ * Label for a selected filter chip, as shown in the palette: `from: alice`, `#general`,
+ * `@alice`. Same output as `buildChipText`, which can't be reused here because it expects
+ * the fuller `ChipData` type.
+ */
+const chipSummaryLabel = (mention: { type: ChipType; prefix?: string; name?: string }): string => {
+  const name = mention.name ?? '';
+  if (mention.prefix) return `${mention.prefix} ${name}`.trim();
+  return `${mention.type === ChipType.USER ? '@' : '#'}${name}`;
+};
+
 /** Rows shown per section before "Show more", and the ceiling once expanded. */
 const MENTION_GROUP_PAGE = 5;
 const MENTION_GROUP_MAX = 20;
@@ -548,7 +561,25 @@ function AtMentionRow({
   );
 }
 
-const ChannelCommandMenu = ({
+/** Owned by the always-mounted {@link ChannelCommandMenu} wrapper and handed to the palette. */
+interface ChannelCommandMenuShellState {
+  seedCommandMode: boolean;
+  setSeedCommandMode: (seed: boolean) => void;
+  restoredQuery: InitialQueryData | null;
+  setRestoredQuery: (query: InitialQueryData | null) => void;
+  restoredToggles: SearchScopeToggles | null;
+  markNavigating: () => void;
+  setPayload: (payload: PalettePayload) => void;
+  shortcutRequest: ShortcutRequest | null;
+}
+
+/** A shortcut press that opened the palette; `nonce` makes each press distinct. */
+interface ShortcutRequest {
+  nonce: number;
+  startSession: boolean;
+}
+
+const ChannelCommandMenuContent = ({
   channels,
   starred,
   directMessages,
@@ -564,7 +595,6 @@ const ChannelCommandMenu = ({
   initialMention,
   initialQuery,
   initialToggles,
-  restoreFromLastSearch,
   enabledTabs,
   aiOverview = false,
   inline = false,
@@ -573,9 +603,32 @@ const ChannelCommandMenu = ({
   initialTab,
   hideTabs = false,
   deskMergeEnabled = false,
-}: ChannelCommandMenuProps): ReactElement | null => {
+  ticketView = null,
+  onRemoveTicketView,
+  seedCommandMode,
+  setSeedCommandMode,
+  restoredQuery,
+  setRestoredQuery,
+  restoredToggles,
+  markNavigating,
+  setPayload,
+  shortcutRequest,
+}: ChannelCommandMenuProps & ChannelCommandMenuShellState): ReactElement | null => {
   const navigate = useNavigate();
   const channelData = useAllChannels();
+  // Anchor for the profile-view fallback in navigateToUser: clicking a
+  // deactivated user with no prior DM otherwise lands nowhere (backend 404s the
+  // createDm). The profile route is nested under a channel, so we anchor it on
+  // whichever channel the user was already viewing — falling back to #general —
+  // so the profile opens in place instead of yanking them into another channel.
+  const location = useLocation();
+  const currentChannelIdFromRoute = useMemo(() => {
+    const match = location.pathname.match(/\/chat\/dir\/([^/?#]+)/);
+    return match?.[1] ?? null;
+  }, [location.pathname]);
+  const generalChannelForProfileFallback = useChannelByName('general');
+  const profileFallbackAnchorChannelId =
+    currentChannelIdFromRoute ?? generalChannelForProfileFallback?.id ?? null;
   const { workspaceId } = useAuthContextValues(); // Per-user, per-workspace key for recents
   const commandRef = useRef<HTMLDivElement | null>(null);
   // MutationObserver (owned by attachCommandRef) that recomputes the ⌥↵ hint when cmdk adds/removes rows.
@@ -610,6 +663,11 @@ const ChannelCommandMenu = ({
 
   const { searchMode } = useSearchMode();
 
+  // Opened from a ticket screen: tickets only, so nothing that reaches beyond them (the AI
+  // answer, the jump to the all-types results page, the ALL tab) is offered.
+  const isInTicketView = ticketView !== null;
+  const ticketViewName = ticketView?.viewName ?? null;
+
   // The top-bar palette (screen mode, tabs hidden) always routes to the results page;
   // the default cmd+K popup renders results inline. Both show the "Show results for"
   // row, but only the screen palette lets it own the default Enter target.
@@ -626,25 +684,8 @@ const ChannelCommandMenu = ({
     if (open) navigatingToResultsRef.current = false;
   }, [open]);
 
-  // When opened via the `mod+/` shortcut, seed the search box with `/` so it lands in command mode.
-  // The popup path flips this on in the shortcut handler; the screen overlay is mounted fresh with a
-  // `/` initialQuery, so seed from that here to render the palette on frame 1 (no normal-search flash).
-  const [seedCommandMode, setSeedCommandMode] = useState(
-    () => initialQuery?.text === '/' && initialQuery?.mentions.length === 0,
-  );
-  // A query to re-seed the palette with: its text + chips are replayed into the Lexical editor
-  // through the initial-query seed pipeline. Set when back-navigation restores the search the palette
-  // sent to the results page, and when replaying a recent; null when nothing is being restored.
-  const [restoredQuery, setRestoredQuery] = useState<InitialQueryData | null>(null);
   // Which of on:/after:/before: opened the date list — it decides what a pick means.
   const [dateTrigger, setDateTrigger] = useState<'on:' | 'after:' | 'before:'>('on:');
-  // Held in a ref so `onRestore` (registered once) always calls the current closure.
-  const restoreFromLastSearchRef = useRef(restoreFromLastSearch);
-  restoreFromLastSearchRef.current = restoreFromLastSearch;
-
-  // Toggles restored from the history entry; `initialToggles` (URL-derived) is the
-  // fallback for opens that aren't a back-navigation.
-  const [restoredToggles, setRestoredToggles] = useState<SearchScopeToggles | null>(null);
 
   // While seeding, feed the editor a `/` through the existing initial-query path; a restored
   // search goes down the same path. Otherwise pass the caller's query straight through.
@@ -654,34 +695,6 @@ const ChannelCommandMenu = ({
       seedCommandMode ? { mentions: [], text: '/' } : restoredQuery ? restoredQuery : initialQuery,
     [seedCommandMode, restoredQuery, initialQuery],
   );
-
-  // Cmd+K joins the URL history stack: opening pushes an entry, so the top-bar back arrow
-  // (and the browser back gesture) closes the palette instead of leaving the page. When a
-  // row sends the user to the results page, that entry keeps the search — so back from the
-  // results page reopens the palette with it rather than landing on a bare page.
-  const { markNavigating, setPayload } = useHistoryBackedOverlay<PalettePayload>({
-    open,
-    onClose: () => onOpenChange(false),
-    onRestore: restored => {
-      // Back restores the search as it was launched from here, not as the results page
-      // left it. Parked state is still dropped so it can't leak into a later restore.
-      if (restoreFromLastSearchRef.current?.()) clearLastSearchState();
-      const source = restored ?? null;
-      setRestoredQuery(source ? { text: source.text, mentions: source.mentions } : null);
-      setRestoredToggles(source?.toggles ?? null);
-      onOpenChange(true);
-    },
-    id: 'command-menu',
-    enabled: !inline && !contextSelectionMode,
-  });
-
-  // A restore only seeds the open it triggered — the next plain cmd+K starts empty.
-  useEffect(() => {
-    if (!open) {
-      setRestoredQuery(null);
-      setRestoredToggles(null);
-    }
-  }, [open]);
 
   // Apply the restored scope on open. The hook's defaults only cover a fresh mount, and the
   // palette stays mounted across open/close, so a restore has to push the toggles in.
@@ -693,34 +706,6 @@ const ChannelCommandMenu = ({
     // Runs once per open: re-running on every toggle change would fight the user.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-
-  useShortcutById(
-    'global.search',
-    () => {
-      // Cmd+K opens this palette in both search modes. Screen-mode behavior (2-item previews +
-      // "See more" that routes to `/search-results`) comes from the `searchMode === 'screen'`
-      // checks below.
-      onOpenChange(!open);
-      if (!open && !searchSessionId) {
-        onOpen('keyboard_shortcut');
-      }
-    },
-    { enabled: !contextSelectionMode },
-  );
-
-  // `mod+/` opens the menu straight into command mode (seeds `/` for slash-command discovery)
-  // in both search modes.
-  useShortcutById(
-    'global.openCommandMode',
-    () => {
-      onOpenChange(true);
-      if (!open && !searchSessionId) {
-        onOpen('keyboard_shortcut');
-      }
-      setSeedCommandMode(true);
-    },
-    { enabled: !contextSelectionMode },
-  );
 
   useShortcutById(
     'command.close',
@@ -838,6 +823,7 @@ const ChannelCommandMenu = ({
   const {
     searchResults: backendResults,
     isSearching: isLoading,
+    isSearchPending,
     searchError: error,
     paginationState,
     isLoadingMore,
@@ -872,6 +858,8 @@ const ChannelCommandMenu = ({
     onManualKeystroke,
     markRecentReplay,
   } = useSearchMetrics({
+    // Context-selection pickers reuse this menu but aren't Cmd+K, so they send no surface.
+    ...(!contextSelectionMode && { surface: 'cmdk' as const }),
     allChannels,
     mentionSearchType,
     // Default "my channels" ON everywhere (restrict to the user's channels by default),
@@ -880,13 +868,27 @@ const ChannelCommandMenu = ({
     defaultIncludeBotMessages: initialToggles?.includeBotMessages ?? false,
     // Classifying costs a request per settled query, so only surfaces that can show the
     // overview ask for it (the backend gates the feature itself on cmdk_ai_intent_config.enabled).
-    classifyIntent: aiOverview,
+    classifyIntent: aiOverview && !isInTicketView,
     // cmd+k hides archived tickets on its Desk and Tickets tabs (the hook gates this by
     // active tab). There is no toggle here to opt back in.
     defaultExcludeArchived: true,
     buildMentionHighlights,
     searchLocalOnlyOnShownTabs: true,
+    ticketView,
   });
+
+  // In a ticket view, the skeleton fills the list while a search runs and nothing is listed yet.
+  const showTicketViewSkeleton =
+    isInTicketView && (isLoading || isSearchPending) && backendResults.length === 0;
+
+  // The wrapper registers the global shortcuts (they have to work before the palette has
+  // ever mounted) and hands each press over here, where the search session lives.
+  const handledShortcutRef = useRef(0);
+  useEffect(() => {
+    if (!shortcutRequest || shortcutRequest.nonce === handledShortcutRef.current) return;
+    handledShortcutRef.current = shortcutRequest.nonce;
+    if (shortcutRequest.startSession && !searchSessionId) onOpen('keyboard_shortcut');
+  }, [shortcutRequest, searchSessionId, onOpen]);
 
   // Aliases to match old usage if needed or just use new names
   const search = cleanedSearchText;
@@ -1284,7 +1286,7 @@ const ChannelCommandMenu = ({
     if (seedCommandMode && commandText.startsWith('/')) {
       setSeedCommandMode(false);
     }
-  }, [seedCommandMode, commandText]);
+  }, [seedCommandMode, commandText, setSeedCommandMode]);
 
   const syncEnterIntent = useCallback((): void => {
     const container = commandRef.current;
@@ -1429,8 +1431,18 @@ const ChannelCommandMenu = ({
       // Scope travels with the search: without it, back-navigation would restore the query
       // but silently re-run it at the default scope.
       toggles: { onlyMyChannels, includeBotMessages },
+      // The view too, or coming back would restore the query outside it.
+      ...(ticketView ? { ticketView } : {}),
     });
-  }, [open, searchText, selectedMentions, onlyMyChannels, includeBotMessages, setPayload]);
+  }, [
+    open,
+    searchText,
+    selectedMentions,
+    onlyMyChannels,
+    includeBotMessages,
+    ticketView,
+    setPayload,
+  ]);
 
   // Leave the palette for the full-screen results page via the "Show results for" row.
   // Logged as its own event so the jump-out rate is readable per palette and trigger.
@@ -1511,6 +1523,11 @@ const ChannelCommandMenu = ({
     Map<string, DisplaySearchResult>
   >(new Map());
   const [showMergeDialog, setShowMergeDialog] = useState(false);
+
+  // Whether the search feedback view is showing in place of the results.
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  // Feedback is about search results, so it's hidden in the context-picker and desk-merge modes.
+  const canPostFeedback = useCanPostSearchFeedback() && !contextSelectionMode && !deskMergeMode;
 
   // Only the real search palette keeps history — not the context picker or desk-merge mode.
   const recentSearchesEnabled = !contextSelectionMode && !deskMergeMode;
@@ -1666,7 +1683,10 @@ const ChannelCommandMenu = ({
           relevanceScore: 1,
           metadata: {},
         };
-        await navigateToUser(result, navigate, channelData || []);
+        await navigateToUser(result, navigate, channelData || [], {
+          callerUserId: currentUserID,
+          ...(profileFallbackAnchorChannelId && { profileFallbackAnchorChannelId }),
+        });
         return;
       }
 
@@ -2461,6 +2481,7 @@ const ChannelCommandMenu = ({
       setDeskMergeMode(false);
       setSelectedMergeTickets(new Map());
       setShowMergeDialog(false);
+      setFeedbackOpen(false);
 
       // Reset the previous search text refs
       prevSearchTextRef.current = '';
@@ -2476,7 +2497,16 @@ const ChannelCommandMenu = ({
       // Inline mode (screen-mode popup): start a search session so performSearch fires
       onOpen('click');
     }
-  }, [open, searchSessionId, onClose, onOpen, resetSearchState, inline, initialTab]);
+  }, [
+    open,
+    searchSessionId,
+    onClose,
+    onOpen,
+    resetSearchState,
+    inline,
+    initialTab,
+    setSeedCommandMode,
+  ]);
 
   const toggleCategoryExpansion = (category: ExpandableCategory): void => {
     setExpandedCategories(prev => {
@@ -2532,6 +2562,7 @@ const ChannelCommandMenu = ({
         { modifier: true, isElectron: isElectronApp(), isMobile },
         navigate,
         channelData || [],
+        { callerUserId: currentUserID },
       );
       onOpenChange(false);
       return;
@@ -2572,9 +2603,16 @@ const ChannelCommandMenu = ({
           { modifier: true, isElectron: isElectronApp(), isMobile },
           navigate,
           channelData || [],
+          {
+            callerUserId: currentUserID,
+            ...(profileFallbackAnchorChannelId && { profileFallbackAnchorChannelId }),
+          },
         );
       } else {
-        await navigateToSearchResult(result, navigate, channelData || []);
+        await navigateToSearchResult(result, navigate, channelData || [], {
+          callerUserId: currentUserID,
+          ...(profileFallbackAnchorChannelId && { profileFallbackAnchorChannelId }),
+        });
       }
       onOpenChange(false);
     } catch (err) {
@@ -2770,6 +2808,14 @@ const ChannelCommandMenu = ({
 
   const resolveTabLabel = (tab: TabType): string =>
     allTabDefinitions.find(t => t.id === tab)?.label ?? '';
+
+  // Filters sent with feedback: selected tab, filter chips, and active toggles (@Ch, Bot, "ab").
+  // The "All" tab has no label, so it's dropped.
+  const feedbackFilters = [
+    resolveTabLabel(activeTab),
+    ...selectedMentions.map(chipSummaryLabel),
+    ...SEARCH_MODE_TOGGLES.filter(toggle => toggle.isOn).map(toggle => toggle.label),
+  ].filter(Boolean);
 
   // Tabs the active filters could fill — `in:#general` scopes to content within a channel,
   // so People and Channels can only come back empty. Not named `enabledTabs`: that's a prop,
@@ -3103,8 +3149,11 @@ const ChannelCommandMenu = ({
               // moves activeTab off All, and those searches still need the way out.
               // Every section here is a capped slice, so there is more to see even when
               // nothing was truncated locally. Screen mode keeps its narrower rule: it
-              // only offers the link when it actually cut items off.
-              const showSeeMore = !!sectionTab && (!isScreenAll || hiddenCount > 0);
+              // only offers the link when it actually cut items off. A ticket-screen search
+              // never offers it: the results page would drop the view's filters, and the
+              // list already pages in place.
+              const showSeeMore =
+                !!sectionTab && !isInTicketView && (!isScreenAll || hiddenCount > 0);
 
               return (
                 <div key={groupKey} className='mb-4'>
@@ -3853,6 +3902,9 @@ const ChannelCommandMenu = ({
     // handler); the palette must stay inert underneath.
     if (actionsMenuTarget) return;
 
+    // Same while the feedback view is open, so typing in it doesn't move through the hidden results.
+    if (feedbackOpen) return;
+
     // ── Slash-command mode: picker / `/` discovery ───────────────────────
     // Escape is intentionally NOT handled here — it falls through so the menu
     // closes like everywhere else (Radix dismiss), rather than a hidden
@@ -3918,7 +3970,7 @@ const ChannelCommandMenu = ({
       const next = e.shiftKey ? idx - 1 : idx + 1;
 
       if (next < 0 || next >= tabs.length) {
-        if (inline) {
+        if (inline || isInTicketView) {
           const wrappedIdx = ((next % tabs.length) + tabs.length) % tabs.length;
           setActiveTab(tabs[wrappedIdx]!.id);
           onTabChange?.(tabs[wrappedIdx]!.id);
@@ -4214,6 +4266,7 @@ const ChannelCommandMenu = ({
   const showResultsForRow =
     !inline &&
     !contextSelectionMode &&
+    !isInTicketView &&
     !mentionSearchType &&
     (searchText.trim() || selectedMentions.length > 0) ? (
       <div className='mb-4'>
@@ -4248,12 +4301,24 @@ const ChannelCommandMenu = ({
       </div>
     ) : null;
 
+  // Leave the feedback view and put focus back in the search box, so typing and arrow keys
+  // work straight away. Next frame, same as the Actions menu: the editor is still hidden
+  // when this runs.
+  const closeFeedback = (): void => {
+    setFeedbackOpen(false);
+    requestAnimationFrame(() => {
+      (
+        commandRef.current?.querySelector('[contenteditable="true"]') as HTMLElement | null
+      )?.focus();
+    });
+  };
+
   const commandBody = (
     <>
       {/* Search Input — hidden (but kept mounted) during `/chat` compose so its
           `/chat <query>` text survives for the "back" button. Stays visible during the
           `/call` channel-confirm so the modal overlays the picker. */}
-      <div className={cn('flex items-center shrink-0', isComposing && 'hidden')}>
+      <div className={cn('flex items-center shrink-0', (isComposing || feedbackOpen) && 'hidden')}>
         <div className='relative flex-1 flex items-center gap-2 p-3'>
           <button
             onClick={() => onOpenChange(false)}
@@ -4269,9 +4334,11 @@ const ChannelCommandMenu = ({
             placeholder={
               openTargetLabel
                 ? `${openTargetLabel} – Open`
-                : hideTabs || activeTab === TabType.ALL
-                  ? 'Type / for quick commands, or search'
-                  : `Search ${activeTab}...`
+                : isInTicketView
+                  ? 'Search tickets...'
+                  : hideTabs || activeTab === TabType.ALL
+                    ? 'Type / for quick commands, or search'
+                    : `Search ${activeTab}...`
             }
             onChange={handleEditorChange}
             currentUserID={currentUserID}
@@ -4354,7 +4421,12 @@ const ChannelCommandMenu = ({
               filter is reachable by typing its prefix, and these three have no syntax —
               they're modes, so they need a control. Active = filled, per the design. */}
           <div className='flex items-center gap-1 flex-shrink-0'>
-            {SEARCH_MODE_TOGGLES.map(({ id, label, tooltip, isOn, toggle }) => (
+            {/* Channel and bot scoping only shape message results; a ticket search keeps
+                just exact match. */}
+            {(isInTicketView
+              ? SEARCH_MODE_TOGGLES.filter(toggle => toggle.id === 'exact')
+              : SEARCH_MODE_TOGGLES
+            ).map(({ id, label, tooltip, isOn, toggle }) => (
               <div key={id} className='relative group/modetip'>
                 <button
                   type='button'
@@ -4390,6 +4462,20 @@ const ChannelCommandMenu = ({
             or hijack Enter/arrows — the editor and its mention dropdown handle them.
             Radix (Escape) and ProseMirror listen at document/editor level, so they still
             work. */}
+        {/* Feedback view. The search input, results and footer are hidden while it's open. */}
+        {feedbackOpen && (
+          <div className='flex-1 min-h-0'>
+            <CmdkFeedbackView
+              query={searchText}
+              filters={feedbackFilters}
+              onBack={closeFeedback}
+              onPosted={() => {
+                setFeedbackOpen(false);
+                onOpenChange(false);
+              }}
+            />
+          </div>
+        )}
         {isComposing && commandTarget && (
           <div
             role='presentation'
@@ -4412,7 +4498,7 @@ const ChannelCommandMenu = ({
         <div
           className={cn(
             'relative flex-1 flex flex-col min-h-0 overflow-x-hidden rounded-b-2xl',
-            isComposing && 'hidden',
+            (isComposing || feedbackOpen) && 'hidden',
           )}
           role='presentation'
           data-track-category='CHANNEL_SEARCH'
@@ -4431,6 +4517,28 @@ const ChannelCommandMenu = ({
             }
           }}
         >
+          {/* The view a ticket screen's search bar opened the palette in, as a heading.
+              Removing it drops that screen's filters and leaves a plain search. */}
+          {ticketViewName && activeTab === TabType.TICKETS && (
+            <div className='flex shrink-0 items-center gap-1.5 px-6 pt-2 text-xs'>
+              <span className='truncate'>
+                <span className='text-muted-foreground'>View · </span>
+                <span className='font-medium text-foreground'>{ticketViewName}</span>
+              </span>
+              <button
+                type='button'
+                onMouseDown={event => event.preventDefault()}
+                onClick={onRemoveTicketView}
+                aria-label='Remove view'
+                title='Remove view'
+                className='flex size-4 shrink-0 items-center justify-center rounded-full bg-muted-foreground/15 text-muted-foreground transition-colors hover:bg-muted-foreground/30 hover:text-foreground'
+                data-track-category='SEARCH'
+                data-track-name='REMOVE_TICKET_VIEW'
+              >
+                <X size={10} strokeWidth={2.5} />
+              </button>
+            </div>
+          )}
           {/* Tabs - hidden when bot is selected or hideTabs is true */}
           <div
             data-tab-strip
@@ -4495,7 +4603,10 @@ const ChannelCommandMenu = ({
                             // where ALL is somewhere to land. Inline callers that
                             // omit it from `enabledTabs` have no unfiltered state,
                             // so for them this stays a no-op, as it always was.
-                            if (!inline || activeEnabledTabs.includes(TabType.ALL)) {
+                            if (
+                              !isInTicketView &&
+                              (!inline || activeEnabledTabs.includes(TabType.ALL))
+                            ) {
                               setActiveTab(TabType.ALL);
                               onTabChange?.(TabType.ALL);
                             }
@@ -4603,7 +4714,7 @@ const ChannelCommandMenu = ({
                 {/* AI answer above the current tab's results when the query needs AI
                     (Google "AI Overview" style). Not a cmdk item, so the results below
                     keep arrow keys and the Enter target. */}
-                {aiOverview && (
+                {aiOverview && !isInTicketView && (
                   <AiAnswerCard
                     query={searchText}
                     tab={activeTab}
@@ -5246,8 +5357,23 @@ const ChannelCommandMenu = ({
                         `after:`/`before:`/`status:`… out of it — so the results branch has to
                         test the chips too, or a filters-only search runs and renders the
                         browse list instead of its results. */}
-                    {searchText.trim() || typeFilter || selectedMentions.length > 0 ? (
+                    {/* A ticket view lists its tickets before anything is typed. */}
+                    {searchText.trim() ||
+                    typeFilter ||
+                    selectedMentions.length > 0 ||
+                    isInTicketView ? (
                       <>
+                        {/* Under the same heading the results arrive under, so they land in place. */}
+                        {showTicketViewSkeleton && (
+                          <div className='mb-4'>
+                            <Command.Group
+                              heading={getGroupLabel('ticket')}
+                              className='[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:font-mono'
+                            >
+                              <SearchSectionSkeleton rows={4} />
+                            </Command.Group>
+                          </div>
+                        )}
                         {hasFromOrInFilter ? (
                           <>
                             {backendResults.length > 0 && renderSearchBackendResults()}
@@ -5411,16 +5537,31 @@ const ChannelCommandMenu = ({
       {/* Footer - outside body flex so TicketPreviewPanel only spans results area. Hidden while the
           `/chat` composer is open (isComposing): its hints (Open/Navigate/Actions/Ask AI) are about
           the results list, which the composer replaces — you're typing a message, not navigating. */}
-      {!inline && !isMobile && !isComposing && (
+      {!inline && !isMobile && !isComposing && !feedbackOpen && (
         <div className='relative px-6 py-4 text-sm font-medium text-muted-foreground flex items-center justify-between shrink-0 rounded-b-2xl'>
           {/* Fade the scrolling results into the footer (replaces the hard top border) */}
           <div className='pointer-events-none absolute inset-x-0 bottom-full h-[30px] bg-gradient-to-t from-card to-transparent' />
-          {/* Left: slash-command hint for Ask AI */}
-          <span className='flex items-center gap-2.5'>
-            <span className='flex items-center justify-center px-1.5 py-1 bg-muted rounded-lg leading-none'>
-              /
+          {/* Left: Ask AI hint and the Feedback button */}
+          <span className='flex items-center gap-5'>
+            <span className='flex items-center gap-2.5'>
+              <span className='flex items-center justify-center px-1.5 py-1 bg-muted rounded-lg leading-none'>
+                /
+              </span>
+              <span>Ask AI</span>
             </span>
-            <span>Ask AI</span>
+            {canPostFeedback && (
+              <button
+                type='button'
+                onClick={() => setFeedbackOpen(true)}
+                title='Tell the search team about these results'
+                data-track-category='COMMAND_MENU'
+                data-track-name='OPEN_SEARCH_FEEDBACK'
+                className='flex items-center gap-2.5 text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-0'
+              >
+                <MessageSquare size={14} />
+                <span>Feedback</span>
+              </button>
+            )}
           </span>
           <div className='flex items-center gap-6'>
             {deskMergeEnabled &&
@@ -5605,6 +5746,12 @@ const ChannelCommandMenu = ({
               }
             }}
             onEscapeKeyDown={event => {
+              // Esc in the feedback view goes back to the results instead of closing the palette.
+              if (feedbackOpen) {
+                event.preventDefault();
+                closeFeedback();
+                return;
+              }
               // While the ⌥↵ Actions menu is open, Escape closes only it — never the palette.
               if (actionsMenuTarget !== null) {
                 event.preventDefault();
@@ -5654,7 +5801,10 @@ const ChannelCommandMenu = ({
                 // come and go. Header + footer are shrink-0; Command.List is flex-1 and
                 // absorbs the remainder, so a wrapped filter-chip row or a hidden tab bar
                 // changes the list height, never the total. Mobile keeps h-[100dvh]/h-screen.
-                'md:w-full md:h-[549px] md:overflow-hidden bg-card md:rounded-2xl shadow-[0px_7px_15px_0px_#0000000D,0px_28px_28px_0px_#00000017,0px_62px_37px_0px_#0000000D,0px_111px_44px_0px_#00000003,0px_173px_48px_0px_#00000000] border border-border',
+                //
+                // The feedback view is shorter, so the height shrinks to fit it while open.
+                feedbackOpen ? 'md:h-auto' : 'md:h-[549px]',
+                'md:w-full md:overflow-hidden bg-card md:rounded-2xl shadow-[0px_7px_15px_0px_#0000000D,0px_28px_28px_0px_#00000017,0px_62px_37px_0px_#0000000D,0px_111px_44px_0px_#00000003,0px_173px_48px_0px_#00000000] border border-border',
                 showMergeDialog ? 'z-40' : 'z-[9999]',
               )}
               onKeyDownCapture={handleCommandKeyDown}
@@ -5669,6 +5819,121 @@ const ChannelCommandMenu = ({
           dismissed, clear of z-[9999]. */}
       {commandConfirmations}
     </>
+  );
+};
+
+/**
+ * Always-mounted shell for the command palette. It keeps the parts that must work while the
+ * palette is closed — the global shortcuts that open it and the history entry that restores
+ * it on back-navigation — and mounts the palette itself on its first open (inline palettes
+ * mount immediately), keeping it mounted afterwards. The palette is rendered closed in the
+ * sidebar and the global command host; mounted eagerly, it subscribed to every channel and
+ * user and re-rendered on every navigation for a dialog that was rarely open.
+ */
+const ChannelCommandMenu = (props: ChannelCommandMenuProps): ReactElement | null => {
+  const {
+    open,
+    onOpenChange,
+    inline = false,
+    contextSelectionMode = false,
+    initialQuery,
+    restoreFromLastSearch,
+    onRestoreTicketView,
+  } = props;
+
+  const [mounted, setMounted] = useState(open || inline);
+  if (!mounted && (open || inline)) setMounted(true);
+
+  // When opened via the `mod+/` shortcut, seed the search box with `/` so it lands in command
+  // mode. Set in the same update as the open so the palette renders in command mode on its
+  // first frame; the screen overlay is mounted fresh with a `/` initialQuery, so seed from that.
+  const [seedCommandMode, setSeedCommandMode] = useState(
+    () => initialQuery?.text === '/' && initialQuery?.mentions.length === 0,
+  );
+  // A query to re-seed the palette with: its text + chips are replayed into the Lexical editor
+  // through the initial-query seed pipeline. Set when back-navigation restores the search the
+  // palette sent to the results page, and when replaying a recent; null when nothing is being
+  // restored.
+  const [restoredQuery, setRestoredQuery] = useState<InitialQueryData | null>(null);
+  // Toggles restored from the history entry; `initialToggles` (URL-derived) is the fallback for
+  // opens that aren't a back-navigation.
+  const [restoredToggles, setRestoredToggles] = useState<SearchScopeToggles | null>(null);
+  // Held in a ref so `onRestore` (registered once) always calls the current closure.
+  const restoreFromLastSearchRef = useRef(restoreFromLastSearch);
+  restoreFromLastSearchRef.current = restoreFromLastSearch;
+  const onRestoreTicketViewRef = useRef(onRestoreTicketView);
+  onRestoreTicketViewRef.current = onRestoreTicketView;
+
+  const [shortcutRequest, setShortcutRequest] = useState<ShortcutRequest | null>(null);
+  const requestShortcut = (): void =>
+    setShortcutRequest(prev => ({ nonce: (prev?.nonce ?? 0) + 1, startSession: !open }));
+
+  useShortcutById(
+    'global.search',
+    () => {
+      // Cmd+K opens this palette in both search modes. Screen-mode behavior (2-item previews +
+      // "See more" that routes to `/search-results`) comes from the `searchMode === 'screen'`
+      // checks in the palette.
+      if (!open) requestShortcut();
+      onOpenChange(!open);
+    },
+    { enabled: !contextSelectionMode },
+  );
+
+  // `mod+/` opens the menu straight into command mode (seeds `/` for slash-command discovery)
+  // in both search modes.
+  useShortcutById(
+    'global.openCommandMode',
+    () => {
+      requestShortcut();
+      setSeedCommandMode(true);
+      onOpenChange(true);
+    },
+    { enabled: !contextSelectionMode },
+  );
+
+  // Cmd+K joins the URL history stack: opening pushes an entry, so the top-bar back arrow
+  // (and the browser back gesture) closes the palette instead of leaving the page. When a
+  // row sends the user to the results page, that entry keeps the search — so back from the
+  // results page reopens the palette with it rather than landing on a bare page.
+  const { markNavigating, setPayload } = useHistoryBackedOverlay<PalettePayload>({
+    open,
+    onClose: () => onOpenChange(false),
+    onRestore: restored => {
+      // Back restores the search as it was launched from here, not as the results page
+      // left it. Parked state is still dropped so it can't leak into a later restore.
+      if (restoreFromLastSearchRef.current?.()) clearLastSearchState();
+      const source = restored ?? null;
+      setRestoredQuery(source ? { text: source.text, mentions: source.mentions } : null);
+      setRestoredToggles(source?.toggles ?? null);
+      if (source?.ticketView) onRestoreTicketViewRef.current?.(source.ticketView);
+      onOpenChange(true);
+    },
+    id: 'command-menu',
+    enabled: !inline && !contextSelectionMode,
+  });
+
+  // A restore only seeds the open it triggered — the next plain cmd+K starts empty.
+  useEffect(() => {
+    if (!open) {
+      setRestoredQuery(null);
+      setRestoredToggles(null);
+    }
+  }, [open]);
+
+  if (!mounted) return null;
+  return (
+    <ChannelCommandMenuContent
+      {...props}
+      seedCommandMode={seedCommandMode}
+      setSeedCommandMode={setSeedCommandMode}
+      restoredQuery={restoredQuery}
+      setRestoredQuery={setRestoredQuery}
+      restoredToggles={restoredToggles}
+      markNavigating={markNavigating}
+      setPayload={setPayload}
+      shortcutRequest={shortcutRequest}
+    />
   );
 };
 

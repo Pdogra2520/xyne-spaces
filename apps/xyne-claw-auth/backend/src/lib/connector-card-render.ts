@@ -1,104 +1,80 @@
 import {
   buildMcpSuggestFlow,
   buildProviderSuggestFlow,
+  withSpacesAppId,
   type FlowDefinition,
 } from "xyne-claw-shared";
-import { SUPPORTED_PROVIDERS } from "../constants.js";
 import { prisma } from "../db.js";
 import { createLogger } from "../logger.js";
 import { userProviderCredentialsRepository } from "../repositories/index.js";
 import { isVisibleToUser, parseConnectorMeta } from "../routes/servers.js";
 import { availabilityForServerIds } from "./connector-availability.js";
-import {
-  connectorTypesFromText,
-  connectorTypesUserAskedFor,
-  wantsConnectorRoster,
-} from "./connector-hints.js";
 import { postFlowCard, type FlowCardTarget } from "./flow-card-delivery.js";
 import {
   PROVIDER_CONNECT_METHOD,
   PROVIDER_DESCRIPTIONS,
   PROVIDER_LABELS,
-  providersUserAskedFor,
-  stripAddressedAgentMention,
-  unsupportedProvidersFromText,
-  wantsProviderRoster,
+  normalizeProviderName,
+  SUPPORTED_PROVIDERS,
 } from "./provider-hints.js";
 
 const log = createLogger("connector-card");
 
 /** How many roster rows a "what connectors exist?" card samples. */
 const MCP_SUGGEST_ROSTER_SAMPLE = 5;
-/** Cap on server-inferred connector types, so a vague task cannot flood the card. */
-const MCP_SUGGEST_INFERRED_MAX = 3;
 
+/**
+ * What the agent's `suggest-connectors` call queued (claw → callback payload).
+ * The ONLY source of a connector card: the server never infers one from the
+ * user's words — the agent knows its tools, what failed, and what the user asked.
+ */
 export interface PendingConnectorSuggestions {
   serverTypes: string[];
   listAll?: boolean | undefined;
-  inferred?: boolean | undefined;
   title?: string | undefined;
 }
 
 /** Identity the suggest cards are built from. `channelId` is "" on Xyne AI. */
 export interface ConnectorCardIdentity {
   agentSlug: string | undefined;
+  agentOrgId?: string | null | undefined;
   userId: string;
   conversationId: string;
   channelId: string;
   spacesAppId: string | undefined;
 }
 
-function withSpacesAppId<T extends { data?: Record<string, unknown> }>(
-  flow: T,
-  spacesAppId?: string | null,
-): T {
-  if (!spacesAppId) return flow;
-  return { ...flow, data: { ...(flow.data ?? {}), spacesAppId } };
-}
-
-/**
- * Compose the connector suggestion the card is built from. The model's own ask
- * wins; otherwise the server reads the user's words, because the model
- * routinely misses the moment — most often by assuming a connector is already
- * connected, which is exactly when the offer matters most.
- */
-export function resolveConnectorSuggestions(
-  fromModel: PendingConnectorSuggestions | undefined,
-  taskText: string,
-): PendingConnectorSuggestions | undefined {
-  if (fromModel) return fromModel;
-  // Fail-safe: a suggestion is never worth costing the user their answer.
-  let inferredTypes: string[] = [];
-  try {
-    inferredTypes = connectorTypesFromText(taskText, { includeKeywords: true }).slice(
-      0,
-      MCP_SUGGEST_INFERRED_MAX,
-    );
-  } catch (err) {
-    log.warn("[mcp-suggest] connector inference failed (non-fatal)", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  if (wantsConnectorRoster(taskText)) return { serverTypes: [], listAll: true, inferred: true };
-  if (inferredTypes.length > 0) return { serverTypes: inferredTypes, inferred: true };
-  return undefined;
+export interface ResolvedConnectorSuggestions {
+  connectors: Array<{ serverType: string; name: string; description?: string; connected: boolean }>;
+  /** The roster ("what can I connect?") rather than named suggestions. */
+  listAll: boolean;
+  totalCount?: number;
 }
 
 /**
  * Connector suggestion card. Display + client-side connect only — there is no
  * server-side action or terminal state for this card on any surface.
+ *
+ * A connector this user/agent already reaches (personal, agent-pinned or
+ * org-shared credentials) is dropped — offering to connect it again is noise —
+ * unless one of its calls failed with 401/403 this turn (`blockedConnectors`):
+ * then the working credential is not working, and reconnecting is the fix.
+ *
+ * This resolves WHICH connectors the card offers — the half every surface
+ * shares; messaging channels render the same list as buttons
+ * (surfaces/messaging/widgets.ts). Null when nothing is left to offer.
  */
-export async function renderConnectorSuggestCard(args: {
+export async function resolveSuggestedConnectors(args: {
   suggestions: PendingConnectorSuggestions;
   blockedConnectors: string[] | undefined;
-  taskText: string;
-  id: ConnectorCardIdentity;
-  target: FlowCardTarget;
-}): Promise<FlowDefinition | null> {
+  id: Pick<ConnectorCardIdentity, "agentSlug" | "agentOrgId" | "userId">;
+}): Promise<ResolvedConnectorSuggestions | null> {
   const { suggestions, id } = args;
   // Roster mode: the user asked what exists, so the SERVER picks the sample —
   // the model must not decide which connectors represent the catalog.
-  const listAll = suggestions.listAll === true;
+  // Named connectors win over the roster — mirrors the suggest-connectors tool,
+  // for payloads from older claw builds that sent both.
+  const listAll = suggestions.listAll === true && suggestions.serverTypes.length === 0;
   const totalCount = listAll
     ? await prisma.mcpServer.count({ where: { enabled: true } })
     : undefined;
@@ -122,6 +98,7 @@ export async function renderConnectorSuggestCard(args: {
   const availability = await availabilityForServerIds(
     id.userId,
     rows.map((r) => r.id),
+    { agentSlug: id.agentSlug, agentOrgId: id.agentOrgId },
   );
   const blockedTypes = new Set(args.blockedConnectors ?? []);
 
@@ -133,30 +110,39 @@ export async function renderConnectorSuggestCard(args: {
         .map((type) => byType.get(type))
         .filter((row): row is NonNullable<typeof row> => !!row);
 
-  const inferred = suggestions.inferred === true;
-  // Derived from the user's own words, never from the model's claim.
-  const askedToConnect = new Set(connectorTypesUserAskedFor(args.taskText));
+  const covered = (serverId: string): boolean =>
+    availability.personal.has(serverId) || availability.agent.has(serverId) || availability.org.has(serverId);
 
   const connectors = ordered
-    .filter((row) => {
-      if (listAll || askedToConnect.has(row.type)) return true;
-      if (availability.personal.has(row.id)) return false;
-      if (availability.org.has(row.id)) return blockedTypes.has(row.type);
-      return true;
-    })
+    // The roster lists everything with its state; a named suggestion keeps a
+    // covered connector only when its credential just failed.
+    .filter((row) => listAll || !covered(row.id) || blockedTypes.has(row.type))
     .map((row) => ({
       serverType: row.type,
       name: row.name,
       ...(row.description ? { description: row.description } : {}),
-      connected: availability.personal.has(row.id) || availability.org.has(row.id),
+      connected: covered(row.id),
     }));
 
   if (connectors.length === 0) {
     log.info(
-      `[mcp-suggest] skipped — none of ${suggestions.serverTypes.join(", ")} are known connectors`,
+      `[mcp-suggest] skipped — ${suggestions.serverTypes.join(", ")}: unknown, hidden, or already connected`,
     );
     return null;
   }
+  return { connectors, listAll, ...(totalCount !== undefined ? { totalCount } : {}) };
+}
+
+export async function renderConnectorSuggestCard(args: {
+  suggestions: PendingConnectorSuggestions;
+  blockedConnectors: string[] | undefined;
+  id: ConnectorCardIdentity;
+  target: FlowCardTarget;
+}): Promise<FlowDefinition | null> {
+  const { suggestions, id } = args;
+  const resolved = await resolveSuggestedConnectors(args);
+  if (!resolved) return null;
+  const { connectors, listAll, totalCount } = resolved;
 
   const flow = withSpacesAppId(
     buildMcpSuggestFlow({
@@ -167,7 +153,6 @@ export async function renderConnectorSuggestCard(args: {
           ? { title: "Connectors you can add" }
           : {}),
       ...(listAll ? { browseAll: true } : {}),
-      ...(inferred && !suggestions.title ? { title: "Connect to unlock this" } : {}),
       ...(totalCount !== undefined ? { totalCount } : {}),
       screenKey: `${id.userId}-${connectors.map((c) => c.serverType).join("-")}`,
       ...(id.agentSlug ? { agentSlug: id.agentSlug } : {}),
@@ -183,33 +168,60 @@ export async function renderConnectorSuggestCard(args: {
 }
 
 /**
- * AI provider suggestion card. The roster is a fixed list in code, so intent is
- * read from the user's own message and the model never participates. A provider
- * we do not offer is named back as unsupported rather than dropped, so the reply
- * cannot promise a card that will never render.
+ * What the agent's `suggest-providers` call queued (claw -> callback payload).
+ * The ONLY source of a provider card: the server never reads the user's words.
+ */
+export interface PendingProviderSuggestions {
+  providers: string[];
+  listAll?: boolean | undefined;
+  title?: string | undefined;
+}
+
+/**
+ * AI provider suggestion card. Display + client-side connect only.
+ *
+ * A provider the user is already connected to is dropped — offering to connect
+ * it again is noise — EXCEPT on a roster ask (`listAll`), where seeing what is
+ * already connected is the point of asking. `spaces` is the built-in default
+ * and counts as connected everywhere.
  */
 export async function renderProviderSuggestCard(args: {
-  taskText: string;
+  suggestions: PendingProviderSuggestions;
   id: ConnectorCardIdentity;
   target: FlowCardTarget;
 }): Promise<FlowDefinition | null> {
-  const { id } = args;
-  const askText = stripAddressedAgentMention(args.taskText, id.agentSlug);
-  const namedProviders = providersUserAskedFor(askText);
-  const unsupported = unsupportedProvidersFromText(askText);
-  const providerRoster = wantsProviderRoster(askText);
+  const { id, suggestions } = args;
+  // Named providers win over the roster, mirroring suggest-providers.
+  const listAll = suggestions.listAll === true && suggestions.providers.length === 0;
+  const named = listAll
+    ? []
+    : [
+        ...new Set(
+          suggestions.providers
+            .map((name) => normalizeProviderName(name))
+            .filter((match): match is NonNullable<typeof match> => match !== null),
+        ),
+      ];
 
-  if (namedProviders.length === 0 && !providerRoster) {
-    if (unsupported.length > 0) {
-      log.info(`[provider-suggest] unsupported only: ${unsupported.join(", ")} — no card`);
-    }
+  if (named.length === 0 && !listAll) {
+    log.info(`[provider-suggest] skipped — no known provider in [${suggestions.providers.join(", ")}]`);
     return null;
   }
 
   const creds = await userProviderCredentialsRepository.listByUser(id.userId).catch(() => []);
   const connectedByProvider = new Map(creds.map((c) => [c.provider, c] as const));
+  const isConnected = (provider: string): boolean =>
+    provider === "spaces" || connectedByProvider.has(provider);
 
-  const shown = providerRoster ? [...SUPPORTED_PROVIDERS] : namedProviders;
+  const shown = (listAll ? [...SUPPORTED_PROVIDERS] : named).filter(
+    (provider) => listAll || !isConnected(provider),
+  );
+
+  if (shown.length === 0) {
+    log.info(`[provider-suggest] skipped — ${named.join(", ")}: already connected`);
+    return null;
+  }
+
   const providers = shown.map((provider) => {
     const cred = connectedByProvider.get(provider);
     return {
@@ -235,13 +247,10 @@ export async function renderProviderSuggestCard(args: {
   const flow = withSpacesAppId(
     buildProviderSuggestFlow({
       providers,
-      title: providerRoster ? "AI providers you can connect" : "Connect this provider",
-      ...(providerRoster ? { browseAll: true, totalCount: SUPPORTED_PROVIDERS.length } : {}),
-      ...(unsupported.length > 0
-        ? {
-            reason: `${unsupported.join(", ")} ${unsupported.length === 1 ? "is" : "are"} not available on Xyne.`,
-          }
-        : {}),
+      title:
+        suggestions.title?.trim() ||
+        (listAll ? "AI providers you can connect" : "Connect this provider"),
+      ...(listAll ? { browseAll: true, totalCount: SUPPORTED_PROVIDERS.length } : {}),
       screenKey: `${id.userId}-${shown.join("-")}`,
       ...(id.agentSlug ? { agentSlug: id.agentSlug } : {}),
       userId: id.userId,

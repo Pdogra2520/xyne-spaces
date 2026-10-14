@@ -28,6 +28,7 @@ import * as todo from "./todo/index.js";
 import * as orchestrator from "./orchestrator/index.js";
 import * as agentIntrospect from "./agent-introspect/index.js";
 import * as skillManagement from "./skill-management/index.js";
+import * as conversationFork from "./conversation-fork/index.js";
 import * as videoExplainer from "./video-explainer/index.js";
 import * as reactArtifact from "./react-artifact/index.js";
 import * as recordSkill from "./record-skill/index.js";
@@ -151,6 +152,7 @@ register(researchAgent.reviewPullRequest);
 // historical messages; only the registration is gone.
 register(reactArtifact.createReactArtifactTool);
 register(reactArtifact.readArtifactAppFileTool);
+register(reactArtifact.publishArtifactAppTool);
 
 // Register create-html-report tool — renders a markdown report into a
 // standalone HTML file and attaches it, leaving a short summary inline in
@@ -205,6 +207,7 @@ register(postmanSbx.postmanSbxRunCollection);
 // AUTHOR" is one idea, and it was previously split across three one-tool groups.
 register(skillManagement.createSkillTool);
 register(skillManagement.updateSkillTool);
+register(conversationFork.forkToConversationTool);
 
 // Register agent-authoring tools — create/update agent, create/update subagent,
 // create MCP server. All approval-gated writes applied in claw-auth's
@@ -238,6 +241,7 @@ register(sandbox.sandboxReadFile);
 register(sandbox.sandboxDeliverFiles);
 register(sandbox.sandboxDestroy);
 register(sandbox.sandboxRepoSetup);
+register(sandbox.sandboxListProfiles);
 register(sandbox.sdlcRepositoryAccess);
 register(sandbox.gitRead);
 register(videoExplainer.createVideoExplainer);

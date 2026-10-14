@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PointerSensor,
   closestCenter,
+  pointerWithin,
   useSensor,
   useSensors,
   type CollisionDetection,
@@ -226,7 +227,7 @@ export const useChannelSectionDnd = ({
       ? ((channelSections ?? []).find(s => s.id === activeDragId) ?? null)
       : null;
 
-  const moveChannelToSection = (channelId: string, sectionId: string | null): void => {
+  const moveChannelToSectionLatest = (channelId: string, sectionId: string | null): void => {
     const timestamp = Date.now();
     let position = keyBetween(null, null);
     if (sectionId) {
@@ -243,6 +244,13 @@ export const useChannelSectionDnd = ({
     }
     void zero.mutate(mutators.channel.moveToSection({ channelId, sectionId, position, timestamp }));
   };
+  const moveChannelToSectionRef = useRef(moveChannelToSectionLatest);
+  moveChannelToSectionRef.current = moveChannelToSectionLatest;
+  const moveChannelToSection = useCallback(
+    (channelId: string, sectionId: string | null): void =>
+      moveChannelToSectionRef.current(channelId, sectionId),
+    [],
+  );
 
   const findContainer = (id: string, items: Record<string, string[]>): string | null => {
     if (id.startsWith('section-drop-')) {
@@ -287,6 +295,12 @@ export const useChannelSectionDnd = ({
       const t = (c.data.current as { type?: string } | undefined)?.type;
       return activeType === 'section' ? t === 'section' : t === 'container';
     });
+    if (activeType === 'channel') {
+      // Group containers are large and nested, so centre distance can pick the wrong
+      // one (e.g. Starred beats a tall Channels list). Prefer what's under the pointer.
+      const hits = pointerWithin({ ...args, droppableContainers });
+      if (hits.length > 0) return hits;
+    }
     return closestCenter({ ...args, droppableContainers });
   };
 

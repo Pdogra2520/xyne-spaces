@@ -45,7 +45,7 @@ export function updateExternalInteractionTx(self: EmailService, emailChanged: bo
     return { email, ticket };
   });
 }
-export function createConversationWithEmailTx(self: EmailService, channelId: string, userId: string, channel: any, receivedAt: Date | undefined, emailType: EmailType, emailSubject: string, emailBody: string, emailTo: string[], emailFrom: string, emailCc: string[], emailBcc: string[], emailReplyTo: string[], externalThreadId: string, externalMessageId: string, sentByUserId: string | undefined, normalizedRfcMessageId: string | undefined, rating: number | undefined, clientVersionName: string | undefined, clientVersionCode: string | undefined, externalSourceId: string | undefined, projectId: any, boardId: any, firstStage: any, slaResolutionDue: Date | null, userGroup: any, groupId: any, ticketMetadata: Record<string, unknown> | undefined) {
+export function createConversationWithEmailTx(self: EmailService, channelId: string, userId: string, channel: any, receivedAt: Date | undefined, emailType: EmailType, emailSubject: string, emailBody: string, emailTo: string[], emailFrom: string, emailCc: string[], emailBcc: string[], emailReplyTo: string[], externalThreadId: string, externalMessageId: string, sentByUserId: string | undefined, normalizedRfcMessageId: string | undefined, rating: number | undefined, clientVersionName: string | undefined, clientVersionCode: string | undefined, externalSourceId: string | undefined, projectId: any, boardId: any, firstStage: any, slaResolutionDue: Date | null, userGroup: any, groupId: any, ticketMetadata: Record<string, unknown> | undefined, deferChannelSideEffects = false) {
   return transaction(['ChannelUserStatus', 'Conversation', 'Email', 'ExternalMessage', 'Project', 'Ticket'], 'createConversationWithEmail: conversation, email, ticket and unread-count writes must commit atomically; tx is not ACL-wrapped', self.prisma, async (tx) => {
     // Create conversation
     const conv = await tx.conversation.create({
@@ -119,20 +119,24 @@ export function createConversationWithEmailTx(self: EmailService, channelId: str
 
     await syncConversationTicketMdFromPrismaTicket(tx, createdTicket);
 
-    await tx.channelUserStatus.updateMany({
-      where: { channelId, isDeleted: false },
-      data: { unreadCount: { increment: 1 }, updatedAt: new Date() },
-    });
+    // Backfill callers replay this once per run with the ticket count — see
+    // CreateConversationWithEmailParams.deferChannelSideEffects.
+    if (!deferChannelSideEffects) {
+      await tx.channelUserStatus.updateMany({
+        where: { channelId, isDeleted: false },
+        data: { unreadCount: { increment: 1 }, updatedAt: new Date() },
+      });
+    }
 
     return { conversation: conv, ticket: createdTicket, email: createdEmail };
-  });
+  }, { maxWait: 5_000, timeout: 15_000 });
 }
-export function addEmailToConversationTx(self: EmailService, emailData: { createdAt?: Date | undefined; type: EmailType; subject: string; body: string; to: string[]; from: string; cc: string[]; bcc: string[]; replyTo: string[]; conversationId: string; channelId: any; externalThreadId: string; externalMessageId: string; rfcMessageId: string | null | undefined; sentByUserId: string | undefined; rating: number | undefined; clientVersionName: string | undefined; clientVersionCode: string | undefined; }, externalMessageId: string, externalThreadId: string, externalSourceId: string) {
+export function addEmailToConversationTx(self: EmailService, emailData: { createdAt?: Date | undefined; type: EmailType; subject: string; body: string; to: string[]; from: string; cc: string[]; bcc: string[]; replyTo: string[]; conversationId: string; channelId: any; externalThreadId: string; externalMessageId: string; rfcMessageId: string | null | undefined; sentByUserId: string | undefined; rating: number | undefined; clientVersionName: string | undefined; clientVersionCode: string | undefined; }, externalMessageId: string, externalThreadId: string, externalSourceId: string, workspaceId?: string) {
   return transaction(['Channel', 'Email', 'ExternalMessage', 'Ticket'], 'addEmailToConversation: email insert plus external-message link must commit atomically; tx is not ACL-wrapped', self.prisma, async (tx) => {
-    const created = await self.emailRepository.create(emailData, tx);
+    const created = await self.emailRepository.create(emailData, tx, { workspaceId });
     await linkExternalMessageInTx(tx, { externalId: externalMessageId, externalThreadId, externalSourceId }, created.id, created.workspaceId);
     return created;
-  });
+  }, { maxWait: 5_000, timeout: 15_000 });
 }
 export function createConversationFromEmailTx(self: EmailService, projectId: string, emailSubject: string, emailBody: string, userId: string, conversation: Conversation, channelId: string, channel: any, boardId: string, stageName: string, ticketPriority: TicketPriority, slaResolutionDue: Date | null, userGroupId: string | undefined, ticketMetadata: Record<string, unknown> | undefined) {
   return transaction(['Project', 'Ticket'], 'createConversationFromEmail: ticket id sequence plus ticket insert must commit atomically; tx is not ACL-wrapped', self.prisma, async (tx) => {
@@ -457,24 +461,7 @@ export async function linkExternalMessageInTx(
   emailId: string,
   workspaceId: string,
 ): Promise<void> {
-  const existing = await tx.externalMessage.findUnique({
-    where: {
-      externalSourceId_externalId: {
-        externalSourceId: link.externalSourceId,
-        externalId: link.externalId,
-      },
-    },
-    select: { id: true },
-  });
-  if (existing) {
-    logger.warn('[EmailService] ExternalMessage link already exists, skipping', {
-      externalSourceId: link.externalSourceId,
-      externalId: link.externalId,
-      emailId,
-    });
-    return;
-  }
-  await tx.externalMessage.createMany({
+  const { count } = await tx.externalMessage.createMany({
     data: [{
       externalSourceId: link.externalSourceId,
       externalId: link.externalId,
@@ -487,4 +474,11 @@ export async function linkExternalMessageInTx(
     }],
     skipDuplicates: true,
   });
+  if (count === 0) {
+    logger.warn('[EmailService] ExternalMessage link already exists, skipping', {
+      externalSourceId: link.externalSourceId,
+      externalId: link.externalId,
+      emailId,
+    });
+  }
 }

@@ -251,7 +251,11 @@ export const EVENTS = defineEvents({
     fields: { fromProvider: plain(), toProvider: plain(), attempt: plain(), reason: plain() },
   },
   judge_call: {
-    fields: { backend: plain(), purpose: plain(), questions: plain(), ms: plain(), ok: plain() },
+    // Full exchange: what Jev was told, asked, and answered — every call.
+    fields: {
+      backend: plain(), purpose: plain(), questions: plain(), ms: plain(), ok: plain(), error: plain(),
+      state: ref(20_000), questionSpec: ref(8_000), answers: ref(8_000),
+    },
   },
   judge_outcome: {
     fields: { backend: plain(), purpose: plain(), summary: plain(), detail: ref(4_000) },
@@ -316,8 +320,11 @@ export const EVENTS = defineEvents({
       finalCited: plain(),
     },
   },
+  reply_format: {
+    fields: { phase: plain(), ok: plain(), problems: plain() },
+  },
   twin_deliver_reflection: {
-    fields: { phase: plain(), round: plain(), delivered: plain(), action: plain() },
+    fields: { phase: plain(), round: plain(), delivered: plain(), action: plain(), answersAsk: plain(), grounded: plain(), actionFits: plain(), destination: plain(), overall: plain(), source: plain(), ms: plain() },
   },
   follow_up_generation_start: {
     fields: { model: plain(), sourceToolCallId: plain() },
@@ -351,6 +358,7 @@ export const LEGACY_EVENT_KINDS = [
   "auto_retry_start",
   "auto_retry_end",
   "citation_reflection",
+  "reply_format",
   "twin_deliver_reflection",
   "follow_up_generation_start",
   "follow_up_generation_end",

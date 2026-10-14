@@ -3,8 +3,7 @@ import { getCanvasUrl } from '@/services/canvasService';
 import { logger } from '@/utils/logger';
 import { Prisma, type Call } from '@prisma/client';
 import { config } from '@/config/env';
-import { Agent, createUserMessage } from '@framework';
-import { extractAgentContent } from '@/utils/agentUtils';
+import { Agent } from '@framework';
 import { unifiedBotUserService } from '@/bots/unified/services/unified-bot-user-service.js';
 import { MessageType, OrgLLMServiceAccountPurpose, AttachmentEntityType, CallOrigin, CallType, TicketPriority, NotificationType } from '@xyne/shared';
 import { notificationService } from '@/services/notificationService';
@@ -18,19 +17,26 @@ import { vespaQueue } from '@/queues/vespaQueue';
 import { fileSchema, SubApp } from '@/vespa/src/types';
 import { CacConfigService } from '@/services/cacConfigService';
 import { getCallTicketSuggestionsTotal } from '@/services/otel/suggestionMetrics';
-import { executeCallLlmWithRetry, executeStreamingLlmRequest, type SummaryModelType } from './callLlmRetry';
+import {
+  executeCallLlmOnce,
+  executeCallLlmWithRetry,
+  executeStreamingLlmRequest,
+  type SummaryModelType,
+} from './callLlmRetry';
 import { callRecordingService } from '@/services/callRecordingService';
 import { callLabelService } from '@/services/callLabelService';
 import { TagMethod } from '@xyne/shared';
 import { callDocumentService } from '@/services/callDocumentService';
 import { callNotesCanvasService } from '@/services/callNotesCanvasService';
 import { callSubject } from '@/utils/callTypeUtils';
+import { isTranscriptUnlinked } from '@/utils/transcriptUnlink';
 import { logDetailedSummaryFailed } from '@/services/detailedSummaryFailureLog';
 import { RECORDING_TITLE_PROMPT } from '@/services/recordingSummaryTemplates';
 import { acquireLock, releaseLock } from '@/utils/distributedLock';
 import { mapWithConcurrency } from '@/utils/concurrency';
 import { orgLLMCredentialService } from '@/services/orgLLMCredentialService';
 import { processCallWithSummaryTx } from '@/bypassAcl/transactions/transcriptService';
+import { emitCallSummaryReadyToApp } from '@/services/callSummaryAppEventService';
 
 const SPEAKER_IDENTIFICATION_CAC_KEY = 'speaker_identification_config';
 
@@ -310,13 +316,19 @@ export class TranscriptService {
    * Create a fresh Agent instance for each request
    * This prevents state pollution and BUSY errors between concurrent requests
    */
-  private async createAgent(callId?: string, modelType?: SummaryModelType): Promise<Agent | null> {
+  private async createAgent(callId?: string, modelType?: SummaryModelType, workspaceId?: string): Promise<Agent | null> {
     try {
       const userId = await this.getCreatedByUserIdForCall(callId);
-      const credential = await orgLLMCredentialService.getCredentialByUserId(
-        userId,
-        OrgLLMServiceAccountPurpose.CALL_TRANSCRIPT,
-      );
+      // `workspaceId` is for callers with no Xyne call to resolve the org from (desk call recordings).
+      const credential = workspaceId
+        ? await orgLLMCredentialService.getCredentialByWorkspaceId(
+            workspaceId,
+            OrgLLMServiceAccountPurpose.CALL_TRANSCRIPT,
+          )
+        : await orgLLMCredentialService.getCredentialByUserId(
+            userId,
+            OrgLLMServiceAccountPurpose.CALL_TRANSCRIPT,
+          );
 
       // Prefer the org-provisioned credential; fall back to the env-configured
       // CALL_LITELLM_API_KEY/LITELLM_BASE_URL (config.llm) when no org credential
@@ -526,6 +538,7 @@ export class TranscriptService {
           createdBy: call.createdByUserId,
           storageProvider: config.fileStorage.provider,
           conversationId: callMessage.conversationId,
+          channelId: call.channelId,
           workspaceId: channel.workspaceId,
           metadata: {
             callId,
@@ -556,7 +569,7 @@ export class TranscriptService {
       // 13. Attach identified transcript (real-name labelled) as a second attachment when available.
       // Written by the Python agent's RealtimeIdentifier during the call into
       // transcriptions/{callId}_identified.jsonl — may not exist if no voiceprints were enrolled.
-      void this.attachIdentifiedTranscriptIfExists(callId, messageId, call.createdByUserId, callMessage.conversationId, channel.workspaceId);
+      void this.attachIdentifiedTranscriptIfExists(callId, messageId, call.createdByUserId, callMessage.conversationId, call.channelId, channel.workspaceId);
     } catch (error) {
       logger.error(`[${callId}] transcript_processing_failed`, { message_id: messageId, error: error, stack: error instanceof Error ? error.stack : undefined });
       // Throw error to allow controller to return proper error response
@@ -711,6 +724,7 @@ export class TranscriptService {
     messageId: string,
     createdByUserId: string,
     conversationId: string,
+    channelId: string | null,
     workspaceId: string,
   ): Promise<void> {
     try {
@@ -777,6 +791,7 @@ export class TranscriptService {
           createdBy: createdByUserId,
           storageProvider: 'gcs',
           conversationId,
+          channelId,
           metadata: {
             callId,
             type: 'identified_transcript',
@@ -1075,14 +1090,19 @@ export class TranscriptService {
   /**
    * Generate AI summary from the formatted transcript with explicit retry loop.
    */
-  async generateCallSummary(transcript: string, callId?: string, modelType?: SummaryModelType): Promise<string | null> {
+  async generateCallSummary(
+    transcript: string,
+    callId?: string,
+    modelType?: SummaryModelType,
+    workspaceId?: string,
+  ): Promise<string | null> {
     const callCreator = await this.getCallCreatorName(callId);
     const prompt = CALL_SUMMARY_PROMPT
       .replace('{callCreator}', callCreator || 'Unknown')
       .replace('{transcript}', transcript);
 
     const extracted = await executeCallLlmWithRetry(
-      () => this.createAgent(callId, modelType),
+      () => this.createAgent(callId, modelType, workspaceId),
       () => prompt,
       'call_summary',
       callId || 'unknown',
@@ -1187,27 +1207,26 @@ export class TranscriptService {
    * @param summary - The AI-generated call summary
    * @returns Array of ticket suggestions or empty array if generation fails
    */
-  async generateTicketSuggestions(transcript: string, callId?: string): Promise<TicketSuggestion[]> {
-    const logCallId = callId || 'unknown';
-    const agent = await this.createAgent(logCallId);
-    if (!agent) {
-      logger.warn('Agent creation failed. Skipping ticket suggestions generation.');
-      return [];
-    }
-
+  async generateTicketSuggestions(
+    transcript: string,
+    callId?: string,
+  ): Promise<TicketSuggestion[]> {
     const prompt = TICKET_SUGGESTIONS_PROMPT.replace('{transcript}', transcript).replace(
       '{summary}',
       'Summary not available (analyze transcript directly)'
     );
 
     try {
-      const result = await agent.execute({
-        messages: [createUserMessage(prompt)],
-      });
-
-      const extracted = extractAgentContent(result);
+      const extracted = await executeCallLlmOnce(
+        // The legacy agent keeps resolving credentials without the call, as before;
+        // `callId` only lets the Claw engine act as the call's creator.
+        () => this.createAgent(),
+        prompt,
+        'ticket_suggestions',
+        callId,
+      );
       if (!extracted.ok) {
-        logger.error(`ticket_suggestions_generation_failed | reason=${extracted.reason} | status=${extracted.status ?? result.status}`);
+        logger.error(`ticket_suggestions_generation_failed | reason=${extracted.reason} | status=${extracted.status}`);
         return [];
       }
 
@@ -1256,22 +1275,17 @@ export class TranscriptService {
    */
   async generateCallLabels(transcript: string, callId?: string): Promise<string[]> {
     const logCallId = callId || 'unknown';
-    const agent = await this.createAgent(logCallId);
-    if (!agent) {
-      logger.warn('Agent creation failed. Skipping call labels generation.');
-      return [];
-    }
-
     const prompt = CALL_LABELS_PROMPT.replace('{transcript}', transcript);
 
     try {
-      const result = await agent.execute({
-        messages: [createUserMessage(prompt)],
-      });
-
-      const extracted = extractAgentContent(result);
+      const extracted = await executeCallLlmOnce(
+        () => this.createAgent(logCallId),
+        prompt,
+        'call_labels',
+        callId,
+      );
       if (!extracted.ok) {
-        logger.error(`call_labels_generation_failed | reason=${extracted.reason} | status=${extracted.status ?? result.status}`);
+        logger.error(`call_labels_generation_failed | reason=${extracted.reason} | status=${extracted.status}`);
         return [];
       }
 
@@ -1343,13 +1357,6 @@ export class TranscriptService {
     callId?: string,
   ): Promise<Array<{ merchantName: string; actionItems: PulseActionItem[] }>> {
     if (config.pulse.enabledChannels.length === 0) return [];
-    const logCallId = callId || 'unknown';
-
-    const agent = await this.createAgent(logCallId);
-    if (!agent) {
-      logger.warn('[Pulse] Agent creation failed — cannot generate Pulse data');
-      return [];
-    }
 
     // Fetch merchant list for LLM reference
     const merchantList = await pulseService.fetchOrgList();
@@ -1363,11 +1370,16 @@ export class TranscriptService {
       .replace('{transcript}', transcript);
 
     try {
-      const result = await agent.execute({ messages: [createUserMessage(prompt)] });
-
-      const extracted = extractAgentContent(result);
+      const extracted = await executeCallLlmOnce(
+        // The legacy agent keeps resolving credentials without the call, as before;
+        // `callId` only lets the Claw engine act as the call's creator.
+        () => this.createAgent(),
+        prompt,
+        'pulse_data',
+        callId,
+      );
       if (!extracted.ok) {
-        logger.error(`[Pulse] generatePulseData_failed`, { reason: extracted.reason, status: extracted.status ?? result.status });
+        logger.error(`[Pulse] generatePulseData_failed`, { reason: extracted.reason, status: extracted.status });
         return [];
       }
 
@@ -1657,6 +1669,13 @@ export class TranscriptService {
    */
   async reconcileTranscriptFromGcs(callId: string): Promise<void> {
     try {
+      // An admin-unlinked transcript has no attachment left, so the entryCount dedup
+      // below would read it as never processed and re-link it from GCS.
+      if (isTranscriptUnlinked(await repositories.calls.findByExternalId(callId))) {
+        logger.info(`[${callId}] transcript_reconcile_skipped`, { reason: 'transcript_unlinked' });
+        return;
+      }
+
       // Locate the call system message (same lookup the transcript-ready webhook uses).
       const callMessage = await repositories.messages.findHeadMessageByCallId(callId);
       if (!callMessage) {
@@ -1760,7 +1779,7 @@ export class TranscriptService {
    * both the normal tail of processing and the solo-call early exit.
    */
   private async queueTranscriptIndexing(
-    call: Pick<Call, 'id' | 'channelId' | 'createdByUserId'>,
+    call: Pick<Call, 'id' | 'externalId' | 'channelId' | 'createdByUserId'>,
   ): Promise<void> {
     try {
       const callChannel = call.channelId
@@ -1774,9 +1793,9 @@ export class TranscriptService {
         app: SubApp.TRANSCRIPT,
         ...(callChannel?.workspaceId ? { workspaceId: callChannel.workspaceId } : {}),
       });
-      logger.info(`[TranscriptService] Queued Vespa indexing for transcript ${call.id}`);
+      logger.info(`[TranscriptService] Queued Vespa indexing for transcript ${call.externalId}`);
     } catch (vespaError) {
-      logger.error(`[TranscriptService] Failed to queue Vespa job for transcript ${call.id}:`, vespaError);
+      logger.error(`[TranscriptService] Failed to queue Vespa job for transcript ${call.externalId}:`, vespaError);
     }
   }
 
@@ -1839,6 +1858,14 @@ export class TranscriptService {
       if (dispositionMeta === 'discard') {
         logger.info(`[${callId}] transcript_discarded_by_host`, { message_id: messageId });
         await this.deleteTranscriptArtifacts(callId);
+        return;
+      }
+
+      // Admin unlink: the transcript was detached on purpose and its GCS files kept, so
+      // a late webhook, the reconcile or the manual button must not re-attach it. Only
+      // the admin "reprocess" action clears the marker.
+      if (isTranscriptUnlinked(call)) {
+        logger.info(`[${callId}] transcript_processing_skipped`, { reason: 'transcript_unlinked', message_id: messageId });
         return;
       }
 
@@ -1921,7 +1948,7 @@ export class TranscriptService {
           logger.error(`[${callId}] generate_title_threw`, { error: err, stack: err instanceof Error ? err.stack : undefined });
           return null;
         });
-      const ticketSuggestionsPromise = this.generateTicketSuggestions(formattedTranscript).catch((err) => {
+      const ticketSuggestionsPromise = this.generateTicketSuggestions(formattedTranscript, callId).catch((err) => {
         logger.error(`[${callId}] generate_ticket_suggestions_threw`, { error: err, stack: err instanceof Error ? err.stack : undefined });
         return [];
       });
@@ -2049,7 +2076,7 @@ export class TranscriptService {
 
             if (isPulseChannel) {
               logger.info(`[Pulse] Channel ${call.channelId} is in allowlist — generating Pulse data for call ${callId}`);
-              const pulseGroups = await this.generatePulseData(formattedTranscript);
+              const pulseGroups = await this.generatePulseData(formattedTranscript, callId);
               const validatedGroups: Array<{
                 merchantName: string;
                 actionItems: PulseActionItem[];
@@ -2102,6 +2129,9 @@ export class TranscriptService {
             const detailedSummaryResult = await detailedSummaryPromise;
             if (detailedSummaryResult.success) {
               logger.info(`Auto-generated detailed summary for call: ${callId}`);
+              // App-scheduled calls get the finished summary pushed to their
+              // app's webhook. No-ops for calls no app owns, and never throws.
+              await emitCallSummaryReadyToApp(callId, detailedSummaryResult.rawSummary);
             }
             // A failure here was already logged by whichever exit gave up, so
             // there is no second line and the alert counts one per recording.

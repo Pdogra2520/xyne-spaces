@@ -1,3 +1,4 @@
+import { emitDomainEvent } from '@/events/emitDomainEvent';
 import { ingestEmailThreadTx } from '@/bypassAcl/transactions/emailService';
 /**
  * Email Service
@@ -27,6 +28,12 @@ import { adapterRegistry } from '@/integrations/core/adapterRegistry';
 import { ChannelExternalSourceResolver } from '@/services/channelExternalSourceResolver';
 import { websocketService } from './websocketService';
 import { redisService } from './redisService';
+import {
+  clearConversationAgentProgress,
+  listConversationAgentProgress,
+  requestClawAgentCancel,
+} from './agentProgressService';
+import { resolveDefaultReplyRecipients } from '@/utils/email';
 import { isRegisteredBot, getBotInfo } from '@/bots/core/bot-utils';
 import { PrismaClient } from '@prisma/client';
 import { evaluateAssignmentRule } from '@/utils/assignmentEngine';
@@ -66,7 +73,6 @@ import { dispatchEmailEventForEmailId } from '@/apps/core/emailUtils';
 import { normalizeRfcMessageId } from '@/utils/emailRfcMessageId';
 import { TICKET_CREATED_EVENT } from '@/automations/triggers/ticket-created.trigger';
 import { emitTicketUpdated } from '@/automations/triggers/ticket-updated.trigger';
-import { eventRouter } from '@/automations/engine/event-router';
 import { v4 as uuidv4 } from 'uuid';
 import { marked } from 'marked';
 import { findDuplicateEmailConversation } from '@/utils/vespaDuplicateDetector';
@@ -74,7 +80,7 @@ import { emailClassificationQueue } from '@/queues/emailClassificationQueue';
 import { ticketDuplicateService, type DuplicateScopeFieldValue } from '@/services/ticketDuplicateService';
 import { tagGenerationPipeline } from '@/tags/pipeline';
 import { DESK_EMAIL_SOURCE_TYPE, deskEmailConfigKey } from '@/tags';
-import { buildDraftEmailClawTask } from '@/agents/xyne-ai/prompts/draft';
+import { buildDraftEmailClawTask, buildOpeningDraftEmailClawTask } from '@/agents/xyne-ai/prompts/draft';
 import { runClawAgent } from '@/services/clawAgentService';
 import { convert as htmlToText } from 'html-to-text';
 import type { UserInfo as AgentUserInfo } from '@/agents/xyne-ai/tools/types';
@@ -147,6 +153,10 @@ export interface CreateConversationWithEmailParams {
   // expanded inside ticketDuplicateService. Undefined → falls back to project-wide
   // detection when the channel's duplicateScopeConfig has no matching values.
   scopeFieldValues?: DuplicateScopeFieldValue[];
+  deferChannelSideEffects?: boolean;
+  // Called once the conversation/email/ticket/thread-link transaction commits,
+  // before the slower post-create side effects run.
+  onThreadCommitted?: () => Promise<void>;
 }
 
 export interface AddEmailToConversationParams {
@@ -169,6 +179,8 @@ export interface AddEmailToConversationParams {
   clientVersionCode?: string;
   uploadedFiles?: UploadedFileResult[];
   receivedAt?: Date;
+  /** See CreateConversationWithEmailParams.deferChannelSideEffects. */
+  deferChannelSideEffects?: boolean;
 }
 
 export interface UpdateExternalInteractionParams {
@@ -677,6 +689,13 @@ export class EmailService {
     channelId: string;
     emailSubject: string;
     emailBody: string;
+    /**
+     * The thread has no email on it yet, so the draft OPENS the
+     * correspondence instead of replying to it.
+     */
+    openingEmail?: boolean;
+    /** Already-loaded channel preference, so the caller's gate is not re-read. */
+    preference?: Awaited<ReturnType<EmailChannelPreferenceRepository['findByChannelId']>>;
   }): Promise<void> {
     const { ticketId, conversationId, channelId, emailSubject, emailBody } = params;
     const startTime = Date.now();
@@ -690,7 +709,8 @@ export class EmailService {
       bodyLen: emailBody?.length ?? 0,
     });
 
-    const preference = await this.emailChannelPreferenceRepository.findByChannelId(channelId);
+    const preference =
+      params.preference ?? (await this.emailChannelPreferenceRepository.findByChannelId(channelId));
     if (preference?.autoDraftMode !== AutoDraftMode.DRAFT) {
       logger.info('[AutoDraft] skip: auto-draft not enabled for channel', {
         mode: 'autodraft',
@@ -754,13 +774,21 @@ export class EmailService {
     try {
       const effectiveAgentSlug = autoDraftAgentSlug ?? 'draft-agent';
       const latestBodyText = htmlToText(emailBody || '', { wordwrap: false }).trim() || emailBody;
-      const clawTask = buildDraftEmailClawTask({
-        userInfo,
-        hasDeskSignature,
-        emailSubject,
-        emailBody: latestBodyText,
-        conversationId,
-      });
+      const clawTask = params.openingEmail
+        ? buildOpeningDraftEmailClawTask({
+            userInfo,
+            hasDeskSignature,
+            ticketTitle: emailSubject,
+            ticketDescription: latestBodyText,
+            conversationId,
+          })
+        : buildDraftEmailClawTask({
+            userInfo,
+            hasDeskSignature,
+            emailSubject,
+            emailBody: latestBodyText,
+            conversationId,
+          });
       const callbackUrl = `${config.backendUrl.replace(/\/$/, '')}/api/internal/email/autodraft-callback/${encodeURIComponent(conversationId)}/${encodeURIComponent(channelId)}`;
       const { dispatched } = await runClawAgent({
         agentSlug: effectiveAgentSlug,
@@ -801,6 +829,125 @@ export class EmailService {
       await this.clearAutoDraftGenerating(conversationId);
       return;
     }
+  }
+
+  /**
+   * Drop the machine-written opening draft once that email has actually been
+   * sent, so the desk agent does not open the ticket to a draft of a mail
+   * that already went out. Only the ownerless seed row is touched — a draft a
+   * human wrote is their own row and is left alone.
+   */
+  async discardOpeningAutoDraft(conversationId: string): Promise<void> {
+    let draftingChannelId: string | null = null;
+    try {
+      // The seed row has no owner, so it is resolved above the caller's scope.
+      await withWorkspaceScope(async () => {
+        const seed = await this.prisma.emailDraft.findFirst({
+          where: { conversationId, userId: null },
+          select: { channelId: true, autoDraftStatus: true },
+        });
+        if (seed?.autoDraftStatus === AutoDraftStatus.GENERATING) draftingChannelId = seed.channelId;
+        await this.prisma.emailDraft.deleteMany({ where: { conversationId, userId: null } });
+      });
+    } catch (error) {
+      logger.warn('[AutoDraft] failed to discard the opening draft after send', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (draftingChannelId) await this.stopOpeningDraftRun(conversationId, draftingChannelId);
+  }
+
+  /**
+   * The opening draft was still being written when its email went out. Deleting
+   * the seed row alone leaves the agent drafting a mail nobody will read, with
+   * its "working" pill sitting on the thread until the run ends by itself — so
+   * stop the run and clear the pill. Best-effort: the mail is already sent.
+   *
+   * Only reached while the seed says GENERATING, so the run being stopped is the
+   * drafting one and not something a person asked the same agent to do here.
+   */
+  private async stopOpeningDraftRun(conversationId: string, channelId: string): Promise<void> {
+    try {
+      const preference = await this.emailChannelPreferenceRepository.findByChannelId(channelId);
+      // The same agent and persona triggerAutoDraft dispatched the run as.
+      const agentSlug = preference?.autoDraftAgentSlug?.trim() || 'draft-agent';
+      // Only the drafting agent's run: another agent may be working on this
+      // thread for a person, and its run and pill are not ours to touch.
+      const drafting = (await listConversationAgentProgress(conversationId)).filter(
+        run => run.agentSlug === agentSlug,
+      );
+      for (const run of drafting) {
+        if (!run.sessionId || !preference?.ownerUserId) continue;
+        const res = await requestClawAgentCancel({
+          conversationId,
+          agentSlug,
+          userId: preference.ownerUserId,
+          sessionId: run.sessionId,
+        });
+        if (!res.ok) {
+          logger.warn('[AutoDraft] could not cancel the opening draft run', {
+            conversationId,
+            sessionId: run.sessionId,
+            status: res.status,
+          });
+        }
+      }
+      await clearConversationAgentProgress(
+        conversationId,
+        channelId,
+        drafting.map(run => run.agentUserId),
+      );
+    } catch (error) {
+      logger.warn('[AutoDraft] failed to stop the opening draft run after send', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Auto-draft the FIRST email for a ticket that arrived without one.
+   *
+   * The existing auto-draft only ever fires on an inbound email, so a ticket
+   * raised from WhatsApp or the ticket form reached the desk with an empty
+   * composer — the one case where the agent has to write from scratch. Same
+   * machinery, same per-channel switch (`autoDraftMode = DRAFT`) and same
+   * persona; only the task differs. No-ops on a channel without auto-draft,
+   * and on a ticket whose thread already has email.
+   */
+  async triggerOpeningAutoDraft(params: {
+    ticketId: string;
+    conversationId: string;
+    channelId: string;
+    title: string;
+    description: string;
+  }): Promise<void> {
+    // Cheapest gate first: almost every ticket in the workspace is created on
+    // a channel that is not an email desk at all, and this runs on each one.
+    const preference = await this.emailChannelPreferenceRepository.findByChannelId(params.channelId);
+    if (preference?.autoDraftMode !== AutoDraftMode.DRAFT) return;
+
+    // Only an email desk has a mailbox to send the draft from; an app or Slack
+    // desk with auto-draft on must not get a "first customer email".
+    const channel = await this.channelRepository.findById(params.channelId);
+    if (channel?.type !== ChannelType.EMAIL) return;
+
+    const existing = await this.prisma.email.findFirst({
+      where: { conversationId: params.conversationId },
+      select: { id: true },
+    });
+    if (existing) return;
+
+    await this.triggerAutoDraft({
+      ticketId: params.ticketId,
+      conversationId: params.conversationId,
+      channelId: params.channelId,
+      emailSubject: params.title,
+      emailBody: params.description,
+      openingEmail: true,
+      preference,
+    });
   }
 
   /**
@@ -932,6 +1079,25 @@ export class EmailService {
         where: { conversationId, userId: null },
         select: { id: true },
       });
+      if (!existingSeed) {
+        const latest = await this.prisma.email.findFirst({
+          where: { conversationId },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, type: true },
+        });
+        const alreadySent =
+          !!latest &&
+          [EmailType.COMPOSE, EmailType.REPLY, EmailType.REPLY_ALL].includes(latest.type as EmailType);
+        if (alreadySent) {
+          logger.info('[AutoDraft] skip persist: the email was already sent while drafting', {
+            mode: 'autodraft',
+            ticketId,
+            conversationId,
+            sessionId,
+          });
+          return;
+        }
+      }
       if (existingSeed) {
         await this.prisma.emailDraft.update({
           where: { id: existingSeed.id },
@@ -1003,6 +1169,7 @@ export class EmailService {
   private async createEmailAttachments(
     emailId: string,
     conversationId: string,
+    channelId: string | null,
     userId: string,
     workspaceId: string,
     uploadedFiles: UploadedFileResult[]
@@ -1025,6 +1192,7 @@ export class EmailService {
       createdBy: userId,
       storageProvider: config.fileStorage.provider,
       conversationId: conversationId,
+      channelId: channelId,
       workspaceId: workspaceId,
       metadata: file.metadata || {},
     }));
@@ -1062,6 +1230,8 @@ export class EmailService {
       clientVersionName,
       clientVersionCode,
       scopeFieldValues,
+      deferChannelSideEffects = false,
+      onThreadCommitted,
     } = params;
     const normalizedRfcMessageId = normalizeRfcMessageId(rfcMessageId);
 
@@ -1147,7 +1317,7 @@ export class EmailService {
     // concurrently, the transaction rolls back everything (no orphaned tickets).
     let txResult: { conversation: any; ticket: any; email: any };
     try {
-      txResult = await createConversationWithEmailTx(this, channelId, userId, channel, receivedAt, emailType, emailSubject, emailBody, emailTo, emailFrom, emailCc, emailBcc, emailReplyTo, externalThreadId, externalMessageId, sentByUserId, normalizedRfcMessageId, rating, clientVersionName, clientVersionCode, externalSourceId, projectId, boardId, firstStage, slaResolutionDue, userGroup, groupId, ticketMetadata);
+      txResult = await createConversationWithEmailTx(this, channelId, userId, channel, receivedAt, emailType, emailSubject, emailBody, emailTo, emailFrom, emailCc, emailBcc, emailReplyTo, externalThreadId, externalMessageId, sentByUserId, normalizedRfcMessageId, rating, clientVersionName, clientVersionCode, externalSourceId, projectId, boardId, firstStage, slaResolutionDue, userGroup, groupId, ticketMetadata, deferChannelSideEffects);
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         await this.emailRepository.backfillRfcMessageIdByExternalMessageId(
@@ -1161,18 +1331,29 @@ export class EmailService {
       throw err;
     }
     const { conversation, ticket, email } = txResult;
+    await onThreadCommitted?.();
 
     // Direct DB ticket create bypasses Zero side-effects — invalidate the
     // channel's label unread counts so sidebar badges refresh.
-    websocketService.broadcastLabelUnreadCountsUpdate(channelId);
+    if (!deferChannelSideEffects) websocketService.broadcastLabelUnreadCountsUpdate(channelId);
 
     // --- Side effects (outside transaction) ---
 
     // Direct DB insert bypasses Zero side-effects, so dispatch the EMAIL app event ourselves.
     void dispatchEmailEventForEmailId(email.id);
 
-    void eventRouter.emit(
-      { type: TICKET_CREATED_EVENT, payload: { ticketId: ticket.id } },
+    void emitDomainEvent(
+      {
+        type: TICKET_CREATED_EVENT,
+        payload: {
+          ticketId: ticket.id,
+          scope: {
+            boardId: ticket.boardId ?? null,
+            projectId: ticket.projectId ?? null,
+            channelId: ticket.channelId ?? null,
+          },
+        },
+      },
       ticket.workspaceId,
     ).catch((err: unknown) => logger.error(`[EmailService] TICKET_CREATED emit failed for ticket ${ticket.id}:`, err));
 
@@ -1220,7 +1401,8 @@ export class EmailService {
 
     // Enqueue tag generation for this email (fire-and-forget — must not block ingestion).
     // Priority 1 (high) so live inbound emails are always processed before bulk historical fetches.
-    if (config.enableTagGenerationPipeline) {
+    // Skip social media channels — DMs and reviews are short texts that don't benefit from LLM tagging.
+    if (config.enableTagGenerationPipeline && channel.type !== ChannelType.SOCIAL_MEDIA) {
       void tagGenerationPipeline.addGenerationJob({
         sourceId: email.id,
         sourceType: DESK_EMAIL_SOURCE_TYPE,
@@ -1277,7 +1459,7 @@ export class EmailService {
     });
 
     // Create MessageAttachment entries for email attachments
-    await this.createEmailAttachments(email.id, conversation.conversationId, userId, channel.workspaceId, uploadedFiles);
+    await this.createEmailAttachments(email.id, conversation.conversationId, conversation.channelId, userId, channel.workspaceId, uploadedFiles);
 
     // Process Google Meet links from email body and send to SAM 
     try {
@@ -1305,7 +1487,7 @@ export class EmailService {
     }
 
     // Update channel last activity
-      await this.channelRepository.updateLastActivity(channelId);
+      if (!deferChannelSideEffects) await this.channelRepository.updateLastActivity(channelId);
 
       // Get sender info
       const senderInfo = await this.getUserInfo(userId);
@@ -1325,11 +1507,14 @@ export class EmailService {
         createdAt: message.createdAt,
       };
 
-      // Real-time broadcast via WebSocket
-      await websocketService.broadcastToSession(channelId, 'new_conversation', conversationMessage);
+      // Real-time broadcast via WebSocket. A historical import has no live
+      // conversation to announce, and `ingestEmailThread` sends neither of these.
+      if (!deferChannelSideEffects) {
+        await websocketService.broadcastToSession(channelId, 'new_conversation', conversationMessage);
 
-    // Also broadcast via Redis for horizontal scaling
-    await redisService.broadcastMessageToSession(channelId, conversationMessage);
+        // Also broadcast via Redis for horizontal scaling
+        await redisService.broadcastMessageToSession(channelId, conversationMessage);
+      }
 
     return {
       conversation,
@@ -1367,6 +1552,7 @@ export class EmailService {
         clientVersionCode,
         uploadedFiles = [],
         receivedAt,
+        deferChannelSideEffects = false,
       } = params;
 
       // Validate conversation exists
@@ -1407,8 +1593,8 @@ export class EmailService {
 
       // When an app-desk source link is requested, the Email upsert and the
       // link write share one transaction so neither can be lost on its own.
-      const email = externalSourceId ? await addEmailToConversationTx(this, emailData, externalMessageId, externalThreadId, externalSourceId) : await this.emailRepository.create(emailData);
-      void this.channelRepository.updateLastActivity(conversation.channelId);
+      const email = externalSourceId ? await addEmailToConversationTx(this, emailData, externalMessageId, externalThreadId, externalSourceId, channel?.workspaceId ?? undefined) : await this.emailRepository.create(emailData);
+      if (!deferChannelSideEffects) void this.channelRepository.updateLastActivity(conversation.channelId);
 
       // Direct DB insert bypasses Zero side-effects, so dispatch the EMAIL app event ourselves.
       void dispatchEmailEventForEmailId(email.id);
@@ -1424,7 +1610,7 @@ export class EmailService {
         }
 
         await syncTicketEmailCount(this.prisma, conversationId);
-        websocketService.broadcastLabelUnreadCountsUpdate(conversation.channelId);
+        if (!deferChannelSideEffects) websocketService.broadcastLabelUnreadCountsUpdate(conversation.channelId);
 
         const previousLatest = await this.prisma.email.findFirst({
           where: { conversationId, id: { not: email.id } },
@@ -1451,15 +1637,17 @@ export class EmailService {
             }));
           }
 
-          void this.notifyAssigneeOfReply({
-            ticketId: ticketRow.id,
-            conversationId,
-            channelId: conversation.channelId,
-            workspaceId: channel?.workspaceId,
-            emailSubject,
-            emailFrom,
-            emailId: email.id,
-          });
+          if (!deferChannelSideEffects) {
+            void this.notifyAssigneeOfReply({
+              ticketId: ticketRow.id,
+              conversationId,
+              channelId: conversation.channelId,
+              workspaceId: channel?.workspaceId,
+              emailSubject,
+              emailFrom,
+              emailId: email.id,
+            });
+          }
         }
 
         this.pushVespaJobForTicket(
@@ -1475,7 +1663,7 @@ export class EmailService {
         logger.error(`[EmailService] Error pushing Vespa job for mail ${email.id}:`, error);
       });
 
-      if (config.enableTagGenerationPipeline && channel?.workspaceId) {
+      if (config.enableTagGenerationPipeline && channel?.workspaceId && channel.type !== ChannelType.SOCIAL_MEDIA) {
         void tagGenerationPipeline.addGenerationJob({
           sourceId: email.id,
           sourceType: DESK_EMAIL_SOURCE_TYPE,
@@ -1492,7 +1680,7 @@ export class EmailService {
       if (!channel?.workspaceId) {
         throw new Error(`workspaceId required: channel not found for email ${email.id} attachments`);
       }
-      await this.createEmailAttachments(email.id, conversation.conversationId, conversation.createdBy, channel.workspaceId, uploadedFiles);
+      await this.createEmailAttachments(email.id, conversation.conversationId, conversation.channelId, conversation.createdBy, channel.workspaceId, uploadedFiles);
 
       if (ticketRow) {
         void this.triggerAutoDraft({
@@ -1599,8 +1787,18 @@ export class EmailService {
       logger.error(`[EmailService] Error pushing Vespa job for ticket ${ticket.id}:`, error);
     });
 
-    void eventRouter.emit(
-      { type: TICKET_CREATED_EVENT, payload: { ticketId: ticket.id } },
+    void emitDomainEvent(
+      {
+        type: TICKET_CREATED_EVENT,
+        payload: {
+          ticketId: ticket.id,
+          scope: {
+            boardId: ticket.boardId ?? null,
+            projectId: ticket.projectId ?? null,
+            channelId: ticket.channelId ?? null,
+          },
+        },
+      },
       ticket.workspaceId,
     ).catch((err: unknown) => logger.error(`[EmailService] TICKET_CREATED emit failed for ticket ${ticket.id}:`, err));
 
@@ -1838,9 +2036,11 @@ export class EmailService {
 
     const to = params.to?.length
       ? params.to
-      : params.type === 'REPLY'
-        ? [initialEmail.replyTo?.[0] ?? initialEmail.from]
-        : [...new Set([initialEmail.replyTo?.[0] ?? initialEmail.from, ...initialEmail.to])];
+      : resolveDefaultReplyRecipients({
+          type: params.type,
+          initialEmail,
+          ownAddresses: [fromEmailAddress, preference.sendAsEmail, owner.email, externalSource.displayName],
+        });
     const cc = params.cc ?? (params.type === 'REPLY_ALL' && !params.to ? (initialEmail.cc || []) : []);
     const bcc = params.bcc ?? [];
 
@@ -2091,8 +2291,18 @@ export class EmailService {
         logger.warn('[EmailService] failed to sync initial message md', error);
       }
 
-      void eventRouter.emit(
-        { type: TICKET_CREATED_EVENT, payload: { ticketId: txResult.ticketId } },
+      void emitDomainEvent(
+        {
+          type: TICKET_CREATED_EVENT,
+          payload: {
+            ticketId: txResult.ticketId,
+            scope: {
+              boardId: boardId ?? null,
+              projectId: projectId ?? null,
+              channelId: channelId ?? null,
+            },
+          },
+        },
         channel.workspaceId,
       ).catch((err: unknown) => logger.error(`[EmailService] TICKET_CREATED emit failed for ticket ${txResult.ticketId}:`, err));
 
@@ -2177,6 +2387,7 @@ export class EmailService {
           await this.createEmailAttachments(
             e.id,
             txResult.conversationId,
+            channel.id,
             userId,
             channel.workspaceId,
             e.uploadedFiles,

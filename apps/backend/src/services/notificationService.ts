@@ -1481,6 +1481,59 @@ class NotificationService {
     return { deliveredUserIds };
   }
 
+  async createViewSharedNotifications(
+    recipientUserIds: string[],
+    viewId: string,
+    viewName: string,
+    actorId: string,
+    actorName: string,
+    actorAction: 'view_shared' | 'view_access_revoked',
+  ): Promise<{ deliveredUserIds: string[] }> {
+    const recipientIds = recipientUserIds.filter(id => id !== actorId);
+
+    if (recipientIds.length === 0) {
+      return { deliveredUserIds: [] };
+    }
+
+    getNotificationJobsExpected().add(recipientIds.length, { platform: 'desktop', message_type: 'saved_view' });
+
+    const title = actorAction === 'view_shared'
+      ? `${actorName} shared a view with you`
+      : `Your access to a view was revoked`;
+    const message = actorAction === 'view_shared'
+      ? `${actorName} shared "${viewName}" with you`
+      : `Your access to "${viewName}" was revoked by ${actorName}`;
+
+    const results = await Promise.allSettled(
+      recipientIds.map(async userId => {
+        await this.createNotification(userId, {
+          title,
+          message,
+          type: 'VIEW_SHARED' as NotificationType,
+          relatedEntityType: 'saved_view',
+          relatedEntityId: viewId,
+          // Opens the view directly (ProjectViewBuilder). NotificationHandler
+          // prefixes the workspace and navigates here on click; without it the
+          // popup falls back to /chat.
+          actionUrl: `/projects/views/${viewId}`,
+          metadata: {
+            viewId,
+            actorId,
+            actorName,
+            actorAction,
+          },
+        });
+        return userId;
+      })
+    );
+
+    const deliveredUserIds = results
+      .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+      .map(r => r.value);
+
+    return { deliveredUserIds };
+  }
+
   async createRecordingSharedNotifications(
     recipientUserIds: string[],
     callId: string,
@@ -2320,6 +2373,76 @@ class NotificationService {
       );
     } catch (error) {
       logger.error('[NotificationService] Failed to send max workload reached notification:', error);
+    }
+  }
+
+  /**
+   * Tells the people who can reconnect it that the system disconnected a desk account.
+   * `channelId` is absent for the workspace shared mailbox, which belongs to no desk.
+   */
+  async sendDeskAccountDisconnectedNotification(params: {
+    sourceId: string;
+    accountLabel: string;
+    deskName?: string;
+    workspaceId: string;
+    channelId?: string;
+    actionUrl: string;
+    recipientUserIds: string[];
+  }): Promise<void> {
+    const { sourceId, accountLabel, deskName, workspaceId, channelId, actionUrl, recipientUserIds } = params;
+    if (recipientUserIds.length === 0) return;
+
+    try {
+      const title = 'Account disconnected';
+      const message = `${accountLabel} was disconnected${deskName ? ` from ${deskName}` : ''}. Reconnect it in desk settings.`;
+
+      const { desktopUsers, mobileUsers } = await notificationFilterService.filterGlobalUsers(
+        recipientUserIds,
+        NotificationType.DESK_ACCOUNT_DISCONNECTED,
+        'mention',
+      );
+
+      await realTimeNotificationService.initialize();
+
+      const notify = (userId: string, sendDesktop: boolean, sendMobile: boolean) =>
+        this.createNotification(userId, {
+          title,
+          message,
+          type: NotificationType.DESK_ACCOUNT_DISCONNECTED,
+          relatedEntityType: 'external_source',
+          relatedEntityId: sourceId,
+          actionUrl,
+          workspaceId,
+          metadata: { sourceId, ...(channelId && { channelId }) },
+        }, { sendDesktop, sendMobile });
+
+      const results = await Promise.allSettled(
+        recipientUserIds.map(async (userId) => {
+          await activityService.createActivity({
+            userId,
+            actorId: userId,
+            workspaceId,
+            actorAction: 'desk_account_disconnected',
+            actionSource: channelId ? 'channel' : 'workspace',
+            actionSourceId: channelId ?? workspaceId,
+            ...(channelId && { channelId }),
+            classification: ActivityClassification.ACTIONABLE,
+          });
+
+          const receiveDesktop = desktopUsers.includes(userId);
+          const receiveMobile = mobileUsers.includes(userId);
+          if (!receiveDesktop && !receiveMobile) return;
+
+          await notify(userId, receiveDesktop, receiveMobile);
+        }),
+      );
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          logger.error('[NotificationService] Desk account disconnected notification failed for a recipient:', result.reason);
+        }
+      }
+    } catch (error) {
+      logger.error('[NotificationService] Failed to send desk account disconnected notification:', error);
     }
   }
 

@@ -33,6 +33,7 @@ import analyticsRoutes from '@/routes/analytics';
 import apiKeyRoutes from '@/routes/api-keys';
 import userManagementRoutes from '@/routes/userManagement';
 import userActivationRoutes from '@/routes/userActivation';
+import secretsVaultRoutes from '@/routes/secretsVault';
 import channelRoutes from '@/routes/channels';
 import microsoftDeskAuthRoutes from '@/integrations/routes/microsoft-desk-auth';
 import conversationRoutes from '@/routes/conversations';
@@ -71,9 +72,11 @@ import userRoutes from '@/routes/users';
 import notificationRoutes from '@/routes/notifications';
 import draftRoutes from '@/routes/draftAttachments';
 import callRoutes from '@/routes/calls';
+import callAdminRoutes from '@/routes/callAdmin';
 import calendarSyncRoutes from '@/routes/calendarSync';
 import calendarOAuthRoutes from '@/routes/calendarOAuth';
 import driveOAuthRoutes from '@/routes/driveOAuth';
+import userContactsRoutes from '@/routes/userContacts';
 import calendarWatchRoutes from '@/routes/calendarWatch';
 import calendarWebhookRoutes from '@/routes/calendarWebhooks';
 import callLobbyRoutes from '@/routes/callLobby';
@@ -103,8 +106,10 @@ import auditLogRoutes from '@/routes/auditLogs';
 import recordingPointerBackfillRoutes from '@/routes/recordingPointerBackfill';
 import sdlcRepoCredentialBackfillRoutes from '@/routes/sdlcRepoCredentialBackfill';
 import searchMetricsRoutes from '@/routes/searchMetrics';
+import searchFeedbackRoutes from '@/routes/searchFeedback';
 import knowledgeRoutes from '@/routes/knowledge';
 import vespaSearchRoutes, { relatedContextRouter } from '@/routes/vespaSearch';
+import assistantRouteRoutes from '@/routes/assistantRoute';
 import { dashboardClawRouter } from '@/routes/dashboardClaw';
 import summarizeRoutes from '@/routes/summarize';
 import xyneAIRoutes from '@/routes/xyneAI';
@@ -114,7 +119,6 @@ import ticketMigrationRoutes from '@/routes/ticketMigration';
 import gmailWatchRenewalRoutes from '@/routes/gmailWatchRenewal';
 import { registerPrivateBackfillRoutes } from '@/routes/privateBackfillRoutes';
 import aiRoutes from '@/routes/aiRoutes';
-import productInsightsRoutes from '@/routes/productInsights';
 // import adminBackfillRoutes from '@/routes/adminBackfill';
 import ysweetRoutes, { ysweetValidateRouter } from '@/routes/ysweet';
 import canvasRoutes from '@/routes/canvas';
@@ -147,6 +151,8 @@ import sdlcArtifactVersionsInternalRoutes from '@/routes/sdlcArtifactVersionsInt
 import sdlcWikiInternalRoutes from '@/routes/sdlcWikiInternal';
 import { handleAutoDraftCallback } from '@/controllers/autodraftCallback.handler';
 import { handleDeskReportCallback } from '@/controllers/deskReportCallback.handler';
+import { handleClawCallAiCallback } from '@/controllers/clawCallAiCallback.handler';
+import { CLAW_CALL_AI_CALLBACK_PATH } from '@/services/callAi/clawCallAiRunner';
 import automationWebhookRoutes from '@/automations/routes/webhook-trigger.handler';
 import activityLogRoutes from '@/routes/activityLog';
 import userActivityRoutes from '@/routes/userActivity';
@@ -184,6 +190,7 @@ import { conversationIngestQueue } from '@/queues/conversationIngestQueue';
 import { documentIngestQueue } from '@/queues/documentIngestQueue';
 import { teamIntelligenceQueue } from '@/team-intelligence/queue';
 import { emailClassificationQueue } from '@/queues/emailClassificationQueue';
+import { callTranscriptionQueue } from '@/queues/callTranscriptionQueue';
 import { autoDraftQueue } from '@/queues/autoDraftQueue';
 import { entityExtractionQueue } from '@/queues/entityExtractionQueue';
 import { initStorage } from '@/services/storage';
@@ -199,8 +206,10 @@ import { coerceTwinReplyDraft, destinationNameLookup, createTwinReplyDraft } fro
 import userMigrationRoutes from '@/routes/userMigration';
 import { decryptRequestBodyMiddleware, encryptResponseBodyMiddleware } from './middleware/decryptionMiddleware';
 import internalRoutes from '@/routes/internal';
+import userDeactivationRoutes from '@/routes/userDeactivation';
 import collectionsRoutes from '@/routes/collections';
 import merchantRoutes from '@/routes/merchants';
+import formFieldValuesRoutes from '@/routes/formFieldValues';
 import officeConversionRoutes from '@/routes/officeConversion';
 import sdlcRoutes from '@/routes/sdlc';
 import sdlcClawRoutes from '@/routes/sdlcClaw';
@@ -529,11 +538,14 @@ export class App {
 
     this.app.use('/api/messages', authMiddleware.authenticate, reactionRoutes);
 
+    // Calls admin panel — must be before /api/calls, whose /:callId routes would shadow it
+    this.app.use('/api/calls/admin', authMiddleware.authenticate, callAdminRoutes);
     // Claw MCP route (user + app auth) — must be before /api/calls
     this.app.use('/api/calls/claw', authenticateUserOrApp, callRoutes);
     this.app.use('/api/calls', authMiddleware.authenticate, callRoutes); // Calling feature routes
     this.app.use('/api/calendar/oauth', calendarOAuthRoutes); // Calendar-only OAuth (init is authenticated; callbacks use bound state)
     this.app.use('/api/drive/oauth', driveOAuthRoutes); // KB Drive import OAuth (init is authenticated; callback uses bound state)
+    this.app.use('/api/user-contacts', userContactsRoutes); // Per-user contacts import (invite dialog; init is authenticated, callbacks use bound state)
     this.app.use('/api/calendar/sync', authMiddleware.authenticate, calendarSyncRoutes); // Calendar manual sync
     this.app.use('/api/calendar/watch', authMiddleware.authenticate, calendarWatchRoutes); // Calendar watch setup
     this.app.use('/api/voice-input', authMiddleware.authenticate, voiceInputRoutes); // Low-latency chat voice input
@@ -609,6 +621,48 @@ export class App {
         res.status(500).json({ error: 'Internal error' });
       }
     });
+    // Conversation-access check for claw: claw sessions are keyed by
+    // conversationId (not userId), so claw must verify the caller may access a
+    // conversation before binding its session. Returns whether the conversation
+    // exists and whether the user is a member of its channel (or it is a PUBLIC
+    // channel in the user's workspace). Spaces owns this ACL.
+    this.app.post('/api/internal/conversation-access', validateS2SKey, async (req: Request, res: Response) => {
+      try {
+        const { conversationId, userId } = (req.body ?? {}) as { conversationId?: string; userId?: string };
+        if (!conversationId || !userId) {
+          res.status(400).json({ error: 'conversationId and userId are required' });
+          return;
+        }
+        const prisma = DatabaseClient.getInstance();
+        const conv = await prisma.conversation.findUnique({
+          where: { conversationId },
+          select: { channelId: true },
+        });
+        if (!conv) {
+          res.json({ exists: false, canAccess: false });
+          return;
+        }
+        const participant = await prisma.channelParticipant.findUnique({
+          where: { channelId_userId: { channelId: conv.channelId, userId } },
+          select: { id: true },
+        });
+        let canAccess = participant !== null;
+        if (!canAccess) {
+          const channel = await prisma.channel.findUnique({
+            where: { id: conv.channelId },
+            select: { visibility: true, workspaceId: true },
+          });
+          if (channel?.visibility === 'PUBLIC') {
+            const user = await prisma.user.findUnique({ where: { id: userId }, select: { workspaceId: true } });
+            canAccess = !!user?.workspaceId && user.workspaceId === channel.workspaceId;
+          }
+        }
+        res.json({ exists: true, canAccess });
+      } catch (err) {
+        logger.error('[conversation-access] failed', err);
+        res.status(500).json({ error: 'Internal error' });
+      }
+    });
     this.app.post(
       '/api/internal/automations/claw-callback/:executionId/:stepName',
       validateS2SKey,
@@ -640,9 +694,18 @@ export class App {
       validateS2SKey,
       handleDeskReportCallback,
     );
+    // Claw's terminal result for a call AI run (CALL_AI_USE_CLAW_AGENT); the
+    // dispatching worker picks it up from Redis.
+    this.app.post(
+      `${CLAW_CALL_AI_CALLBACK_PATH}/:runKey`,
+      validateS2SKey,
+      handleClawCallAiCallback,
+    );
 
     // Internal canvas read/update (S2S-only, used by MCP tools)
     this.app.use('/api/internal/canvas', internalCanvasRoutes);
+    // User deactivation cleanup, called by an out-of-cluster service (own secret)
+    this.app.use('/api/internal/users', userDeactivationRoutes);
     this.app.use('/api/canvas/claw', authenticateUserOrApp, canvasRoutes);
     this.app.use('/api/vespaSearch/claw', authenticateUserOrApp, vespaSearchRoutes);
     this.app.use('/api/dashboard/claw', authenticateUserOrApp, dashboardClawRouter);
@@ -655,6 +718,7 @@ export class App {
     this.app.use('/api', authMiddleware.authenticate, draftAttachmentRoutes); // Draft attachment upload routes
     this.app.use('/api/link-preview', authMiddleware.authenticate, linkPreviewRoutes); // Link preview routes
     this.app.use('/api/search-metrics', authMiddleware.authenticate, searchMetricsRoutes); // Search metrics routes (POST /api/search-metrics/...)
+    this.app.use('/api/search-feedback', authMiddleware.authenticate, searchFeedbackRoutes); // Search feedback routes (POST /api/search-feedback)
 
     // API Key management routes (admin only, no ACL needed as it has requireAdmin middleware)
     this.app.use('/api/admin/api-keys', apiKeyRoutes);
@@ -669,6 +733,8 @@ export class App {
 
     // user deactivation from dashboard 
     this.app.use('/api/user-activation', userActivationRoutes);
+
+    this.app.use('/api/secrets-vault', authMiddleware.authenticate, secretsVaultRoutes);
 
     // Project routes (auth and ACL required)
     this.app.use('/api/projects', authMiddleware.authenticate, projectRoutes);
@@ -734,6 +800,7 @@ export class App {
     // Collections routes
     this.app.use('/api/collections', authMiddleware.authenticate, collectionsRoutes);
     this.app.use('/api/merchants', authMiddleware.authenticate, merchantRoutes);
+    this.app.use('/api/form-field-values', authMiddleware.authenticate, formFieldValuesRoutes);
 
     // Office document (pptx, docx, ...) -> PDF conversion, via LibreOffice.
     // Stateless: takes uploaded bytes, returns converted bytes, touches no stored data.
@@ -768,8 +835,7 @@ export class App {
     this.app.use('/api/vespaSearch/related', authMiddleware.authenticate, relatedContextRouter);
     this.app.use('/api/vespaSearch', authMiddleware.authenticate, vespaSearchRoutes);
 
-    // Product Insights routes (auth and ACL required)
-    this.app.use('/api/productInsights', authMiddleware.authenticate, productInsightsRoutes);
+    this.app.use('/api/assistant/route', authMiddleware.authenticate, assistantRouteRoutes);
 
     // API Key management routes (admin only, no ACL needed as it has requireAdmin middleware)
     this.app.use('/api/admin/api-keys', apiKeyRoutes);
@@ -945,6 +1011,9 @@ export class App {
       logger.info('Initializing email classification queue...');
       await emailClassificationQueue.initialize();
 
+      // Call transcription is producer-only here (lazy queue on enqueue); the consumer
+      // runs in the worker process — see ENABLE_CALL_TRANSCRIPTION_WORKER.
+
       // Producer only — messages are enqueued here at ingest; the worker (a
       // separate process) drains each thread once its debounce window elapses.
       logger.info('Initializing entity extraction queue...');
@@ -1038,11 +1107,15 @@ export class App {
       );
     }
 
-    try {
-      await registerAllExternalSources();
-    } catch (error) {
-      logger.error('Failed to register external sources:', error);
-      logger.warn('Continuing startup without external sources...');
+    if (config.enableExternalSourceRegistration) {
+      try {
+        await registerAllExternalSources();
+      } catch (error) {
+        logger.error('Failed to register external sources:', error);
+        logger.warn('Continuing startup without external sources...');
+      }
+    } else {
+      logger.info('Skipping external-source bot registration (ENABLE_EXTERNAL_SOURCE_REGISTRATION=false)');
     }
 
     // Register workflow definitions
@@ -1181,6 +1254,9 @@ export class App {
 
       // Close auto draft queue
       await autoDraftQueue.close();
+
+      // Close call transcription queue
+      await callTranscriptionQueue.close();
 
       // Close radar execution producer queue (initialized above when enabled)
       const { radarExecutionQueue: radarQueue } = await import('@/queues/radarExecutionQueue');

@@ -105,6 +105,10 @@ export const CONFIG = {
   ),
   localHarnessPollTimeoutMs: Number(process.env["LOCAL_HARNESS_POLL_TIMEOUT_MS"] ?? 25_000),
   localHarnessRunTimeoutMs: Number(process.env["LOCAL_HARNESS_RUN_TIMEOUT_MS"] ?? 900_000),
+  /** How long a run-stream answer stays open after `done` waiting for its late
+   *  follow-up suggestions (generated after the answer). 0 closes on `done`;
+   *  the suggestions then only appear from conversation history. */
+  followUpStreamHoldMs: Math.max(0, Number(process.env["FOLLOW_UP_STREAM_HOLD_MS"] ?? 30_000)),
   xyneSpacesCallbackUrl: process.env["XYNE_SPACES_CALLBACK_URL"] ?? "",
   // Python agent (Azure STT behind /transcribe-audio). Same service the Spaces
   // voice input proxies to; empty disables voice-note transcription.
@@ -116,6 +120,8 @@ export const CONFIG = {
   // public ingress out of the path. Falls back to spacesBackendUrl so dev /
   // single-node deploys keep working without setting two envs.
   spacesInternalUrl: process.env["SPACES_INTERNAL_URL"] ?? process.env["SPACES_BACKEND_URL"] ?? "http://localhost:3001",
+  // The dedicated SDLC backend. Empty means SDLC calls go to spacesInternalUrl.
+  sdlcBackendUrl: process.env["SDLC_BACKEND_URL"] ?? "",
   /**
    * Read-only Postgres connection string to the Spaces DB. When set, claw-auth
    * fetches fresh user session credentials (token, sessionId, workspaceId)

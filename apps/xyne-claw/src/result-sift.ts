@@ -1,5 +1,6 @@
-import { jevEnabled, jevScoreItems, jevThreshold } from "./jev.js";
-import { recordJudgeOutcome } from "./judge-backend.js";
+import { xorEnabled, xorScoreItems, xorThreshold } from "./xor.js";
+import { recordJudgeOutcome } from "./judge-trace.js";
+import { buildJudgeState } from "./judge-state.js";
 import { metric } from "./metrics.js";
 
 const MIN_CHARS = Math.max(500, Number(process.env["JEV_RESULT_SIFT_MIN_CHARS"]) || 4_000);
@@ -8,7 +9,6 @@ const MIN_KEEP = Math.max(1, Number(process.env["JEV_RESULT_SIFT_MIN_KEEP"]) || 
 const MAX_ITEMS = Math.max(MIN_ITEMS, Number(process.env["JEV_RESULT_SIFT_MAX_ITEMS"]) || 600);
 const ITEM_PREVIEW_CHARS = 500;
 const MIN_REDUCTION = 0.25;
-const SIFT_TIMEOUT_MS = Math.max(500, Number(process.env["JEV_RESULT_SIFT_TIMEOUT_MS"]) || 4_000);
 
 export interface SplitResult {
   head: string;
@@ -113,33 +113,53 @@ export function selectItems(
   return keep;
 }
 
+/**
+ * The STATE the sift scores items against: the request, a short summary of the
+ * earlier conversation and tool calls, and this call's args (judge-state.ts).
+ * Exported for tests.
+ */
+export function siftState(params: { toolName: string; task: string; messages?: readonly unknown[]; args?: unknown }): string {
+  const context = buildJudgeState({
+    task: params.task,
+    ...(params.messages ? { messages: params.messages } : {}),
+    current: { tool: params.toolName, ...(params.args !== undefined ? { args: params.args } : {}) },
+  });
+  return `${context}\n\nThe agent called the tool \`${params.toolName}\` and it returned a list of items.`;
+}
+
 export async function siftToolResult(params: {
   toolName: string;
   content: string;
   task: string;
+  /** pi transcript so far — earlier turns and tool calls inform relevance. */
+  messages?: readonly unknown[];
+  /** This call's arguments. */
+  args?: unknown;
   charBudget: number;
 }): Promise<SiftOutcome | null> {
   const { toolName, content, task } = params;
-  if (!jevEnabled() || !task.trim() || content.length < MIN_CHARS) return null;
+  if (!xorEnabled() || !task.trim() || content.length < MIN_CHARS) return null;
   const split = splitResultItems(content);
   if (!split || split.items.length < MIN_ITEMS || split.items.length > MAX_ITEMS) return null;
 
   const started = Date.now();
   const indexed = split.items.map((text, index) => ({ text, index }));
-  const scores = await jevScoreItems(
-    `The user's request:\n${task.slice(0, 4_000)}\n\nThe agent called the tool \`${toolName}\` and it returned a list of items.`,
-    indexed,
-    {
-      purpose: "result-sift",
-      key: (item) => String(item.index),
-      instructions: (item) =>
-        `This item contains information that helps answer the user's request: ${item.text.slice(0, ITEM_PREVIEW_CHARS)}`,
-      timeoutMs: SIFT_TIMEOUT_MS,
-    },
-  );
+  const scores = await xorScoreItems({
+    state: siftState({
+      toolName,
+      task,
+      ...(params.messages ? { messages: params.messages } : {}),
+      ...(params.args !== undefined ? { args: params.args } : {}),
+    }),
+    items: indexed,
+    purpose: "result-sift",
+    key: (item) => String(item.index),
+    instructions: (item) =>
+      `This item contains information that helps answer the user's request: ${item.text.slice(0, ITEM_PREVIEW_CHARS)}`,
+  });
   if (!scores) return null;
 
-  const threshold = jevThreshold("JEV_RESULT_THRESHOLD", 0.3);
+  const threshold = xorThreshold("JEV_RESULT_THRESHOLD", 0.3);
   const keep = selectItems(split.items, scores, threshold, params.charBudget);
   const keptItems = split.items.filter((_, index) => keep.has(index));
   const body = keptItems.join(split.joiner);

@@ -1,3 +1,10 @@
+## [1.497.0](https://github.com/juspay/xyne-spaces/compare/v1.496.0...v1.497.0) (2026-10-14)
+
+
+### Features
+
+* SDLC hub Wiki and Hub Knowledge UI audit fixes ([#2884](https://github.com/juspay/xyne-spaces/issues/2884)) ([4d909a4](https://github.com/juspay/xyne-spaces/commit/4d909a4dcccf97d6ed261498aeab50c1e9639cf0))
+
 ## [1.496.0](https://github.com/juspay/xyne-spaces/compare/v1.495.0...v1.496.0) (2026-10-13)
 
 

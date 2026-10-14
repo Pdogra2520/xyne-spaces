@@ -1,0 +1,5 @@
+{
+  "title": "agent-room",
+  "entry": "/App.tsx",
+  "devSurface": "standalone"
+}

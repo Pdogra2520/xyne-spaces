@@ -43,6 +43,7 @@ import { globalClickTracker } from '../../services/Analytics/globalClickTracker'
 import { readTrackSource } from '../../services/Analytics/trackSource';
 import { useV2SessionInvalidator } from '../../hooks/useAskAISessionsV2';
 import { useSelectedAgent } from '../../hooks/useSelectedAgent';
+import { ASSISTANT_PANEL_ATTR } from '../../components/Assistant/buddy/constants';
 import { useAssistantActions } from '../../components/Assistant/useAssistantActions';
 import type { AssistantRouting } from '../../components/Assistant/useRoutedSubmit';
 import { useUserPreference } from '../../machines/userPreferencesMachine';
@@ -166,6 +167,7 @@ const AIScreen = (): ReactElement => {
   const [isDragging, setIsDragging] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement | null>(null);
   const landingComposerRef = useRef<AIComposerHandle | null>(null);
+  const [landingVoiceHost, setLandingVoiceHost] = useState<HTMLElement | null>(null);
   const chatThreadRef = useRef<AIChatThreadHandle | null>(null);
   const dragCounterRef = useRef(0);
   const showChatViewRef = useRef(showChatView);
@@ -718,7 +720,10 @@ const AIScreen = (): ReactElement => {
                    into the gap between them and a longer message grows the
                    composer downward (see LandingComposerSlot), so neither
                    moves the greeting. */
-                <main className='relative flex h-full flex-1 items-center justify-center px-6 py-8'>
+                <main
+                  ref={setLandingVoiceHost}
+                  className='relative flex h-full flex-1 items-center justify-center px-6 py-8'
+                >
                   {/* The landing page has no header, so without this the
                       sidebar's own collapse button would strand the user with
                       no way to bring it back. */}
@@ -736,7 +741,10 @@ const AIScreen = (): ReactElement => {
                       <SidebarLeftOpen size={16} aria-hidden='true' />
                     </button>
                   )}
-                  <div className='flex w-full max-w-3xl flex-col'>
+                  <div
+                    {...{ [ASSISTANT_PANEL_ATTR]: '' }}
+                    className='flex w-full max-w-3xl flex-col'
+                  >
                     <AIEmptyState />
                     <LandingComposerSlot className='mt-16'>
                       <AIComposer
@@ -750,6 +758,7 @@ const AIScreen = (): ReactElement => {
                         onContextChange={handleContextChange}
                         anchor='top'
                         hideDisclaimer
+                        voiceStageHost={landingVoiceHost}
                       />
                     </LandingComposerSlot>
                   </div>

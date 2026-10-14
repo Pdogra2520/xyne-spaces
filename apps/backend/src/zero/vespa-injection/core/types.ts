@@ -32,7 +32,7 @@ export interface VespaJobConfig<S extends keyof SchemaDataMap> {
   // same docId with content later.
   nameOnly?: boolean;
   // Not a document job: re-sync the SDLC hub this names (or the hub of the item it names).
-  // schema and docId only route and key it; see sdlc/search/sdlcSearchSync.ts.
+  // schema and docId only route and key it; see requestSdlcSearchSync in queues/vespaQueue.ts.
   sdlcSync?: SdlcSearchSyncTarget & { reason?: string };
 }
 

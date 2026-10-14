@@ -114,6 +114,13 @@ function v1Handler(endpoint: Extract<V1Kind, 'query' | 'mutator'>) {
       throw new SdkApiError('not_found', `Operation "${op}" was retired: ${target.reason}`);
     }
     if (target.kind === 'direct') {
+      // Hosts treat /query as read-only (a hidden app's queries are replayed later), so writes must go to /mutate.
+      if (endpoint === 'query' && target.method !== 'GET') {
+        throw new SdkApiError(
+          'validation_failed',
+          `Operation "${op}" changes state; send it to /api/sdk/v1/mutate.`,
+        );
+      }
       // Accepted on either endpoint: an id that moved onto a route was shipped
       // as a query or a mutator, and the client still posts it there.
       const parsed = parseV1Args(op, args);

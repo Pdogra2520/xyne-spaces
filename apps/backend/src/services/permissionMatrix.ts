@@ -310,13 +310,10 @@ const MANAGED_RESOURCES: readonly ResourceName[] = [
  * resources the user no longer qualifies for are revoked (WRITE/READ rows are left alone).
  * Roles are read from the DB, so call this after the role change has committed.
  * Error-swallowing, same fire-and-forget contract as syncResourceAdminAccess.
- *
- * @param isOrgAdmin  Override for the org-level check; resolved from org_members when omitted.
  */
 export async function reconcileUserPermissions(
   userId: string,
-  actorUserId: string,
-  isOrgAdmin?: boolean
+  actorUserId: string
 ): Promise<void> {
   const logPrefix = '[reconcileUserPermissions]';
 
@@ -338,25 +335,22 @@ export async function reconcileUserPermissions(
       return;
     }
 
-    let orgAdmin = isOrgAdmin;
-    if (orgAdmin === undefined) {
-      orgAdmin = await withWorkspaceScope(async () => {
-        const links = await db.workspaceOrganization.findMany({
-          where: { workspaceId: user.workspaceId, leftAt: null },
-          select: { orgId: true },
-        });
-        if (links.length === 0) return false;
-        const member = await db.orgMember.findFirst({
-          where: {
-            orgId: { in: links.map((l) => l.orgId) },
-            email: { equals: user.email, mode: 'insensitive' },
-            leftAt: null,
-          },
-          select: { role: true },
-        });
-        return !!member && ORG_ADMIN_ROLES.includes(member.role);
+    const orgAdmin = await withWorkspaceScope(async () => {
+      const links = await db.workspaceOrganization.findMany({
+        where: { workspaceId: user.workspaceId, leftAt: null },
+        select: { orgId: true },
       });
-    }
+      if (links.length === 0) return false;
+      const member = await db.orgMember.findFirst({
+        where: {
+          orgId: { in: links.map((l) => l.orgId) },
+          email: { equals: user.email, mode: 'insensitive' },
+          leftAt: null,
+        },
+        select: { role: true },
+      });
+      return !!member && ORG_ADMIN_ROLES.includes(member.role);
+    });
 
     const adminResources = new Set<ResourceName>(
       PERMISSION_MATRIX[role]
@@ -396,7 +390,6 @@ export async function reconcileUserPermissions(
 export async function syncOrgResourceAdminAccess(
   orgId: string,
   email: string,
-  shouldHaveAccess: boolean,
   actorUserId: string
 ): Promise<void> {
   const logPrefix = '[syncOrgResourceAdminAccess]';
@@ -421,7 +414,7 @@ export async function syncOrgResourceAdminAccess(
     });
 
     for (const user of users) {
-      await reconcileUserPermissions(user.id, actorUserId, shouldHaveAccess);
+      await reconcileUserPermissions(user.id, actorUserId);
     }
   } catch (error) {
     logger.error(`${logPrefix} Failed to sync access for org ${orgId}, email ${email}:`, error);

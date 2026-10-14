@@ -16581,10 +16581,9 @@ export function createMutators(
           if (updates.role !== undefined) {
             const member = await tx.run(zql.org_members.where('memberId', memberId).one());
             if (member) {
-              const shouldHaveAccess = updates.role === OrgRole.ADMIN || updates.role === OrgRole.OWNER;
               const { orgId, email } = member;
               asyncTasks.push(() =>
-                syncOrgResourceAdminAccess(orgId, email, shouldHaveAccess, authData.sub),
+                syncOrgResourceAdminAccess(orgId, email, authData.sub),
               );
             }
           }

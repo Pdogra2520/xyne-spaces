@@ -93,11 +93,11 @@ export const ArtifactAppHost = ({
   // Kept-alive apps never remount, so re-check the version when shown.
   useEffect(() => {
     if (!visible || !appId) return;
-    void queryClient.refetchQueries({
-      queryKey: ['artifact-app', appId],
-      stale: true,
-      type: 'active',
-    });
+    void queryClient.refetchQueries(
+      { queryKey: ['artifact-app', appId], stale: true, type: 'active' },
+      // Join the mount fetch rather than cancel and re-issue it.
+      { cancelRefetch: false },
+    );
   }, [visible, appId, queryClient]);
 
   const app = data?.app;
@@ -133,9 +133,9 @@ export const ArtifactAppHost = ({
   useEffect(() => {
     if (!shown || !fresh || shown.id === runningVersionId) return;
     if (runningVersionId === null) setRunningVersionId(shown.id);
-    // Owners follow new builds at once; viewers get a reload prompt.
-    else if (isOwner) reload();
-  }, [shown, fresh, isOwner, runningVersionId, reload]);
+    // Owners follow new builds when shown (a hidden copy would lose its state); viewers get a reload prompt.
+    else if (isOwner && visible) reload();
+  }, [shown, fresh, isOwner, visible, runningVersionId, reload]);
   const running = versions.find(v => v.id === runningVersionId) ?? shown;
   const updateAvailable = Boolean(shown && runningVersionId && shown.id !== runningVersionId);
 

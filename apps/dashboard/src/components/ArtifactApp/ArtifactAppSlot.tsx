@@ -89,23 +89,32 @@ export const ArtifactAppSlot = ({
       clippers = clippingAncestors(element);
       follow();
     };
+    // Only scrolls of an ancestor can move the slot; ignore the rest of the page.
+    const onScroll = (event: Event): void => {
+      if (event.target instanceof Node && event.target.contains(element)) follow();
+    };
+    // Ancestors and their siblings can move the slot; deeper elements (hover effects, spinners) cannot.
+    const onMotion = (event: Event): void => {
+      const target = event.target;
+      if (target instanceof Element && (target.parentElement ?? target).contains(element)) follow();
+    };
 
     // Ancestors too: content shifting above the slot resizes one of them without resizing the slot.
     const observer = new ResizeObserver(relayout);
     for (let el: HTMLElement | null = element; el; el = el.parentElement) observer.observe(el);
     window.addEventListener('resize', follow);
-    window.addEventListener('scroll', follow, true);
-    document.addEventListener('transitionrun', follow, true);
-    document.addEventListener('animationstart', follow, true);
+    window.addEventListener('scroll', onScroll, true);
+    document.addEventListener('transitionrun', onMotion, true);
+    document.addEventListener('animationstart', onMotion, true);
     publish();
 
     return (): void => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener('resize', follow);
-      window.removeEventListener('scroll', follow, true);
-      document.removeEventListener('transitionrun', follow, true);
-      document.removeEventListener('animationstart', follow, true);
+      window.removeEventListener('scroll', onScroll, true);
+      document.removeEventListener('transitionrun', onMotion, true);
+      document.removeEventListener('animationstart', onMotion, true);
     };
   }, [slotId, key]);
 

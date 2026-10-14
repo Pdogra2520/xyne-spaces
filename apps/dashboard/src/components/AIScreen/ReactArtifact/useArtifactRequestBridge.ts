@@ -34,6 +34,9 @@ const MAX_HELD_REQUESTS = 20;
 /** Storage requests carry appId in their JSON body; the host owns that value. */
 const STORAGE_PREFIX = '/claw/api/v1/artifact-app-storage/';
 
+/** Every proxied route is POST, so reads are told apart by path, not verb. */
+const READ_PATHS = ['/api/sdk/v1/query', `${STORAGE_PREFIX}query`];
+
 /** The only request headers forwarded from the (untrusted) app. Everything else
  *  the app tries to set is dropped; the host sets identity headers itself. */
 const FORWARDABLE_HEADERS = ['content-type', 'accept', 'x-route-env'];
@@ -181,8 +184,8 @@ export function useArtifactRequestBridge({ previewRef, appId, visibility }: Brid
       if (!requestId || !method || !url) return;
       if (visibility && !visibility.isActive()) {
         // Only reads wait for the app to be shown; a write sent late would act on stale state, so refuse it like mutate.
-        const verb = method.toUpperCase();
-        if (verb !== 'GET' && verb !== 'HEAD') {
+        const path = resolveUrl(url)?.pathname;
+        if (!path || !READ_PATHS.includes(path)) {
           reply(requestId, 0, {}, '', 'This app is in the background, so it cannot make changes.');
           return;
         }
@@ -202,6 +205,10 @@ export function useArtifactRequestBridge({ previewRef, appId, visibility }: Brid
     return (): void => {
       window.removeEventListener('message', onMessage);
       stopResume?.();
+      // Answer held requests so the app's fetch fails now instead of hanging until its timeout.
+      for (const [requestId] of held.splice(0)) {
+        reply(requestId, 0, {}, '', 'Dropped while the app was in the background.');
+      }
     };
   }, [previewRef, appId, visibility]);
 }

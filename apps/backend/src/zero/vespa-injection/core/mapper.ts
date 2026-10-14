@@ -12,6 +12,7 @@ import {
   ChannelVisibility,
   EntityUserAccess,
   ShareableEntityType,
+  TagMethod,
   TicketStatus,
   TicketStatusV2,
   type Schema,
@@ -958,6 +959,21 @@ export const computeRecordingPermissions = async (callId: string): Promise<strin
   ].filter((id): id is string => Boolean(id))));
 };
 
+/**
+ * A recording's confirmed labels as slugs. `Call.labels` holds Tag ids, and every recording
+ * has its own Tag rows, so search filters on the slug. AI suggestions (LLM/AUTOMATED) only
+ * count once confirmed, matching the label chips the recordings list shows.
+ */
+export const computeRecordingLabels = async (callId: string): Promise<string[]> => {
+  const call = await db.call.findUnique({ where: { id: callId }, select: { labels: true } });
+  if (!call?.labels.length) return [];
+  const tags = await db.tag.findMany({
+    where: { id: { in: call.labels }, method: TagMethod.MANUAL, isDeleted: false },
+    select: { tag: true },
+  });
+  return Array.from(new Set(tags.map(t => t.tag)));
+};
+
 export const mapCanvas = async (args: InsertValue<CanvasesSchema>, workspaceId?: string, orgId?: string): Promise<VespaFileDocument> => {
   // Get channel info if channelId exists
   let channelRef: string | undefined;
@@ -1100,6 +1116,7 @@ export const mapTranscript = async (args: InsertValue<TranscriptsSchema>, worksp
   const permissions = isRecordingCall
     ? await computeRecordingPermissions(args.id)
     : (await db.callParticipant.findMany({ where: { callId: args.id, isExternal: false } })).map(p => p.userId);
+  const labels = isRecordingCall ? await computeRecordingLabels(args.id) : [];
 
   return {
     docId: args.id,
@@ -1123,6 +1140,7 @@ export const mapTranscript = async (args: InsertValue<TranscriptsSchema>, worksp
     updatedAt: toTimestamp(args.updatedAt),
     ownerId: args.createdByUserId,
     permissions: permissions,
+    labels,
     urlInternal: args.transcript || '',
     urlOriginal: args.transcript || '',
     fileSize: fileSize,

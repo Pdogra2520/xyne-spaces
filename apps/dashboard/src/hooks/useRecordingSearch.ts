@@ -16,10 +16,12 @@ const RECORDING_SEARCH_RANK_PROFILE = 'default_native';
 interface UseRecordingSearchParams {
   text: string;
   ownerIds: string[];
+  /** Label slugs (`#label` chips); a recording matches if it carries any of them. */
+  labels: string[];
 }
 
 interface UseRecordingSearchResult {
-  /** True while a query or owner filter is set — the list should show `results`. */
+  /** True while a query, owner or label filter is set — the list should show `results`. */
   isActive: boolean;
   isSearching: boolean;
   error: string | null;
@@ -28,17 +30,19 @@ interface UseRecordingSearchResult {
 }
 
 /**
- * Searches the recordings the viewer can open by title, transcript and owner. Vespa
+ * Searches the recordings the viewer can open by title, transcript, owner and label. Vespa
  * ranks the transcript docs (docId = call id); the rows themselves come from Zero, so a
  * hit renders, updates and acts exactly like a row of the paginated list.
  */
 export function useRecordingSearch({
   text,
   ownerIds,
+  labels,
 }: UseRecordingSearchParams): UseRecordingSearchResult {
   const query = text.trim();
   const ownerKey = ownerIds.join(',');
-  const isActive = query.length > 0 || ownerKey.length > 0;
+  const labelKey = labels.join(',');
+  const isActive = query.length > 0 || ownerKey.length > 0 || labelKey.length > 0;
 
   const [matchedIds, setMatchedIds] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -68,6 +72,8 @@ export function useRecordingSearch({
         filterOnly: query.length === 0,
         keywordOnly: true,
         ...(ownerKey ? { from: ownerKey } : {}),
+        // The shared `tags` filter; on transcripts it matches the confirmed label slugs.
+        ...(labelKey ? { tags: labelKey } : {}),
       };
 
       searchService
@@ -91,7 +97,7 @@ export function useRecordingSearch({
       clearTimeout(timer);
       abortController.abort();
     };
-  }, [isActive, query, ownerKey]);
+  }, [isActive, query, ownerKey, labelKey]);
 
   const [rows, details] = useCachedQuery(queries.oatsRecordingsByIds({ ids: matchedIds }), {
     enabled: matchedIds.length > 0,

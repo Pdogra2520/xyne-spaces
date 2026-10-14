@@ -194,6 +194,14 @@ schema file {
       match: exact
     }
 
+    # Recording transcripts: the recording's confirmed (MANUAL) label slugs, for the
+    # `tags` search filter. Slugs, not Tag ids — each recording has its own Tag rows.
+    field labels type array<string> {
+      indexing: attribute | summary
+      attribute: fast-search
+      match: exact
+    }
+
   }
   # Vector embeddings
   field chunk_embeddings type tensor<bfloat16>(p{}, v[DIMS]) {

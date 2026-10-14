@@ -87,25 +87,28 @@ export const queueCallVespaDelete = (
 
 /**
  * A recording's transcript is a separate Vespa file doc (docId = call.id) whose
- * `fileName` is the recording title. Renaming only re-feeds the call doc, so push the
- * new title to the transcript doc too — field-scoped, so the transcript isn't re-embedded.
+ * `fileName` is the recording title and `labels` its confirmed label slugs. Editing either
+ * only re-feeds the call doc, so push the change to the transcript doc too — field-scoped,
+ * so the transcript isn't re-embedded.
  */
-export const queueTranscriptTitleUpdate = (
+export const queueTranscriptFieldsUpdate = (
   call: { id: string; transcript?: string | null; workspaceId?: string | null },
+  fields: Array<'fileName' | 'labels'>,
 ): void => {
   // No transcript means no transcript doc to update.
-  if (!call.transcript) return;
+  if (!call.transcript || fields.length === 0) return;
 
   vespaQueue.addJob({
     schema: fileSchema,
     jobType: 'update',
     docId: call.id,
     app: SubApp.TRANSCRIPT,
-    fields: ['fileName'],
+    fields,
     ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
   }).catch((error) => {
-    logger.error('[CallVespaQueue] Failed to queue transcript title update:', {
+    logger.error('[CallVespaQueue] Failed to queue transcript fields update:', {
       callId: call.id,
+      fields,
       errorMessage: error,
     });
   });

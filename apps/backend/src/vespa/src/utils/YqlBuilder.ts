@@ -213,6 +213,7 @@ export interface TicketFilters {
 export interface FileFilters {
   subApp?: string[];
   callType?: string[];
+  labels?: string[]; // Recording label slugs (OR-ed), from the shared `tags` filter
   docType?: string[];
   createdBy?: string[];
   createdBefore?: string;
@@ -833,6 +834,14 @@ export class YqlBuilder {
         .map((callType) => `callType contains ${params.bind('callType', callType.trim())}`)
         .join(' or ');
       conditions.push(`(${types})`);
+    }
+
+    // labels filter (recording transcripts' confirmed label slugs) — OR-ed like ticket tags
+    if (filters.labels && filters.labels.length > 0) {
+      const labels = filters.labels
+        .map((label) => `labels contains ${params.bind('labels', label.trim())}`)
+        .join(' or ');
+      conditions.push(`(${labels})`);
     }
 
     // createdBy filter (for from: functionality - files uploaded by specific user)

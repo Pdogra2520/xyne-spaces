@@ -85,6 +85,7 @@ const RecordingsV2Screen = (): ReactElement => {
   const [deleteRecording, setDeleteRecording] = useState<RecordingsV2PillRecording | null>(null);
   const [searchText, setSearchText] = useState('');
   const [searchOwnerIds, setSearchOwnerIds] = useState<string[]>([]);
+  const [searchLabels, setSearchLabels] = useState<string[]>([]);
   const {
     recordings,
     hasMoreRecordings,
@@ -95,7 +96,11 @@ const RecordingsV2Screen = (): ReactElement => {
     refreshRecordings,
   } = usePaginatedOatsRecordings(activeListTab, null);
   const currentUser = useSelf();
-  const recordingSearch = useRecordingSearch({ text: searchText, ownerIds: searchOwnerIds });
+  const recordingSearch = useRecordingSearch({
+    text: searchText,
+    ownerIds: searchOwnerIds,
+    labels: searchLabels,
+  });
   const isSearchActive = recordingSearch.isActive;
   // Search spans every recording the viewer can open (public ones included), so narrow
   // it to what the active tab lists: Created = own, Shared = a live share reaches the
@@ -114,10 +119,14 @@ const RecordingsV2Screen = (): ReactElement => {
     );
   }, [activeListTab, currentUser?.id, recordingSearch.results]);
   const visibleSourceRecordings = isSearchActive ? searchedRecordings : recordings;
-  const handleSearchChange = useCallback((text: string, ownerIds: string[]): void => {
-    setSearchText(text);
-    setSearchOwnerIds(ownerIds);
-  }, []);
+  const handleSearchChange = useCallback(
+    (text: string, ownerIds: string[], labels: string[]): void => {
+      setSearchText(text);
+      setSearchOwnerIds(ownerIds);
+      setSearchLabels(labels);
+    },
+    [],
+  );
   const { requestLeave, ConfirmDialog } = useLeaveRecording();
   const users = useUsers();
   const usersById = useMemo(() => new Map(users.map(user => [user.id, user])), [users]);
@@ -171,6 +180,17 @@ const RecordingsV2Screen = (): ReactElement => {
     () => availableLabels.filter(isResolved).filter(isManualLabel),
     [availableLabels, isResolved, isManualLabel],
   );
+  // `#label` suggestions: the confirmed label slugs seen so far. A label is its own Tag row on
+  // every recording, so the search filters on the slug, never the Tag id.
+  const searchLabelOptions = useMemo(() => {
+    const slugs = new Set(manualLabels.map(resolveLabel));
+    return [...slugs]
+      .sort((left, right) => left.localeCompare(right))
+      .map(slug => ({
+        id: slug,
+        name: slug,
+      }));
+  }, [manualLabels, resolveLabel]);
 
   const ownershipFilteredRecordings = useMemo(
     () => filterRecordingsByOwnership(visibleSourceRecordings, selectedSharerIds),
@@ -487,7 +507,16 @@ const RecordingsV2Screen = (): ReactElement => {
                 </p>
               </div>
 
-              <div className='col-span-2 row-start-2 flex min-w-0 flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-1 sm:gap-3'>
+              <div className='col-span-2 row-start-2 w-full sm:w-1/2'>
+                <RecordingSearchInput
+                  onChange={handleSearchChange}
+                  labelOptions={searchLabelOptions}
+                  isMobile={isMobile}
+                  {...(currentUser?.id ? { currentUserId: currentUser.id } : {})}
+                />
+              </div>
+
+              <div className='col-span-2 row-start-3 flex min-w-0 flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-1 sm:gap-3'>
                 <div
                   className='flex w-full items-center gap-1 rounded-xl bg-muted p-1 sm:w-auto'
                   role='group'
@@ -540,15 +569,9 @@ const RecordingsV2Screen = (): ReactElement => {
                   onSelectedLabelsChange={setSelectedLabels}
                   resolveLabel={resolveLabel}
                 />
-
-                <RecordingSearchInput
-                  onChange={handleSearchChange}
-                  isMobile={isMobile}
-                  {...(currentUser?.id ? { currentUserId: currentUser.id } : {})}
-                />
               </div>
 
-              <div className='col-start-2 row-start-1 flex items-center gap-2 sm:row-start-2'>
+              <div className='col-start-2 row-start-1 flex items-center gap-2 sm:row-start-3'>
                 {/* Icon-only below `sm`, where this row shares a line with the title. */}
                 <Button
                   type='button'

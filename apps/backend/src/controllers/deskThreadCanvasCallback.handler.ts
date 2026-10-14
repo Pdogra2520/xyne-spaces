@@ -55,11 +55,36 @@ export async function handleDeskThreadCanvasCallback(
   // Hoisted: the catch block marks the run FAILED with these.
   let metadata: CanvasMetadata = {};
   let workspaceId = '';
+  let author = FALLBACK_AUTHOR;
+
+  const runScoped = <T>(fn: () => Promise<T>): Promise<T> =>
+    runAsServiceActor('desk-thread-canvas-callback', workspaceId, fn);
+
+  const setMetadata = (patch: Partial<CanvasMetadata>) =>
+    runScoped(() =>
+      db.canvas.update({
+        where: { id: canvasId },
+        data: { metadata: { ...metadata, ...patch }, lastEditedAt: new Date() },
+      }),
+    );
+
+  // The canvas body is the only place the waiting user is looking, and it
+  // still reads "Generating canvas from thread…" — overwrite it, or the run
+  // looks stuck forever. Metadata keeps the reason for support. `finally`: a
+  // failed metadata write must not skip the body write.
+  const fail = async (reason: string): Promise<void> => {
+    try {
+      await setMetadata({ generationStatus: 'FAILED', error: reason });
+    } finally {
+      await syncToYSweet(canvasId, buildFailureBlocks(reason), author);
+    }
+  };
 
   try {
     const canvas = await db.canvas.findUnique({ where: { id: canvasId } });
     metadata = (canvas?.metadata as CanvasMetadata | null) ?? {};
     workspaceId = canvas?.workspaceId ?? '';
+    author = canvas?.createdBy || FALLBACK_AUTHOR;
 
     // Stale/dropped-run guard: only this run's sessionId may write.
     if (!canvas || metadata.sessionId !== sessionId) {
@@ -71,25 +96,6 @@ export async function handleDeskThreadCanvasCallback(
       res.json({ success: true, persisted: false });
       return;
     }
-
-    const runScoped = <T>(fn: () => Promise<T>): Promise<T> =>
-      runAsServiceActor('desk-thread-canvas-callback', workspaceId, fn);
-
-    const setMetadata = (patch: Partial<CanvasMetadata>) =>
-      runScoped(() =>
-        db.canvas.update({
-          where: { id: canvasId },
-          data: { metadata: { ...metadata, ...patch }, lastEditedAt: new Date() },
-        }),
-      );
-
-    // The canvas body is the only place the waiting user is looking, and it
-    // still reads "Generating canvas from thread…" — overwrite it, or the run
-    // looks stuck forever. Metadata keeps the reason for support.
-    const fail = async (reason: string): Promise<void> => {
-      await setMetadata({ generationStatus: 'FAILED', error: reason });
-      await syncToYSweet(canvasId, buildFailureBlocks(reason), canvas.createdBy || FALLBACK_AUTHOR);
-    };
 
     const errorMessage = typeof payload['error'] === 'string' ? payload['error'] : undefined;
     // claw sends "completed" | "failed" | "cancelled" (xyne-claw sendCallback).
@@ -115,7 +121,6 @@ export async function handleDeskThreadCanvasCallback(
 
     // Read before writing, as canvasController does: syncToYSweet clears the
     // document, so a regenerate would lose a whiteboard drawn on the canvas.
-    const author = canvas.createdBy || FALLBACK_AUTHOR;
     // Strict, as canvasController.updateCanvas: a failed read taken as "empty"
     // would restore nothing and the whiteboard would be lost. A throw lands in
     // the catch below, which marks the run FAILED.
@@ -143,21 +148,9 @@ export async function handleDeskThreadCanvasCallback(
     // Mark FAILED and 200 — the fate is decided; a 500 would invite claw to retry
     // a deterministic failure (mirrors desk-report's accepted-fate semantics).
     try {
-      await runAsServiceActor('desk-thread-canvas-callback', workspaceId, () =>
-        db.canvas.update({
-          where: { id: canvasId },
-          data: { metadata: { ...metadata, generationStatus: 'FAILED', error: FAILURE_REASON } },
-        }),
-      );
+      await fail(FAILURE_REASON);
     } catch (markErr) {
       logger.error('[DeskThreadCanvas] failed even to mark FAILED', { canvasId, error: markErr });
-    }
-    // As fail() does — otherwise the placeholder stands and the run looks stuck.
-    // Uses route params only: `canvas` may not have loaded here.
-    try {
-      await syncToYSweet(canvasId, buildFailureBlocks(FAILURE_REASON), FALLBACK_AUTHOR);
-    } catch (syncErr) {
-      logger.error('[DeskThreadCanvas] failed to write the failure block', { canvasId, error: syncErr });
     }
     res.json({ success: true, persisted: false });
   }

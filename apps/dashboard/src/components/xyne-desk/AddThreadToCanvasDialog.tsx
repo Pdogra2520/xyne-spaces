@@ -1,4 +1,4 @@
-import { ReactElement, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactElement, useEffect, useMemo, useState } from 'react';
 import { TicketReferenceRelation } from '@xyne/shared';
 import { PlusDefault as Plus, MultipleCrossCancelDefault as X } from '@xyne/icons';
 import Dialog from '../ui/Dialog';
@@ -90,7 +90,7 @@ export const AddThreadToCanvasDialog = ({
     };
   }, [open, labelInput]);
 
-  const addLabel = useCallback((name: string): void => {
+  const addLabel = (name: string): void => {
     const trimmed = name.trim();
     if (!trimmed) return;
     // Caps mirror the server's zod schema; over them is a 400.
@@ -98,19 +98,15 @@ export const AddThreadToCanvasDialog = ({
       prev.includes(trimmed) || prev.length >= MAX_LABELS ? prev : [...prev, trimmed],
     );
     setLabelInput('');
-  }, []);
+  };
 
-  const removeLabel = useCallback((name: string): void => {
+  const removeLabel = (name: string): void => {
     setLabels(prev => prev.filter(l => l !== name));
-  }, []);
+  };
 
-  const filteredSuggestions = useMemo(
-    () => suggestions.filter(s => !labels.includes(s)).slice(0, 8),
-    [suggestions, labels],
-  );
+  const filteredSuggestions = suggestions.filter(s => !labels.includes(s)).slice(0, 8);
 
-  const handleSubmit = useCallback(async (): Promise<void> => {
-    if (isSubmitting) return;
+  const handleSubmit = async (): Promise<void> => {
     setIsSubmitting(true);
     setError(null);
     try {
@@ -129,7 +125,7 @@ export const AddThreadToCanvasDialog = ({
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, ticket.id, scope, labels, includeMerged, onOpenChange, onSuccess]);
+  };
 
   return (
     <Dialog
@@ -273,5 +269,3 @@ export const AddThreadToCanvasDialog = ({
     </Dialog>
   );
 };
-
-export default AddThreadToCanvasDialog;

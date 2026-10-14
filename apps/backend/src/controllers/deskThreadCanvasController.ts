@@ -34,13 +34,9 @@ export class DeskThreadCanvasController {
         return;
       }
 
-      const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
-      if (!ticket || ticket.isArchived) {
+      const ticket = await prisma.ticket.findFirst({ where: { id: ticketId, workspaceId, isArchived: false } });
+      if (!ticket) {
         res.status(404).json({ error: 'Ticket not found' });
-        return;
-      }
-      if (ticket.workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Ticket belongs to a different workspace' });
         return;
       }
       // The app-level ACL is route-scoped: without this, any workspace member

@@ -18,6 +18,7 @@ import { EndCallModal } from '../EndCallModal/EndCallModal';
 import { TranscriptDispositionModal } from '../EndCallModal/TranscriptDispositionModal';
 import { AFKWarningModal } from '../AFKWarningModal/AFKWarningModal';
 import {
+  useActiveCall,
   useIsCallHost,
   useIsOnlyParticipant,
   useCallParticipants,
@@ -44,6 +45,7 @@ import {
 } from '../lazyPanels';
 import { callService } from '../../../services/Call/callService';
 import { isCallWindowRoute } from '../../../utils/callWindow';
+import { setCallWindowLeaveHandler } from '../../../utils/callWindowHost';
 import {
   createCallWhiteboardPngBlobs,
   getCallWhiteboardState,
@@ -225,7 +227,16 @@ export function CustomLiveKitRoom({
   const [dispositionSubmitting, setDispositionSubmitting] = useState(false);
   const [dispositionError, setDispositionError] = useState<string | null>(null);
 
-  const isHost = useIsCallHost(externalId, user?.id);
+  const hasCallRow = !!useActiveCall(externalId);
+  const isHostByCallRow = useIsCallHost(externalId, user?.id);
+  // The call window shows the call before Zero has the call row. Until it
+  // lands, go by the handoff (the initiator, or the host the main window saw),
+  // so a host hanging up early still gets the end-for-all choice.
+  const callHostUserIdHint = useSelector(roomActor, state => state.context.callHostUserIdHint);
+  const isInitiator = useSelector(roomActor, state => state.context.isInitiator);
+  const isHost = hasCallRow
+    ? isHostByCallRow
+    : isCallWindowRoute() && !!user?.id && (isInitiator || callHostUserIdHint === user.id);
   // Host's own "Transcription off … Undo" toast when they stop the agent.
   useTranscriptionHostToast(isTranscriptionEnabled, isHost);
   // Peers see "the host stopped transcription" (host skipped — they get the toast above).
@@ -263,10 +274,13 @@ export function CustomLiveKitRoom({
     [isHost, callParticipants],
   );
 
-  // Toast notification when new lobby request arrives
-  const prevLobbyCountRef = useRef(lobbyRequests.length);
+  // Toast notification when new lobby request arrives. Counted from when the
+  // call row has loaded, so requests already pending then are not announced
+  // as new (the call window shows the call before the row syncs).
+  const prevLobbyCountRef = useRef<number | null>(hasCallRow ? lobbyRequests.length : null);
   useEffect(() => {
-    if (lobbyRequests.length > prevLobbyCountRef.current) {
+    if (!hasCallRow) return;
+    if (prevLobbyCountRef.current !== null && lobbyRequests.length > prevLobbyCountRef.current) {
       const newest = lobbyRequests[lobbyRequests.length - 1];
       if (newest) {
         // Resolve name: external → displayName, internal → look up from users
@@ -284,7 +298,7 @@ export function CustomLiveKitRoom({
       }
     }
     prevLobbyCountRef.current = lobbyRequests.length;
-  }, [lobbyRequests, allUsers]);
+  }, [lobbyRequests, allUsers, hasCallRow]);
 
   // Lobby approval handlers
   const handleApproveLobbyRequest = useCallback(
@@ -371,6 +385,14 @@ export function CustomLiveKitRoom({
     }
     handleDisconnect();
   }, [isHost, isOnlyParticipant, isTranscriptionEnabled, handleDisconnect]);
+
+  // Closing the call window leaves through this same flow (whiteboard save,
+  // end-call and transcript choices), not a bare disconnect.
+  useEffect(() => {
+    if (!isCallWindowRoute()) return undefined;
+    setCallWindowLeaveHandler(handleDisconnectClick);
+    return (): void => setCallWindowLeaveHandler(null);
+  }, [handleDisconnectClick]);
 
   // Apply the delete/keep choice (only when transcription is OFF) then end the call.
   // Delete is awaited/blocking so nothing the host chose to delete is generated or indexed.

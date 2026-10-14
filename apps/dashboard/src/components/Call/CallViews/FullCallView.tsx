@@ -2,7 +2,7 @@ import type { Room } from 'livekit-client';
 import { ConnectionQuality, ConnectionState } from 'livekit-client';
 import { Minimize2, MonitorUp, WifiLow } from 'lucide-react';
 import { useSelector } from '@xstate/react';
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   useParticipantNetworkQuality,
   useNetworkQualityToast,
@@ -42,7 +42,9 @@ import {
   LazyPresentationModeOverlay,
   LazyThreadMessages,
   MountOnceOpen,
+  PanelBoundary,
   PanelLoading,
+  preloadPresentationModeOverlay,
 } from '../lazyPanels';
 import { formatElapsedTime } from '../../../utils/recordingUtils';
 import { logger, Event } from '../../../utils/logger';
@@ -187,6 +189,11 @@ export function FullCallView({
   const { user } = useAuth();
   const { isElectron, isMac } = usePlatform();
   const isTelepresenceEnabled = useTelepresenceEnabled(user?.email);
+  // The present button is shown: fetch the overlay now, so a click on it can
+  // still go full screen (see preloadPresentationModeOverlay).
+  useEffect(() => {
+    if (isTelepresenceEnabled) preloadPresentationModeOverlay();
+  }, [isTelepresenceEnabled]);
 
   // UI state
   const [focusedScreenShareIdentity, setFocusedScreenShareIdentity] = useState<string | null>(null);
@@ -494,7 +501,7 @@ export function FullCallView({
   const renderStage = (): React.ReactElement => {
     if (isWhiteboardOpen) {
       return (
-        <Suspense key='whiteboard' fallback={<PanelLoading />}>
+        <PanelBoundary key='whiteboard' fallback={<PanelLoading />}>
           <LazyCallWhiteboardView
             participants={participants}
             room={room}
@@ -503,7 +510,7 @@ export function FullCallView({
             aiController={aiController}
             requestedAiController={requestedAiController}
           />
-        </Suspense>
+        </PanelBoundary>
       );
     }
     if (focusedScreenShare) {
@@ -561,13 +568,13 @@ export function FullCallView({
         );
       case 'notes':
         return (
-          <Suspense key='notes' fallback={<PanelLoading />}>
+          <PanelBoundary key='notes' fallback={<PanelLoading />}>
             <LazyCallNotesPanel callId={callId} channelId={channelId} onClose={handleToggleNotes} />
-          </Suspense>
+          </PanelBoundary>
         );
       case 'callChat':
         return (
-          <Suspense key='callChat' fallback={<PanelLoading />}>
+          <PanelBoundary key='callChat' fallback={<PanelLoading />}>
             <LazyCallChatPanel
               room={room}
               externalId={callId}
@@ -576,18 +583,18 @@ export function FullCallView({
               onNewMessage={onCallChatNewMessage}
               isExternalUser={isExternalUser}
             />
-          </Suspense>
+          </PanelBoundary>
         );
       case 'thread':
         return channelId && conversationId ? (
-          <Suspense key='thread' fallback={<PanelLoading />}>
+          <PanelBoundary key='thread' fallback={<PanelLoading />}>
             <LazyThreadMessages
               channelId={channelId}
               conversationId={conversationId}
               ticketId={null}
               onClose={handleToggleThread}
             />
-          </Suspense>
+          </PanelBoundary>
         ) : null;
       default:
         return null;

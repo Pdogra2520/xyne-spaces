@@ -1,8 +1,10 @@
 import { useSyncExternalStore } from 'react';
 import type { CallType, SdlcCallLink } from '@xyne/shared';
 import type { CallUrlOverrides } from './callUrlOverrides';
+import type { JoinMediaOverrides } from '../machines/roomMachine';
 import { isElectronApp, isStandaloneWindow } from './electronApp';
 import { isNativeCallSupported } from './reactNativeBridge';
+import { authActor } from '../machines/authMachine';
 
 /**
  * Calls in their own desktop window (as in Slack huddles).
@@ -49,6 +51,10 @@ export interface CallWindowHandoff {
   callDisplayName: string | null;
   isInitiator: boolean;
   callUrlOverrides: CallUrlOverrides | null;
+  // The main window's CAC check on callUrlOverrides (see isCallUrlApiAllowed).
+  callUrlOverridesApproved: boolean;
+  joinMediaOverrides: JoinMediaOverrides | null;
+  callHostUserIdHint: string | null;
 }
 
 export type CallWindowPhase = 'connecting' | 'connected' | 'ending' | 'ended';
@@ -71,6 +77,8 @@ export interface CallWindowStatus {
 
 export type CallWindowCommand =
   | { type: 'DISCONNECT'; endForAll?: boolean }
+  // From Electron only (the window was closed): leave as the Leave button does.
+  | { type: 'LEAVE' }
   | { type: 'TOGGLE_MIC' }
   | { type: 'TOGGLE_CAMERA' }
   | { type: 'TOGGLE_CALL_CHAT' };
@@ -140,15 +148,34 @@ export const shouldUseCallWindow = (): boolean =>
 
 const WORKSPACE_ID_PATTERN = /^[a-z0-9-]{20,}$/i;
 
-const currentWorkspaceId = (): string | null => {
-  const segment = window.location.pathname.match(/^\/([^/]+)/)?.[1];
+const workspaceIdOfPath = (path: string): string | null => {
+  const segment = path.match(/^\/([^/?#]+)/)?.[1];
   return segment && WORKSPACE_ID_PATTERN.test(segment) ? segment : null;
 };
 
+/**
+ * Who the call window is opened for. A kept window is reused only by the same
+ * user in the same workspace: it holds that session's auth and Zero data.
+ *
+ * The workspace comes from the session rather than the URL, which does not
+ * carry one yet on some routes (e.g. /call/:id while a call link is joining).
+ */
+const callWindowOwner = (): { workspaceId: string | null; userId: string | null } => {
+  const user = authActor.getSnapshot().context.user;
+  return {
+    workspaceId: user?.workspaceId ?? workspaceIdOfPath(window.location.pathname),
+    userId: user?.id ?? null,
+  };
+};
+
 // The most recent status, so a wait that starts after a report (it raced the
-// open() round trip) still sees it.
+// open() round trip) still sees it. Cleared when a new join starts, so it only
+// ever holds a status of the current call.
 let latestStatus: CallWindowStatus | null = null;
 let statusCacheInstalled = false;
+// The current join has been handed to the call window. Until then there is no
+// call there to wait on when it is left.
+let isHandedOff = false;
 
 const installStatusCache = (): void => {
   const api = window.electronAPI?.callWindow;
@@ -163,9 +190,11 @@ export const openCallWindow = async (handoff: CallWindowHandoff): Promise<number
   const api = window.electronAPI?.callWindow;
   if (!api) throw new Error('Call window is not available');
   installStatusCache();
+  latestStatus = null;
+  isHandedOff = true;
   return api.open({
     handoff: handoff as unknown as Record<string, unknown>,
-    workspaceId: currentWorkspaceId(),
+    ...callWindowOwner(),
   });
 };
 
@@ -175,7 +204,9 @@ export const openCallWindow = async (handoff: CallWindowHandoff): Promise<number
  * without it opens the window at handoff, as before.
  */
 export const prepareCallWindow = (): void => {
-  window.electronAPI?.callWindow?.prepare?.({ workspaceId: currentWorkspaceId() });
+  latestStatus = null;
+  isHandedOff = false;
+  window.electronAPI?.callWindow?.prepare?.(callWindowOwner());
 };
 
 /** The join the window was opened for did not happen. */
@@ -186,6 +217,8 @@ export const cancelPreparedCallWindow = (): void => {
 export const getCallWindowStatus = async (): Promise<CallWindowStatus | null> => {
   const api = window.electronAPI?.callWindow;
   if (!api) return null;
+  // A report landing right after this read is still seen by a wait that follows.
+  installStatusCache();
   try {
     return ((await api.getStatus()) as CallWindowStatus | null) ?? null;
   } catch {
@@ -207,6 +240,14 @@ export const focusCallWindow = (): void => {
   window.electronAPI?.callWindow?.focus();
 };
 
+/**
+ * From the call window: open an app path in the main window. A path in another
+ * workspace carries that workspace along, so main switches to it first.
+ */
+export const openInMainWindow = (appPath: string): void => {
+  window.electronAPI?.callWindow?.openInMain(appPath, workspaceIdOfPath(appPath) ?? undefined);
+};
+
 /** The call window closed before connecting, with no error: the user backed out. */
 export class CallWindowClosedError extends Error {
   constructor() {
@@ -226,6 +267,12 @@ export const waitForCallWindowPhase = (
   timeoutMs: number,
 ): Promise<CallWindowStatus | null> =>
   new Promise((resolve, reject) => {
+    // Left before anything was handed over: Electron just closes the window it
+    // opened early, and nothing reports on it.
+    if (phase === 'ended' && handoffId === null && !isHandedOff) {
+      resolve(null);
+      return;
+    }
     const cached = latestStatus;
     if (cached && (handoffId === null || cached.handoffId === handoffId)) {
       if (cached.phase === 'ended') {

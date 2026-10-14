@@ -14,7 +14,7 @@ import { roomActor } from '../machines/roomMachine';
 import { useAuth } from '../hooks/useAuth';
 import { CallStateTransition } from '../components/Call/CallStateTransition/CallStateTransition';
 import { GlobalCallOverlay } from '../components/Call/CallOverlay/GlobalCallOverlay';
-import { ScreenPickerHost } from '../components/ScreenPicker/ScreenPickerHost';
+import { ScreenPickerModal } from '../components/ScreenPicker/ScreenPickerModal';
 import { useCallWindowNavigationGuard } from './useCallWindowNavigationGuard';
 
 // Set by the call UI once it shows the call: signed in, Zero up and the handoff
@@ -24,14 +24,13 @@ const CallWindowUiReadyContext = createContext<() => void>(() => undefined);
 
 /**
  * What the window shows until the call UI is up: the call's own joining screen,
- * from the first frame. It sits above the app's loader (the logo, z-[1000]),
- * and the call UI shows this same screen while it is still connecting, so the
- * hand-over is seamless.
+ * from the first frame. The call UI shows this same screen while it is still
+ * connecting, so the hand-over is seamless.
  */
 function CallWindowJoining(): ReactElement {
   const isInitiator = useSelector(roomActor, state => state.context.isInitiator);
   return (
-    <div className='fixed inset-0 z-[1001] bg-[#131314]'>
+    <div className='fixed inset-0 bg-[#131314]'>
       <CallStateTransition
         connectionState={ConnectionState.Connecting}
         machineState={isInitiator ? 'initiating' : 'joining'}
@@ -48,8 +47,38 @@ function CallWindowJoining(): ReactElement {
  * The call itself started connecting before any of this — see
  * utils/callWindowHost.
  */
+/**
+ * Signing in failed (session expired or revoked while the window was kept).
+ * The call may still be connected, since it needs only the handed-over token,
+ * so offer a way out rather than a "joining" screen that never ends.
+ */
+function CallWindowSignInError(): ReactElement {
+  const isInCall = useSelector(roomActor, state => !state.matches('idle'));
+  return (
+    <div className='fixed inset-0 flex flex-col items-center justify-center gap-4 bg-[#131314] px-6 text-center'>
+      <p className='text-base font-medium'>Could not load the call</p>
+      <p className='max-w-sm text-sm text-[#e3e3e3]/70'>
+        You are signed out in this window. Sign in again from the main window and rejoin.
+      </p>
+      <button
+        type='button'
+        data-track-category='CALLS'
+        data-track-name='CALL_WINDOW_SIGNED_OUT_LEAVE'
+        className='rounded-md bg-[#e3e3e3] px-4 py-2 text-sm font-medium text-[#131314] hover:bg-[#e3e3e3]/90'
+        onClick={() => {
+          if (isInCall) roomActor.send({ type: 'DISCONNECT' });
+          else window.close();
+        }}
+      >
+        {isInCall ? 'Leave call' : 'Close'}
+      </button>
+    </div>
+  );
+}
+
 export function CallWindowRoot({ children }: { children: ReactNode }): ReactElement {
   const { isLoading, isAuthenticated } = useAuth();
+  const isSignInFailed = !isLoading && !isAuthenticated;
   const room = useSelector(roomActor, state => state.context.room);
   const [isUiReady, setUiReady] = useState(false);
   const markUiReady = useCallback(() => setUiReady(true), []);
@@ -67,7 +96,7 @@ export function CallWindowRoot({ children }: { children: ReactNode }): ReactElem
       {/* Audio from the moment the room connects, not once the call UI has
           loaded (GlobalCallOverlay leaves it to this in the call window). */}
       {room && <RoomAudioRenderer room={room} />}
-      {!isUiReady && <CallWindowJoining />}
+      {isSignInFailed ? <CallWindowSignInError /> : !isUiReady && <CallWindowJoining />}
       {!isLoading && isAuthenticated && (
         <CallWindowUiReadyContext.Provider value={markUiReady}>
           {children}
@@ -98,8 +127,10 @@ export default function CallWindowScreen(): ReactElement {
     <>
       {/* roomActor is a module singleton, so this window needs its own overlay. */}
       <GlobalCallOverlay autoJoinOnAccept={false} />
-      {/* Screen share from this window shows its picker here (Electron routes it). */}
-      <ScreenPickerHost />
+      {/* Screen share from this window shows its picker here (Electron routes it).
+          The modal alone, not ScreenPickerHost: its flag hook reports to Electron,
+          where the flag is session wide, and the main window already owns it. */}
+      <ScreenPickerModal />
     </>
   );
 }

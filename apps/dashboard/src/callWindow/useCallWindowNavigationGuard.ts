@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useBlocker } from 'react-router-dom';
-import { CALL_WINDOW_ROUTE } from '../utils/callWindow';
+import { CALL_WINDOW_ROUTE, openInMainWindow } from '../utils/callWindow';
 import { toRegularPath } from '../utils/electronApp';
 
 /**
@@ -13,7 +13,7 @@ export function useCallWindowNavigationGuard(): void {
   useEffect(() => {
     if (blocker.state !== 'blocked') return;
     const { pathname, search, hash } = blocker.location;
-    window.electronAPI?.callWindow?.openInMain(`${toRegularPath(pathname)}${search}${hash}`);
+    openInMainWindow(`${toRegularPath(pathname)}${search}${hash}`);
     blocker.reset();
   }, [blocker]);
 }

@@ -13,6 +13,7 @@ import { getMainWindow } from '../window/manager';
 import { callInvitePath, isSafeInAppPath } from '../utils/validation';
 import { isMainWindowSender } from '../ipc/handlers';
 import { registerScreenPickerWindow } from './screen-picker';
+import { onSessionCleared } from './cookies';
 
 /**
  * The call window: a call running in its own top-level window (as in Slack
@@ -86,10 +87,14 @@ interface CallWindowHandoff {
 
 type CallWindowCommand =
   | { type: 'DISCONNECT'; endForAll?: boolean }
+  // Sent only from here, when the window is closed: the renderer leaves the
+  // way its Leave button does (whiteboard save, end-call choices).
+  | { type: 'LEAVE' }
   | { type: 'TOGGLE_MIC' }
   | { type: 'TOGGLE_CAMERA' }
   | { type: 'TOGGLE_CALL_CHAT' };
 
+// What the main window may send. LEAVE is not among them.
 const COMMAND_TYPES = new Set<CallWindowCommand['type']>([
   'DISCONNECT',
   'TOGGLE_MIC',
@@ -97,8 +102,15 @@ const COMMAND_TYPES = new Set<CallWindowCommand['type']>([
   'TOGGLE_CALL_CHAT',
 ]);
 
+// Who a window was opened for. A kept window holds that user's session (auth,
+// Zero data) and is reused only for the same user in the same workspace.
+interface CallWindowOwner {
+  workspaceId: string | null;
+  userId: string | null;
+}
+
 let callWindow: BrowserWindow | null = null;
-let callWindowWorkspaceId: string | null = null;
+let callWindowOwner: CallWindowOwner | null = null;
 let rendererLoaded = false;
 let nextHandoffId = 1;
 let pendingHandoff: CallWindowHandoff | null = null;
@@ -116,6 +128,12 @@ let prepareCancelled = false;
 let destroyTimer: ReturnType<typeof setTimeout> | null = null;
 let allowClose = false;
 let leavePrompt: Promise<void> | null = null;
+// Closes the "Leave this call?" box when the call ends on its own meanwhile.
+let leavePromptAbort: AbortController | null = null;
+// The current call is being left at the main window's or the close dialog's
+// request, so the window can go out of sight at once. A leave from inside the
+// window may be a switch to another call there, which keeps it on screen.
+let leaveRequested = false;
 const statusWaiters = new Set<() => void>();
 
 function isLive(status: CallWindowStatus | null): boolean {
@@ -143,7 +161,11 @@ function focusMain(): void {
 
 function publishStatus(status: CallWindowStatus): void {
   lastStatus = status;
-  if (status.phase === 'ended') handoffSettled = true;
+  if (status.phase === 'ended') {
+    handoffSettled = true;
+    leaveRequested = false;
+    leavePromptAbort?.abort();
+  }
   setCallWindowActive(isLive(status));
   sendToMainWindow('call-window:status', status);
   for (const waiter of [...statusWaiters]) waiter();
@@ -199,6 +221,25 @@ function isCallWindowTopFrame(event: IpcMainEvent | IpcMainInvokeEvent): boolean
     event.senderFrame.parent === null;
   if (!trusted) log.warn('[CallWindow] Blocked IPC from a sender other than the call window');
   return trusted;
+}
+
+const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+function safeId(value: unknown): string | null {
+  return typeof value === 'string' && ID_PATTERN.test(value) ? value : null;
+}
+
+function parseOwner(payload: unknown): CallWindowOwner {
+  const { workspaceId, userId } = (payload ?? {}) as { workspaceId?: unknown; userId?: unknown };
+  return { workspaceId: safeId(workspaceId), userId: safeId(userId) };
+}
+
+function isOwnedBy(owner: CallWindowOwner): boolean {
+  return (
+    !!callWindowOwner &&
+    callWindowOwner.workspaceId === owner.workspaceId &&
+    callWindowOwner.userId === owner.userId
+  );
 }
 
 function routeUrl(workspaceId: string | null): string {
@@ -359,8 +400,11 @@ function parkCallWindow(): void {
 function requestLeave(win: BrowserWindow): Promise<void> {
   if (leavePrompt) return leavePrompt;
 
+  const abort = new AbortController();
+  leavePromptAbort = abort;
   leavePrompt = (async () => {
     const { response } = await dialog.showMessageBox(win, {
+      signal: abort.signal,
       type: 'question',
       buttons: ['Leave call', 'Cancel'],
       defaultId: 0,
@@ -370,26 +414,33 @@ function requestLeave(win: BrowserWindow): Promise<void> {
       message: 'Leave this call?',
       detail: 'Closing the call window drops you from the call. Everyone else stays on.',
     });
-    if (response !== 0 || win.isDestroyed()) return;
+    // Cancelled, or closed for us because the call ended meanwhile.
+    if (response !== 0 || abort.signal.aborted || win.isDestroyed() || !isLive(lastStatus)) {
+      return;
+    }
 
-    win.webContents.send('call-window:command', { type: 'DISCONNECT' });
+    leaveRequested = true;
+    win.webContents.send('call-window:command', { type: 'LEAVE' } satisfies CallWindowCommand);
     // Closed only once the leave went through: closing sooner would cut the
     // renderer off mid-disconnect and leave a ghost participant in the room.
     await waitUntilSettled(LEAVE_TIMEOUT_MS);
-    publishEndedIfLive(null);
+    // Not left yet: the window is asking the host how to end it (end for
+    // everyone, keep the transcript). Its answer ends the call, or keeps it.
+    if (!handoffSettled) return;
     destroyCallWindow();
   })().finally(() => {
+    if (leavePromptAbort === abort) leavePromptAbort = null;
     leavePrompt = null;
   });
 
   return leavePrompt;
 }
 
-function createCallWindow(workspaceId: string | null): BrowserWindow {
+function createCallWindow(owner: CallWindowOwner): BrowserWindow {
   const bounds = getInitialBounds();
   rendererLoaded = false;
   allowClose = false;
-  callWindowWorkspaceId = workspaceId;
+  callWindowOwner = owner;
   const createdAt = Date.now();
   log.info('[CallWindow] Creating window');
 
@@ -453,13 +504,16 @@ function createCallWindow(workspaceId: string | null): BrowserWindow {
     log.info(`[CallWindow] Page loaded ${Date.now() - createdAt}ms after creation`);
   });
 
-  // A reload or navigation of the page itself (View › Reload from the menu
-  // bar gets past before-input-event) tears down the LiveKit room. Say so,
-  // rather than leaving the main window mirroring a call that is gone.
-  win.webContents.on('did-start-navigation', details => {
-    if (!details.isMainFrame || details.isSameDocument || !rendererLoaded) return;
+  // A reload of the page itself (View › Reload from the menu bar, or the
+  // app's own reloads, get past before-input-event) tears down the LiveKit
+  // room. Say so, rather than leaving the main window mirroring a call that is
+  // gone. On did-navigate, not when the navigation starts: by then the old page
+  // has run its pagehide, where LiveKit sends its leave. Destroying it sooner
+  // would leave a ghost participant in the room.
+  win.webContents.on('did-navigate', () => {
+    if (!rendererLoaded) return;
     rendererLoaded = false;
-    log.warn('[CallWindow] Page navigated mid-session; ending the mirrored call');
+    log.warn('[CallWindow] Page reloaded mid-session; ending the mirrored call');
     publishEndedIfLive(null);
     destroyCallWindow();
   });
@@ -498,28 +552,30 @@ function createCallWindow(workspaceId: string | null): BrowserWindow {
   win.on('moved', persistBounds);
 
   win.on('closed', () => {
+    leavePromptAbort?.abort();
     if (callWindow === win) {
       callWindow = null;
-      callWindowWorkspaceId = null;
+      callWindowOwner = null;
       rendererLoaded = false;
       publishEndedIfLive(null);
     }
   });
 
-  void win.loadURL(routeUrl(workspaceId)).catch(error => {
+  void win.loadURL(routeUrl(owner.workspaceId)).catch(error => {
     log.error('[CallWindow] loadURL failed:', error);
   });
 
   return win;
 }
 
-function openCallWindow(handoff: Record<string, unknown>, workspaceId: string | null): number {
+function openCallWindow(handoff: Record<string, unknown>, owner: CallWindowOwner): number {
   cancelScheduledDestroy();
   const handoffId = nextHandoffId++;
   pendingHandoff = { ...handoff, handoffId };
   lastStatus = null;
   handoffSettled = false;
   handoffTaken = false;
+  leaveRequested = false;
 
   if (prepareCancelled) {
     // The user closed the window this call was being opened in: end it here,
@@ -532,8 +588,7 @@ function openCallWindow(handoff: Record<string, unknown>, workspaceId: string | 
 
   // Reused even while still loading (opened early by prepareCallWindow): the
   // renderer reads the handoff on boot, and the ping covers one already up.
-  const reusable =
-    callWindow && !callWindow.isDestroyed() && callWindowWorkspaceId === workspaceId;
+  const reusable = callWindow && !callWindow.isDestroyed() && isOwnedBy(owner);
 
   if (reusable && callWindow) {
     log.info(`[CallWindow] Handoff ${handoffId} to the existing window`);
@@ -543,7 +598,7 @@ function openCallWindow(handoff: Record<string, unknown>, workspaceId: string | 
     callWindow.focus();
   } else {
     destroyCallWindow();
-    createCallWindow(workspaceId);
+    createCallWindow(owner);
   }
 
   log.info(`[CallWindow] Handoff ${handoffId} queued`);
@@ -554,11 +609,11 @@ function openCallWindow(handoff: Record<string, unknown>, workspaceId: string | 
  * Open the window as the user clicks to join, while the main window is still
  * fetching the token, so the app boots in parallel instead of after.
  */
-function prepareCallWindow(workspaceId: string | null): void {
+function prepareCallWindow(owner: CallWindowOwner): void {
   prepareCancelled = false;
   cancelScheduledDestroy();
   if (callWindow && !callWindow.isDestroyed()) {
-    if (callWindowWorkspaceId === workspaceId) {
+    if (isOwnedBy(owner)) {
       log.info('[CallWindow] Prepared: showing the existing window');
       if (callWindow.isMinimized()) callWindow.restore();
       callWindow.show();
@@ -570,7 +625,7 @@ function prepareCallWindow(workspaceId: string | null): void {
     if (!handoffSettled) return;
     destroyCallWindow();
   }
-  createCallWindow(workspaceId);
+  createCallWindow(owner);
 }
 
 /** The join it was opened for did not happen (lobby, error, cancelled). */
@@ -579,30 +634,43 @@ function cancelPreparedCallWindow(): void {
   parkCallWindow();
 }
 
+/**
+ * Signed out: the kept window holds the old session, so it must not carry over
+ * to whoever signs in next. A live call there is left first.
+ */
+function discardForSignOut(): void {
+  prepareCancelled = false;
+  if (!callWindow || callWindow.isDestroyed()) return;
+  log.info('[CallWindow] Session cleared; closing the call window');
+  if (handoffSettled || !handoffTaken) {
+    publishEndedIfLive(null);
+    destroyCallWindow();
+    return;
+  }
+  leaveRequested = true;
+  callWindow.webContents.send('call-window:command', {
+    type: 'DISCONNECT',
+  } satisfies CallWindowCommand);
+  void waitUntilSettled(LEAVE_TIMEOUT_MS).then(() => {
+    publishEndedIfLive(null);
+    destroyCallWindow();
+  });
+}
+
 export function setupCallWindowHandlers(): void {
+  onSessionCleared(discardForSignOut);
+
   ipcMain.handle('call-window:open', (event, payload: unknown) => {
     if (!isMainWindowSender(event)) throw new Error('Unauthorized sender');
     if (!payload || typeof payload !== 'object') throw new Error('Invalid call handoff');
-    const { handoff, workspaceId } = payload as {
-      handoff?: unknown;
-      workspaceId?: unknown;
-    };
+    const { handoff } = payload as { handoff?: unknown };
     if (!handoff || typeof handoff !== 'object') throw new Error('Invalid call handoff');
-    const safeWorkspaceId =
-      typeof workspaceId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(workspaceId)
-        ? workspaceId
-        : null;
-    return openCallWindow(handoff as Record<string, unknown>, safeWorkspaceId);
+    return openCallWindow(handoff as Record<string, unknown>, parseOwner(payload));
   });
 
   ipcMain.on('call-window:prepare', (event, payload: unknown) => {
     if (!isMainWindowSender(event)) return;
-    const workspaceId = (payload as { workspaceId?: unknown } | null)?.workspaceId;
-    prepareCallWindow(
-      typeof workspaceId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(workspaceId)
-        ? workspaceId
-        : null,
-    );
+    prepareCallWindow(parseOwner(payload));
   });
 
   ipcMain.on('call-window:cancel-prepare', event => {
@@ -632,7 +700,10 @@ export function setupCallWindowHandlers(): void {
       // Out of sight when the call ends, but kept booted for the next one.
       parkCallWindow();
     } else if (next.phase === 'ending') {
-      hideWhileLeaving();
+      // Only a leave asked for from outside. One from inside the window may be
+      // a switch to another call, and if that join fails the window would be
+      // gone with its error.
+      if (leaveRequested) hideWhileLeaving();
     } else if (
       (previousPhase === 'ending' || previousPhase === 'ended') &&
       callWindow &&
@@ -671,6 +742,7 @@ export function setupCallWindowHandlers(): void {
       destroyCallWindow();
       return;
     }
+    if (type === 'DISCONNECT') leaveRequested = true;
     const safe: CallWindowCommand =
       type === 'DISCONNECT'
         ? { type, endForAll: endForAll === true }
@@ -686,10 +758,13 @@ export function setupCallWindowHandlers(): void {
     callWindow.focus();
   });
 
-  ipcMain.on('call-window:open-in-main', (event, appPath: unknown) => {
+  ipcMain.on('call-window:open-in-main', (event, appPath: unknown, workspaceId: unknown) => {
     if (!isCallWindowTopFrame(event)) return;
     if (!isSafeInAppPath(appPath)) return;
-    sendToMainWindow('navigate-to', appPath);
+    // A link into another workspace: main switches to it before navigating.
+    const targetWorkspaceId = safeId(workspaceId);
+    if (targetWorkspaceId) sendToMainWindow('navigate-to', appPath, targetWorkspaceId);
+    else sendToMainWindow('navigate-to', appPath);
     focusMain();
   });
 }

@@ -22,6 +22,14 @@ import { logger, Event } from './logger';
 // end, and "ended" closes the window, so keep it short.
 const ENDED_SETTLE_MS = 250;
 
+// What the Leave button does (CustomLiveKitRoom), for a leave asked for by
+// closing the window. Unset while the call UI is not mounted.
+let leaveHandler: (() => void) | null = null;
+
+export const setCallWindowLeaveHandler = (handler: (() => void) | null): void => {
+  leaveHandler = handler;
+};
+
 // The handoff this window is running.
 let activeHandoffId: number | null = null;
 let started = false;
@@ -136,6 +144,12 @@ const startStatusReporter = (): void => {
   let lastSent = '';
   let endedTimer: ReturnType<typeof setTimeout> | null = null;
   let endedFor: number | null = null;
+  // A call left from inside this window for another (e.g. "Switch" on a call
+  // card) that has not connected yet. If it fails, the join's own error toast
+  // is in this window, which Electron hides once the call is reported ended,
+  // so the failure is carried in the report for the main window to show.
+  let rejoiningFor: number | null = null;
+  let leftFor: number | null = null;
 
   const send = (status: CallWindowStatus): void => {
     const serialized = JSON.stringify(status);
@@ -153,12 +167,16 @@ const startStatusReporter = (): void => {
       if (endedTimer) clearTimeout(endedTimer);
       endedTimer = null;
       endedFor = null;
+      if (phase === 'ending') leftFor = handoffId;
+      else if (phase === 'connecting' && leftFor === handoffId) rejoiningFor = handoffId;
+      else if (phase === 'connected') rejoiningFor = leftFor = null;
       send(buildStatus(handoffId, phase, snapshot.context));
       return;
     }
 
     if (endedFor === handoffId || endedTimer) return;
-    const error = snapshot.context.error;
+    const error =
+      snapshot.context.error ?? (rejoiningFor === handoffId ? 'Could not join the call' : null);
     endedTimer = setTimeout(() => {
       endedTimer = null;
       if (activeHandoffId !== handoffId || !roomActor.getSnapshot().matches('idle')) return;
@@ -174,6 +192,10 @@ const startCommandListener = (api: NonNullable<Window['electronAPI']>['callWindo
     switch (command.type) {
       case 'DISCONNECT':
         roomActor.send({ type: 'DISCONNECT', endForAll: command.endForAll ?? false });
+        break;
+      case 'LEAVE':
+        if (leaveHandler) leaveHandler();
+        else roomActor.send({ type: 'DISCONNECT' });
         break;
       case 'TOGGLE_MIC':
       case 'TOGGLE_CAMERA':

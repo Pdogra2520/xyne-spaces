@@ -13,7 +13,7 @@ import {
   MicOff,
   PhoneOff,
 } from 'lucide-react';
-import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { cn } from '../../../utils/classNames';
 import { APP_NO_DRAG_STYLE } from '../../../utils/electronApp';
 import { CallControls } from '../CallControls/CallControls';
@@ -35,7 +35,9 @@ import {
   LazyPresentationModeOverlay,
   LazyThreadMessages,
   MountOnceOpen,
+  PanelBoundary,
   PanelLoading,
+  preloadPresentationModeOverlay,
 } from '../lazyPanels';
 import { useCallWhiteboardStore } from '../../../stores/callWhiteboardStore';
 import Tooltip from '../../ui/Tooltip';
@@ -218,6 +220,11 @@ export function MiniCallView({
 }: MiniCallViewProps): React.ReactElement {
   const { user } = useAuth();
   const isTelepresenceEnabled = useTelepresenceEnabled(user?.email);
+  // The present button is shown: fetch the overlay now, so a click on it can
+  // still go full screen (see preloadPresentationModeOverlay).
+  useEffect(() => {
+    if (isTelepresenceEnabled) preloadPresentationModeOverlay();
+  }, [isTelepresenceEnabled]);
   const isWhiteboardOpen = useCallWhiteboardStore(s => s.isOpen);
 
   // People only — the Xyne Automatic agent isn't counted.
@@ -618,7 +625,7 @@ export function MiniCallView({
                 >
                   {isWhiteboardOpen ? (
                     <div className='h-full'>
-                      <Suspense fallback={<PanelLoading />}>
+                      <PanelBoundary fallback={<PanelLoading />}>
                         <LazyCallWhiteboardView
                           participants={participants}
                           room={room}
@@ -629,7 +636,7 @@ export function MiniCallView({
                           aiController={aiController}
                           requestedAiController={requestedAiController}
                         />
-                      </Suspense>
+                      </PanelBoundary>
                     </div>
                   ) : focusedScreenShare ? (
                     <div className='h-full'>
@@ -718,14 +725,14 @@ export function MiniCallView({
                 borderRadius: '0 0 12px 12px',
               }}
             >
-              <Suspense fallback={<PanelLoading />}>
+              <PanelBoundary fallback={<PanelLoading />}>
                 <LazyThreadMessages
                   channelId={channelId}
                   conversationId={conversationId}
                   ticketId={null}
                   onClose={onToggleThread}
                 />
-              </Suspense>
+              </PanelBoundary>
 
               <ResizeHandles onResizeStart={handleResizeStart} showCorner={true} />
             </div>

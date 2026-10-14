@@ -314,9 +314,10 @@ export interface ElectronAPI {
     open: (payload: {
       handoff: Record<string, unknown>;
       workspaceId: string | null;
+      userId: string | null;
     }) => Promise<number>;
     getStatus: () => Promise<unknown>;
-    prepare?: (payload: { workspaceId: string | null }) => void;
+    prepare?: (payload: { workspaceId: string | null; userId: string | null }) => void;
     cancelPrepare?: () => void;
     sendCommand: (command: { type: string; endForAll?: boolean }) => void;
     focus: () => void;
@@ -325,7 +326,7 @@ export interface ElectronAPI {
     onHandoffReady: (callback: () => void) => () => void;
     reportStatus: (status: Record<string, unknown>) => void;
     onCommand: (callback: (command: { type: string; endForAll?: boolean }) => void) => () => void;
-    openInMain: (appPath: string) => void;
+    openInMain: (appPath: string, workspaceId?: string) => void;
   };
   clawOverlay?: {
     setIgnoreMouse: (ignore: boolean) => void;

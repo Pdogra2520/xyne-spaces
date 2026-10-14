@@ -79,9 +79,11 @@ setLogLevel('warn');
 // Auto-mute threshold: mute the joining user when more than this many remote participants are already in the call
 const DEFAULT_MUTE_THRESHOLD = 5;
 
-// The call window boots a whole app before it can connect, then runs the same
-// connect retries the overlay does — allow for both.
-const CALL_WINDOW_CONNECT_TIMEOUT_MS = 90_000;
+// The window is opened (or already kept warm) at click, so its boot overlaps
+// the token request. What is left is the window's own connect retries — the
+// same 5 attempts with 8s signal timeouts the overlay makes, ~45s at worst —
+// plus headroom for a cold boot that has not finished by then.
+const CALL_WINDOW_CONNECT_TIMEOUT_MS = 60_000;
 const CALL_WINDOW_DISCONNECT_TIMEOUT_MS = 5_000;
 
 const logRoomMachineEvent = (
@@ -265,6 +267,13 @@ export interface RoomContext {
   isCallWindowMode: boolean;
   // Which handoff the call window is running; its status reports echo it.
   callWindowHandoffId: number | null;
+  // Call window only, from the handoff. The main window already ran the CAC
+  // check on callUrlOverrides; this window has not loaded that config.
+  callUrlOverridesApproved: boolean;
+  // Call window only, from the handoff: who the main window saw as the call's
+  // host. The window shows the call before Zero has synced the call row, and
+  // this stands in for it until then.
+  callHostUserIdHint: string | null;
 }
 
 export interface JoinMediaOverrides {
@@ -422,6 +431,12 @@ const buildCallWindowHandoff = (context: RoomContext): CallWindowHandoff => ({
   callDisplayName: context.callDisplayName,
   isInitiator: context.isInitiator,
   callUrlOverrides: context.callUrlOverrides,
+  callUrlOverridesApproved: !!context.callUrlOverrides && isCallUrlApiAllowed(),
+  joinMediaOverrides: context.joinMediaOverrides,
+  callHostUserIdHint: context.isInitiator
+    ? null
+    : (context.activeCalls.find(call => call.externalId === context.externalId)?.createdByUserId ??
+      null),
 });
 
 export const roomMachine = setup({
@@ -1454,6 +1469,9 @@ export const roomMachine = setup({
         callDisplayName: handoff.callDisplayName,
         isInitiator: handoff.isInitiator,
         callUrlOverrides: handoff.callUrlOverrides,
+        callUrlOverridesApproved: handoff.callUrlOverridesApproved,
+        joinMediaOverrides: handoff.joinMediaOverrides,
+        callHostUserIdHint: handoff.callHostUserIdHint,
         viewMode: 'full' as const,
         externalLobbyUrl: context.externalLobbyUrl,
       };
@@ -1545,6 +1563,8 @@ export const roomMachine = setup({
       joinMediaOverrides: () => null,
       isCallWindowMode: () => false,
       callWindowHandoffId: () => null,
+      callUrlOverridesApproved: () => false,
+      callHostUserIdHint: () => null,
     }),
 
     enableLocalTracks: ({ context }) => {
@@ -1578,7 +1598,11 @@ export const roomMachine = setup({
             // that reads the URL gates entry, and this gates effect. A caller that
             // sets callUrlOverrides without the flag gets the saved preferences,
             // exactly as if it had asked for nothing.
-            const urlOverrides = isCallUrlApiAllowed() ? context.callUrlOverrides : null;
+            // In the call window the main window ran this check before the handoff.
+            const urlOverrides =
+              context.callUrlOverridesApproved || isCallUrlApiAllowed()
+                ? context.callUrlOverrides
+                : null;
 
             // Precedence, strongest first:
             //   1. host controls — never overridable by anyone but the host
@@ -1767,6 +1791,8 @@ export const roomMachine = setup({
     joinMediaOverrides: null,
     isCallWindowMode: false,
     callWindowHandoffId: null,
+    callUrlOverridesApproved: false,
+    callHostUserIdHint: null,
   },
   id: 'roomMachine',
   on: {
@@ -2184,6 +2210,11 @@ export const roomMachine = setup({
                       context.externalId ?? context.callId,
                       'call_window_ended_transition_to_idle',
                     );
+                  },
+                  // The call window may be hidden by now (it is parked when its
+                  // call ends), so a failure it hit is shown here.
+                  ({ event }): void => {
+                    if (event.status.error) toast.error(event.status.error, { duration: 5000 });
                   },
                   'clearContext',
                 ],

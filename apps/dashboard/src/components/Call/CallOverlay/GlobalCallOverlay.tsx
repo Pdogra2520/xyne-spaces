@@ -13,8 +13,11 @@ import {
   getCallWindowStatus,
   isCallWindowRoute,
   isCallWindowSupported,
+  waitForCallWindowPhase,
 } from '../../../utils/callWindow';
 import { isStandaloneWindow } from '../../../utils/electronApp';
+
+const CALL_WINDOW_ATTACH_TIMEOUT_MS = 60_000;
 
 interface GlobalCallOverlayProps {
   autoJoinOnAccept?: boolean;
@@ -84,11 +87,21 @@ export function GlobalCallOverlay({
   useEffect(() => {
     if (!isCallWindowSupported() || isStandaloneWindow()) return undefined;
     let cancelled = false;
-    void getCallWindowStatus().then(status => {
+    void (async (): Promise<void> => {
+      let status = await getCallWindowStatus();
+      // Still connecting: attach once it is up, so this window does not show
+      // a call as connected before it is (or at all, if it fails).
+      if (status?.phase === 'connecting') {
+        status = await waitForCallWindowPhase(
+          status.handoffId,
+          'connected',
+          CALL_WINDOW_ATTACH_TIMEOUT_MS,
+        ).catch(() => null);
+      }
       if (cancelled || !status) return;
       if (!roomActor.getSnapshot().matches('idle')) return;
       roomActor.send({ type: 'ATTACH_CALL_WINDOW', status });
-    });
+    })();
     return (): void => {
       cancelled = true;
     };

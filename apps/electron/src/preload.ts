@@ -593,10 +593,13 @@ const electronAPI = {
   // Calls hosted in their own window. The main window opens and commands it;
   // the call window takes the handoff and reports status back.
   callWindow: {
-    open: (payload: { handoff: Record<string, unknown>; workspaceId: string | null }): Promise<number> =>
-      ipcRenderer.invoke('call-window:open', payload),
+    open: (payload: {
+      handoff: Record<string, unknown>;
+      workspaceId: string | null;
+      userId: string | null;
+    }): Promise<number> => ipcRenderer.invoke('call-window:open', payload),
     getStatus: (): Promise<unknown> => ipcRenderer.invoke('call-window:get-status'),
-    prepare: (payload: { workspaceId: string | null }) =>
+    prepare: (payload: { workspaceId: string | null; userId: string | null }) =>
       ipcRenderer.send('call-window:prepare', payload),
     cancelPrepare: () => ipcRenderer.send('call-window:cancel-prepare'),
     sendCommand: (command: { type: string; endForAll?: boolean }) =>
@@ -621,7 +624,8 @@ const electronAPI = {
       ipcRenderer.on('call-window:command', listener);
       return () => ipcRenderer.removeListener('call-window:command', listener);
     },
-    openInMain: (appPath: string) => ipcRenderer.send('call-window:open-in-main', appPath),
+    openInMain: (appPath: string, workspaceId?: string) =>
+      ipcRenderer.send('call-window:open-in-main', appPath, workspaceId),
   },
 
   clawOverlay: {

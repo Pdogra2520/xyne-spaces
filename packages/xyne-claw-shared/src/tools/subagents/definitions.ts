@@ -54,6 +54,7 @@ export interface SubagentDefinition {
    *  the same evidence is the natural next step. Omit/false → always fresh, and
    *  no session_id parameter is exposed to the parent. */
   supportsFollowUp?: boolean;
+  delegationPreferred?: boolean;
 }
 
 export const SUBAGENT_DEFINITIONS: SubagentDefinition[] = [
@@ -894,6 +895,7 @@ Do not paste screenshots, raw JSON or long logs into the report.`,
       "What changed (files/components/PR), the screens or routes that show it, how to run the app in the sandbox (directory, dev command, base URL) if not obvious, what correct looks like, and any variations or interactions that must be covered.",
     serverType: "custom:ui-tester",
     thinkingLevel: "low",
+    delegationPreferred: true,
   },
 
   // ── BigQuery ────────────────────────────────────────────────────

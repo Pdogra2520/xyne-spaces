@@ -171,6 +171,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { extractAllMentions, keepMentionsWithin } from '@/utils/mentionParser';
 import { detectVcsProvider } from '@/utils/repoUrlParser';
 import { getStorageService } from '@/services/storage';
+import { summaryTemplateService } from '@/services/summaryTemplateService';
 import { repositories } from '@/database/repositories';
 import { db } from '@/database/client';
 import { parseDlAliases, dlAddressesFor } from '@/services/dlResolver';
@@ -16895,6 +16896,58 @@ export function createMutators(
               channelWideMentionsEnabled: true,
               notificationKeywords,
               showThreadTags: false,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            });
+          }
+        },
+      ),
+      setRecordingDefaultSummaryTemplate: defineMutator(
+        z.object({
+          id: z.string(),
+          // `null` clears the default so recordings go back to the automatic pick.
+          recordingDefaultSummaryTemplateId: z.string().min(1).nullable(),
+          timestamp: z.number(),
+        }),
+        async ({ tx, ctx, args: { id, recordingDefaultSummaryTemplateId, timestamp } }) => {
+          // The default must be a template the user can use today: the same service
+          // check generation time relies on, which also covers the code-backed
+          // 'default'. Access is re-checked at generation time in case it is revoked.
+          if (recordingDefaultSummaryTemplateId) {
+            const template = await summaryTemplateService.findAccessibleById(
+              recordingDefaultSummaryTemplateId,
+              ctx.workspaceId,
+              ctx.userID,
+            );
+            if (!template) {
+              throw new ApplicationError('Summary template not found or not accessible');
+            }
+          }
+
+          const existing = await tx.run(
+            zql.user_preferences.where('userId', ctx.userID).one(),
+          );
+          if (existing) {
+            await tx.mutate.user_preferences.update({
+              id: existing.id,
+              recordingDefaultSummaryTemplateId,
+              updatedAt: timestamp,
+            });
+          } else {
+            await tx.mutate.user_preferences.insert({
+              workspaceId: ctx.workspaceId,
+              id,
+              userId: ctx.userID,
+              channelSortOrder: ChannelSortOrder.RECENCY,
+              enterSendsMessage: true,
+              allowThreadBroadcastMentions: false,
+              globalDesktopNotificationLevel: NotificationLevel.MENTIONS_ONLY,
+              globalMobileNotificationLevel: NotificationLevel.MENTIONS_ONLY,
+              threadReplyNotificationsEnabled: true,
+              channelWideMentionsEnabled: true,
+              notificationKeywords: '[]',
+              showThreadTags: false,
+              recordingDefaultSummaryTemplateId,
               createdAt: timestamp,
               updatedAt: timestamp,
             });

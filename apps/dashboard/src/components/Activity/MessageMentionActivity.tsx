@@ -1,5 +1,5 @@
 import { ReactElement } from 'react';
-import { parseSlashCommandArtifactMessage } from '@xyne/shared';
+import { parseForwardedMessageXml, parseSlashCommandArtifactMessage } from '@xyne/shared';
 import type { ActivityWithRelated } from '../../types/activity';
 import { MessageBubble } from '../ui/MessageBubble/MessageBubble';
 import { AtMark } from '@xyne/icons';
@@ -26,6 +26,7 @@ export const MessageMentionActivity = ({
   // Mentioning someone in a SEV2 notifies them as a plain mention, so this row —
   // not just the artifact row — has to present the artifact.
   const artifact = parseSlashCommandArtifactMessage(message?.content);
+  const forwarded = parseForwardedMessageXml(message?.content ?? '');
 
   const { baseRoute } = useRouteContext();
 
@@ -74,7 +75,7 @@ export const MessageMentionActivity = ({
         <div className='text-foreground text-sm line-clamp-1 truncate whitespace-normal break-all'>
           {getFlowJsonPreviewText(message.content) ?? (
             <RenderMessageWithHTML
-              message={message.content}
+              message={forwarded ? (forwarded.optionalText ?? forwarded.content) : message.content}
               showEdited={message.edited}
               disableLinks
             />

@@ -62,7 +62,8 @@ import { NAMESPACE } from '@/vespa/vespaConfig';
 import {logger} from '@/utils/logger';
 import { messageMetadataService } from '@/services/messageMetadataService';
 import { extractAllUsersForNotification, extractSpecialMentions, getChannelParticipantsForMention, getOnlineChannelParticipants } from '@/utils/mentionUtils';
-import { mentionRecipients } from '@/zero/side-effects/tables/mention-delivery';
+import { mentionActivities, mentionRecipients } from '@/zero/side-effects/tables/mention-delivery';
+import { formatDmChannelName } from '@/zero/side-effects/tables/messages-handler';
 import { activityService } from '@/services/activity/activityService';
 import { encrypt, decrypt } from '@/services/encryptionService';
 import { canManageApps, findInstalledApp, linkChannelsDesk } from '@/channelsDesk/admin';
@@ -595,8 +596,44 @@ export class ChannelController {
 
       // Send notifications to recipients (skip for self-DMs)
       if (recipientIds.length > 0) {
+        const mentioned = channelParticipants.length > 2 && forwardedMessage.optionalMessage
+          ? mentionRecipients(
+              await extractAllUsersForNotification(forwardedMessage.optionalMessage, workspaceId),
+              { participantIds: new Set(recipientIds), senderId },
+            )
+          : [];
+        const mentionedIds = new Set(mentioned.map(u => u.userId));
+        if (mentioned.length > 0) {
+          const memberNames = (await this.channelParticipantRepository.getChannelParticipantsWithUserDetails(channelId))
+            .map(p => p.userName || 'Unknown');
+          await notificationService.createMentionNotifications(
+            [...mentionedIds],
+            result.createdMessage.messageId,
+            result.conversation.conversationId,
+            channelId,
+            formatDmChannelName(memberNames),
+            senderId,
+            senderInfo.name,
+            cleanContent,
+            workspaceId,
+            undefined,
+            false,
+            false,
+            senderInfo.picture ?? '',
+            undefined,
+            true,
+          );
+          await activityService.createActivities(
+            mentionActivities(mentioned, {
+              messageId: result.createdMessage.messageId,
+              channelId,
+              senderId,
+              isThreadActivity: false,
+            }),
+          );
+        }
         await notificationService.createDirectMessageNotifications(
-          recipientIds,
+          recipientIds.filter(id => !mentionedIds.has(id)),
           result.createdMessage.messageId,
           result.conversation.conversationId,
           channelId,

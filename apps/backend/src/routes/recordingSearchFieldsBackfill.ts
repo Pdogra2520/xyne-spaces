@@ -25,7 +25,7 @@ router.get(
  * @desc Enqueue a field-scoped Vespa refresh (fileName, permissions, isPrivate, labels) of every
  *       recording's transcript doc — or, for a recording without a transcript, a full feed
  *       of one — in batches, pausing between them.
- *       Body: { batchSize?: 50, delayMs?: 5000, maxBatches?: 20, dryRun?: false,
+ *       Body: { batchSize?: 50 (max 500), delayMs?: 5000 (max 60000), maxBatches?: 20, dryRun?: false,
  *               cursor?: string }
  *       Returns per-batch { batch, enqueued, failed, remaining }, the totals, `done`
  *       and `nextCursor`. Pass `nextCursor` back as `cursor` to continue where the

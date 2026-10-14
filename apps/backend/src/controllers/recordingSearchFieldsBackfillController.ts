@@ -47,6 +47,8 @@ const DEFAULT_DELAY_MS = 5_000;
 /** Keeps one request under proxy timeouts: 20 x (50 jobs + 5s) ~= 100s. */
 const DEFAULT_MAX_BATCHES = 20;
 const MAX_BATCH_SIZE = 500;
+/** The pause between batches comes from the request body, so it needs a ceiling. */
+const MAX_DELAY_MS = 60_000;
 const SEARCH_FIELDS = ['fileName', 'permissions', 'isPrivate', 'labels'];
 
 type BackfillOptions = {
@@ -75,10 +77,11 @@ export class RecordingSearchFieldsBackfillController {
       typeof payload.batchSize === 'number' && payload.batchSize > 0
         ? Math.min(Math.floor(payload.batchSize), MAX_BATCH_SIZE)
         : DEFAULT_BATCH_SIZE;
-    const delayMs =
+    const requestedDelayMs =
       typeof payload.delayMs === 'number' && payload.delayMs >= 0
         ? Math.floor(payload.delayMs)
         : DEFAULT_DELAY_MS;
+    const delayMs = requestedDelayMs > MAX_DELAY_MS ? MAX_DELAY_MS : requestedDelayMs;
     const maxBatches =
       typeof payload.maxBatches === 'number' && payload.maxBatches > 0
         ? Math.floor(payload.maxBatches)

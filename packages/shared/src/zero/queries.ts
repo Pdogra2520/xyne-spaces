@@ -1052,13 +1052,7 @@ export const queries = defineQueries({
       zql.polls
         .where("messageId", "=", messageId)
         .whereExists("message", (message) => message.where("isDeleted", false))
-        .related("questions", (question) =>
-          question
-            .orderBy("position", "asc")
-            .related("options", (option) =>
-              option.orderBy("position", "asc").orderBy("createdAt", "asc"),
-            ),
-        )
+        .related("questions", (question) => question.orderBy("position", "asc"))
         .one(),
   ),
   pollQuestionResultsByPollId: defineQuery(
@@ -1074,15 +1068,10 @@ export const queries = defineQueries({
         .where("userId", "=", ctx.userID),
   ),
   pollVoterDetails: defineQuery(
-    // channelId is consumed by the ACL wrapper. The creator/anonymous check is
-    // duplicated here so the query itself documents and enforces its contract.
+    // channelId is consumed by the ACL wrapper; PollVotesACL limits other people's
+    // ballots to the creator of a non-anonymous poll.
     z.object({ pollId: z.string(), channelId: z.string().optional() }),
-    ({ ctx, args: { pollId } }) =>
-      zql.poll_votes
-        .where('pollId', '=', pollId)
-        .whereExists('poll', poll =>
-          poll.where('createdBy', '=', ctx.userID).where('isAnonymous', false),
-        ),
+    ({ args: { pollId } }) => zql.poll_votes.where('pollId', '=', pollId),
   ),
   activeSlashCommandArtifacts: defineQuery(({ ctx }) =>
     zql.message_artifacts
@@ -2711,7 +2700,7 @@ export const queries = defineQueries({
       return query.limit(limit);
     },
   ),
-
+ 
   searchChannelParticipants: defineQuery(
     z.object({ channelId: z.string(), searchQuery: z.string() }),
     ({ args: { channelId, searchQuery } }) => {
@@ -2843,7 +2832,7 @@ export const queries = defineQueries({
     return zql.user_profiles.where('userId', userId).one();
   }),
 
-
+  
   userActiveCalls: defineQuery(() => {
     return zql.calls
       .where(helpers => helpers.cmp('callType', 'NOT IN', [CallType.HEADLESS]))
@@ -3464,7 +3453,7 @@ export const queries = defineQueries({
         .orderBy('name', 'asc');
     },
   ),
-
+  
   projectFolderCanvases: defineQuery(
     z.object({
       folderId: z.string(),

@@ -70,13 +70,12 @@ export async function handleDeskThreadCanvasCallback(
 
   // The canvas body is the only place the waiting user is looking, and it
   // still reads "Generating canvas from thread…" — overwrite it, or the run
-  // looks stuck forever. Metadata keeps the reason for support. `finally`: a
-  // failed metadata write must not skip the body write.
+  // looks stuck forever. Metadata keeps the reason for support.
   const fail = async (reason: string): Promise<void> => {
     try {
       await setMetadata({ generationStatus: 'FAILED', error: reason });
     } finally {
-      await syncToYSweet(canvasId, buildFailureBlocks(reason), author);
+      if (!metadata.hasContent) await syncToYSweet(canvasId, buildFailureBlocks(reason), author);
     }
   };
 
@@ -135,12 +134,12 @@ export async function handleDeskThreadCanvasCallback(
     const synced = await syncToYSweet(canvasId, blocks, author);
     if (!synced) {
       logger.error('[DeskThreadCanvas] callback: Y-Sweet sync failed', { canvasId, sessionId });
-      await setMetadata({ generationStatus: 'FAILED', error: 'Failed to sync canvas content' });
+      await fail('Failed to sync canvas content');
       res.json({ success: true, persisted: false });
       return;
     }
 
-    await setMetadata({ generationStatus: 'READY', error: undefined });
+    await setMetadata({ generationStatus: 'READY', error: undefined, hasContent: true });
     logger.info('[DeskThreadCanvas] callback: canvas persisted', { canvasId, sessionId });
     res.json({ success: true, persisted: true });
   } catch (err) {

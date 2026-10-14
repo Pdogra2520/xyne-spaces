@@ -89,6 +89,7 @@ import {
   UserPlus,
   InformationCircle as InfoIcon,
   File02Plus,
+  File02Text,
 } from '@xyne/icons';
 import ChannelIcon from '../../components/Chat/ChannelIcon/ChannelIcon';
 import { logger, Event } from '../../utils/logger';
@@ -301,6 +302,7 @@ import {
 } from '../../components/xyne-desk/CloudAgentDock/CloudAgentDock';
 import { getOzonetelToolbar, getPhoneFieldNames } from '../../services/clients/telephonyApi';
 import { AddThreadToCanvasDialog } from '../../components/xyne-desk/AddThreadToCanvasDialog';
+import { DeskCanvasesPanel } from '../../components/xyne-desk/DeskCanvasesPanel';
 
 // Unified type for tickets from the supportTicketsFiltered query
 type SupportTicket = QueryResultType<typeof queries.supportTicketsFilteredV4>[number];
@@ -662,12 +664,17 @@ const SupportScreen = (): ReactElement => {
   const {
     workspaceId,
     channelId: channelIdParam,
-    ticketId,
+    ticketId: routeTicketId,
+    canvasId: routeCanvasId,
   } = useParams<{
     workspaceId?: string;
     channelId?: string;
     ticketId?: string;
+    canvasId?: string;
   }>();
+  // `canvases` in the :ticketId slot is the canvases view, not a ticket.
+  const showCanvases = routeTicketId === 'canvases';
+  const ticketId = showCanvases ? undefined : routeTicketId;
   const supportBase = workspaceId ? `/${workspaceId}/support` : '/support';
   const navigate = useNavigate();
   // Gate the Tickets shortcut the same way the main rail gates '/projects'.
@@ -2258,6 +2265,12 @@ const SupportScreen = (): ReactElement => {
     void navigate(qs ? `${path}?${qs}` : path, { replace });
   };
 
+  const goCanvases = (sub: string): void => {
+    const qs = searchParams.toString();
+    const path = `${supportBase}/${selectedChannelId}${sub && `/${sub}`}`;
+    void navigate(qs ? `${path}?${qs}` : path);
+  };
+
   // Manual fetch for the selected desk. Social-media desks fetch every review
   // currently available from Google; email desks open the range picker.
   const refetchChannelId =
@@ -3728,6 +3741,24 @@ const SupportScreen = (): ReactElement => {
                           </button>
                         </Tooltip>
                       )}
+                      {isSelectedChannelJoined && selectedChannelId && (
+                        <Tooltip content='Canvases' side='bottom'>
+                          <button
+                            type='button'
+                            onClick={() => goCanvases(showCanvases ? '' : 'canvases')}
+                            className={cn(
+                              'p-1.5 rounded transition-colors',
+                              showCanvases
+                                ? 'bg-muted text-foreground'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-accent',
+                            )}
+                            data-track-category='Support'
+                            data-track-name='OpenChannelCanvases'
+                          >
+                            <File02Text size={16} />
+                          </button>
+                        </Tooltip>
+                      )}
                       {isSelectedChannelJoined && (
                         <button
                           onClick={() => {
@@ -3760,7 +3791,7 @@ const SupportScreen = (): ReactElement => {
                     className={cn(
                       'relative flex h-14 shrink-0 items-center justify-between gap-2 px-4 min-w-0',
                       // Ticket filters mean nothing while a desk app stands in for the list.
-                      openDeskAppId && 'hidden',
+                      (openDeskAppId || showCanvases) && 'hidden',
                     )}
                   >
                     {isSelectedChannelJoined && (
@@ -4562,7 +4593,14 @@ const SupportScreen = (): ReactElement => {
                   )}
                 </DeskInsightsPanel>
               )}
-              {selectedChannelId && openDeskAppId ? (
+              {selectedChannelId && showCanvases ? (
+                <DeskCanvasesPanel
+                  channelId={selectedChannelId}
+                  canvasId={routeCanvasId}
+                  onOpen={id => goCanvases(`canvases/${id}`)}
+                  onBack={() => goCanvases(routeCanvasId ? 'canvases' : '')}
+                />
+              ) : selectedChannelId && openDeskAppId ? (
                 // A desk app replaces the ticket list. Keyed on the app so switching
                 // apps boots a fresh sandbox; the host's back arrow returns to tickets.
                 // Apps see the `channel` surface with this desk, so a channel-scoped
@@ -6842,7 +6880,7 @@ export const SupportTicketDetail = ({
                     ticket={ticket}
                     onSuccess={canvasId => {
                       toast.success('Building canvas from this thread');
-                      void navigate(`/chat/canvas/${canvasId}`);
+                      void navigate(`${supportBase}/${ticket.channelId}/canvases/${canvasId}`);
                     }}
                   />
                 )}

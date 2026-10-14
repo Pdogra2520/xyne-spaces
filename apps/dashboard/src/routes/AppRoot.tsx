@@ -1842,6 +1842,7 @@ export const router = createBrowserRouter(
                         {
                           path: ':ticketId',
                           element: <Outlet />,
+                          children: [{ path: ':canvasId', element: <Outlet /> }],
                         },
                       ],
                     },

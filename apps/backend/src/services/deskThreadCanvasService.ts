@@ -34,6 +34,8 @@ export interface CanvasMetadata {
   generationStartedAt?: string;
   sessionId?: string;
   error?: string;
+  /** A failed regenerate must not replace content a run already wrote. */
+  hasContent?: boolean;
 }
 
 /** A run whose callback never landed would lock the ticket out forever; past

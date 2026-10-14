@@ -131,7 +131,14 @@ import {
 import { ConnectEntityType } from '@xyne/shared';
 import { SDLC_HUB_KNOWLEDGE_FOLDER, sdlcIconNameSchema, sdlcTrackStatusSchema } from '@xyne/shared';
 import { isSdlcTreeItemType, refileSdlcFolderEdges } from '@xyne/shared';
-import { MAX_DESK_APPS, MAX_DUPLICATE_SCOPE_FIELDS, serializeDeskAppIds } from '@xyne/shared';
+import {
+  ChannelPublishedEntityType,
+  MAX_DUPLICATE_SCOPE_FIELDS,
+  MAX_PUBLISHED_APP_ID_LENGTH,
+  MAX_PUBLISHED_APPS,
+  canPublishAppsTo,
+  type ChannelPublishedTab,
+} from '@xyne/shared';
 import {
   evaluateEta,
   buildEtaActivityIntents,
@@ -287,6 +294,43 @@ const storageService = getStorageService();
 
 const serializeCanvasCommentMentionedUserIds = (mentionedUserIds: string[]): string =>
   JSON.stringify([...new Set(mentionedUserIds)]);
+
+/** Checks the caller may change the channel's published apps; returns its current rows. */
+async function loadChannelForAppPublish(
+  tx: Transaction<Schema>,
+  channelId: string,
+  userId: string,
+): Promise<ChannelPublishedTab[]> {
+  const channel = await tx.run(zql.channels.where('id', channelId).one());
+  if (!channel) {
+    throw new Error("Channel doesn't exist");
+  }
+  if (channel.isArchived) {
+    throw new Error('Cannot publish apps to an archived channel');
+  }
+  const participant = await tx.run(
+    zql.channel_participants.where('channelId', channelId).where('userId', userId).one(),
+  );
+  const isDesk = isDeskChannelType(channel.type);
+  const deskPreference = isDesk
+    ? await tx.run(zql.email_channel_preferences.where('channelId', channelId).one())
+    : undefined;
+  const isDeskOwner = !!deskPreference?.ownerUserId && deskPreference.ownerUserId === userId;
+  if (!canPublishAppsTo(channel, participant?.role, isDeskOwner)) {
+    throw new Error(
+      isDesk
+        ? 'Only the desk owner or a channel admin can change desk apps'
+        : channel.scopeType === ChannelScopeType.DEFAULT
+          ? 'Only channel admins can publish apps to the channel'
+          : 'Apps can only be published to channels, DMs, group DMs and desks',
+    );
+  }
+  return tx.run(
+    zql.channel_published_tabs
+      .where('channelId', channelId)
+      .where('entityType', ChannelPublishedEntityType.APP),
+  );
+}
 
 async function getCanvasThreadCommentCount(
   tx: Transaction<Schema>,
@@ -1587,6 +1631,40 @@ export function createMutators(
             channelId,
             addUserPolicy: policy,
           });
+        },
+      ),
+      publishApp: defineMutator(
+        z.object({
+          id: z.string().min(1).max(64),
+          channelId: z.string(),
+          appId: z.string().min(1).max(MAX_PUBLISHED_APP_ID_LENGTH),
+          timestamp: z.number(),
+        }),
+        async ({ tx, args: { id, channelId, appId, timestamp } }) => {
+          const rows = await loadChannelForAppPublish(tx, channelId, authData.sub);
+          if (rows.some(row => row.entityId === appId)) return;
+          if (rows.length >= MAX_PUBLISHED_APPS) {
+            throw new Error(`Up to ${MAX_PUBLISHED_APPS} apps can be published here`);
+          }
+          await tx.mutate.channel_published_tabs.insert({
+            id,
+            workspaceId: authData.workspaceId,
+            channelId,
+            entityType: ChannelPublishedEntityType.APP,
+            entityId: appId,
+            position: rows.reduce((top, row) => Math.max(top, row.position), -1) + 1,
+            publishedBy: authData.sub,
+            createdAt: timestamp,
+          });
+        },
+      ),
+      unpublishApp: defineMutator(
+        z.object({ channelId: z.string(), appId: z.string().min(1).max(MAX_PUBLISHED_APP_ID_LENGTH) }),
+        async ({ tx, args: { channelId, appId } }) => {
+          const rows = await loadChannelForAppPublish(tx, channelId, authData.sub);
+          const row = rows.find(r => r.entityId === appId);
+          if (!row) return;
+          await tx.mutate.channel_published_tabs.delete({ id: row.id });
         },
       ),
       updateShowTicketsTabTicketsInChat: defineMutator(
@@ -16861,9 +16939,6 @@ export function createMutators(
           deskReportEnabled: z.boolean().optional(),
           deskReportAgentSlug: z.string().optional().nullable(),
           deskReportRangeDays: z.number().optional(),
-          // Artifact apps shown on this desk, in order (see EmailChannelPreference.deskAppIds).
-          // An empty list clears the column.
-          deskAppIds: z.array(z.string().min(1).max(64)).max(MAX_DESK_APPS).nullable().optional(),
           // Scoped duplicate detection config (see EmailChannelPreference.duplicateScopeConfig)
           duplicateScopeConfig: z
             .object({
@@ -16893,7 +16968,6 @@ export function createMutators(
             deskReportEnabled,
             deskReportAgentSlug,
             deskReportRangeDays,
-            deskAppIds,
             duplicateScopeConfig,
           },
         }) => {
@@ -16939,7 +17013,6 @@ export function createMutators(
               ...(deskReportEnabled !== undefined ? { deskReportEnabled } : {}),
               ...(deskReportAgentSlug !== undefined ? { deskReportAgentSlug } : {}),
               ...(deskReportRangeDays !== undefined ? { deskReportRangeDays } : {}),
-              ...(deskAppIds !== undefined ? { deskAppIds: serializeDeskAppIds(deskAppIds) } : {}),
               ...(duplicateScopeConfig !== undefined
                 ? { duplicateScopeConfig: duplicateScopeConfig == null ? null : JSON.stringify(duplicateScopeConfig) }
                 : {}),
@@ -16975,7 +17048,6 @@ export function createMutators(
               deskReportEnabled: deskReportEnabled ?? false,
               deskReportAgentSlug: deskReportAgentSlug ?? null,
               deskReportRangeDays: deskReportRangeDays ?? 1,
-              deskAppIds: serializeDeskAppIds(deskAppIds ?? null),
               duplicateScopeConfig: duplicateScopeConfig ? JSON.stringify(duplicateScopeConfig) : null,
             });
           }
@@ -17277,6 +17349,15 @@ export function createMutators(
             ...(isPrivate !== undefined && { isPrivate }),
             updatedAt: timestamp,
           });
+          // Folders carry their own copy of isPrivate and Zero's ACL reads each row's own copy,
+          // so a visibility change must reach every folder under this root or they keep syncing
+          // to the whole workspace after the root goes private.
+          if (isPrivate !== undefined && !collection.parentId) {
+            const folders = await tx.run(zql.collections.where('rootCollectionId', id));
+            for (const folder of folders) {
+              await tx.mutate.collections.update({ id: folder.id, isPrivate, updatedAt: timestamp });
+            }
+          }
         },
       ),
 

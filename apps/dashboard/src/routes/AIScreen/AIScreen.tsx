@@ -1,5 +1,13 @@
 import type { XyneAiSendTrigger } from '../../services/Analytics/xyneAiTracking';
-import { type ReactElement, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  type ReactElement,
+  type ReactNode,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react';
 import { useNavigate, useParams, useLocation, useNavigationType } from 'react-router-dom';
 import { Upload } from 'lucide-react';
 import { SidebarLeftOpen } from '@xyne/icons';
@@ -37,6 +45,7 @@ import { useV2SessionInvalidator } from '../../hooks/useAskAISessionsV2';
 import { useSelectedAgent } from '../../hooks/useSelectedAgent';
 import { useAssistantActions } from '../../components/Assistant/useAssistantActions';
 import type { AssistantRouting } from '../../components/Assistant/useRoutedSubmit';
+import { useUserPreference } from '../../machines/userPreferencesMachine';
 import { AI_ACTIVE_SESSION_KEY, AI_SHOW_CHAT_VIEW_KEY } from './aiSessionStorage';
 
 function CitationWorkspaceOpener({ onOpenSources }: { onOpenSources: () => void }): null {
@@ -373,8 +382,9 @@ const AIScreen = (): ReactElement => {
   // The thread has fired the landing query — drop it so it can never be
   // auto-submitted twice. Without this the thread's `useRef` guard resets on any
   // remount and the same query is sent again as a NEW conversation.
-  // `initialExtras` is deliberately kept: it seeds the chat composer's context
-  // selections for the whole conversation, not just the first turn.
+  // `initialExtras` is deliberately kept: it seeds the chat composer's
+  // toggles for the whole conversation (its context went out with the first
+  // turn — see AIChatThread's composerSeed).
   const handleInitialQueryConsumed = useCallback((): void => {
     setInitialQuery('');
     setInitialAttachments(undefined);
@@ -451,10 +461,13 @@ const AIScreen = (): ReactElement => {
       setActiveSessionId(sessionId);
       // A new chat just acquired its server sessionId — refresh the recents
       // list so this conversation shows up immediately, without needing a
-      // page reload or a navigate-away-and-back.
-      invalidateV2Sessions(effectiveAgentSlug);
+      // page reload or a navigate-away-and-back. No agent here on purpose:
+      // the history spans every agent, and depending on the picked agent gave
+      // this callback a new identity on every switch, which re-ran the
+      // thread's session loader mid-conversation.
+      invalidateV2Sessions();
     },
-    [effectiveAgentSlug, invalidateV2Sessions],
+    [invalidateV2Sessions],
   );
 
   const handleAccount = useCallback((): void => {
@@ -531,6 +544,7 @@ const AIScreen = (): ReactElement => {
     setWorkspaceOverride(null);
   }, [activeSessionId]);
   const { artifacts: conversationArtifacts } = useConversationArtifacts(activeSessionId || null);
+  const workspaceAutoOpen = useUserPreference('aiWorkspaceAutoOpen');
   const hasArtifacts = conversationArtifacts.length > 0;
   const [workspaceRequest, setWorkspaceRequest] = useState<WorkspaceOpenRequest>({
     seq: 0,
@@ -592,10 +606,12 @@ const AIScreen = (): ReactElement => {
   // Likewise a fresh element remounts the pane's subtree each render.
   const appPane = useMemo(() => <ArtifactAppPane mode={appMode} />, [appMode]);
 
-  const openWorkspaceTab = useCallback(
-    (tab: WorkspaceOpenRequest['tab'], artifactId?: string) =>
-      requestWorkspace({ tab, ...(artifactId ? { openArtifactId: artifactId } : {}) }),
-    [requestWorkspace],
+  const autoOpenWorkspaceTab = useCallback(
+    (tab: WorkspaceOpenRequest['tab'], artifactId?: string) => {
+      if (!workspaceAutoOpen) return;
+      requestWorkspace({ tab, ...(artifactId ? { openArtifactId: artifactId } : {}) });
+    },
+    [requestWorkspace, workspaceAutoOpen],
   );
   const collapseWorkspace = useCallback(() => {
     setWorkspaceOverride(false);
@@ -616,7 +632,7 @@ const AIScreen = (): ReactElement => {
     [appMode.active, appMode.hasApp, appMode.appId, appMode.open, appMode.exit],
   );
 
-  const workspaceOpen = showChatView && (workspaceOverride ?? hasArtifacts);
+  const workspaceOpen = showChatView && (workspaceOverride ?? (workspaceAutoOpen && hasArtifacts));
   const workspaceWasOpen = useRef(workspaceOpen);
   useEffect(() => {
     if (workspaceOpen && !workspaceWasOpen.current) {
@@ -643,7 +659,7 @@ const AIScreen = (): ReactElement => {
       <DesignStudioProvider>
         <PageSelectionProvider submitPrompt={submitPrompt}>
           <CitationWorkspaceOpener onOpenSources={openSourcesInWorkspace} />
-          <WorkspaceAutoOpener artifacts={conversationArtifacts} onOpen={openWorkspaceTab} />
+          <WorkspaceAutoOpener artifacts={conversationArtifacts} onOpen={autoOpenWorkspaceTab} />
           <AppCreationModeProvider value={appModeSignal}>
             <AIShell
               activeSessionId={activeSessionId}
@@ -698,7 +714,10 @@ const AIScreen = (): ReactElement => {
                   assistant={assistant}
                 />
               ) : (
-                /* Landing page – centred greeting + composer */
+                /* Landing page – centred greeting + composer. Context rises
+                   into the gap between them and a longer message grows the
+                   composer downward (see LandingComposerSlot), so neither
+                   moves the greeting. */
                 <main className='relative flex h-full flex-1 items-center justify-center px-6 py-8'>
                   {/* The landing page has no header, so without this the
                       sidebar's own collapse button would strand the user with
@@ -719,7 +738,7 @@ const AIScreen = (): ReactElement => {
                   )}
                   <div className='flex w-full max-w-3xl flex-col'>
                     <AIEmptyState />
-                    <div className='mt-6'>
+                    <LandingComposerSlot className='mt-16'>
                       <AIComposer
                         ref={landingComposerRef}
                         autoFocus
@@ -729,9 +748,10 @@ const AIScreen = (): ReactElement => {
                         onAgentChange={handleAgentChange}
                         showAgentSelector={isV2}
                         onContextChange={handleContextChange}
+                        anchor='top'
                         hideDisclaimer
                       />
-                    </div>
+                    </LandingComposerSlot>
                   </div>
                 </main>
               )}
@@ -742,5 +762,48 @@ const AIScreen = (): ReactElement => {
     </CitationDocsProvider>
   );
 };
+
+/**
+ * Keeps the landing composer's resting height in the layout and lets it grow
+ * downward over the page: the greeting and composer stay centred where they
+ * are while a long message makes the box taller.
+ */
+function LandingComposerSlot({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): ReactElement {
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [restingHeight, setRestingHeight] = useState<number | null>(null);
+  // Measured once, at rest (before anything is typed).
+  useEffect(() => {
+    const el = innerRef.current;
+    if (!el) return undefined;
+    const observer = new ResizeObserver(entries => {
+      const entry = entries[0];
+      const height = entry?.borderBoxSize?.[0]?.blockSize ?? entry?.contentRect.height;
+      if (!height) return;
+      setRestingHeight(height);
+      observer.disconnect();
+    });
+    observer.observe(el);
+    return (): void => observer.disconnect();
+  }, []);
+  return (
+    <div
+      className={['relative', className].filter(Boolean).join(' ')}
+      style={restingHeight === null ? undefined : { height: restingHeight }}
+    >
+      <div
+        ref={innerRef}
+        className={restingHeight === null ? undefined : 'absolute inset-x-0 top-0 z-10'}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export default AIScreen;

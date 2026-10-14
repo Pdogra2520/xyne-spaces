@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { MeetingStatus, RingStatus } from '@xyne/shared';
+import { CallStatus, CallType, MeetingStatus, RecurringCallSeriesStatus, RingStatus } from '@xyne/shared';
 
 export const UpdateRsvpSchema = z.object({
   status: z.nativeEnum(MeetingStatus),
@@ -112,8 +112,12 @@ export const ScheduleCallSchema = z.object({
   // Pins the detailed-summary template so no LLM template selection runs for this call.
   summaryTemplateId: z.string().trim().min(1).optional(),
 }).refine(
-  (data) => data.channelId || (data.targetUserIds && data.targetUserIds.length > 0),
-  'Either channelId or targetUserIds is required'
+  // A guest-only call has no channel or teammates; it is backed by the organizer's self-DM.
+  (data) =>
+    data.channelId ||
+    (data.targetUserIds && data.targetUserIds.length > 0) ||
+    (data.externalInvitees && data.externalInvitees.length > 0),
+  'Either channelId, targetUserIds or externalInvitees is required'
 ).refine(
   (data) => data.startsAt < data.endsAt,
   'endsAt must be after startsAt'
@@ -168,8 +172,12 @@ export const RecurringScheduleCallSchema = z
     summaryTemplateId: z.string().trim().min(1).optional(),
   })
   .refine(
-    (data) => data.channelId || (data.targetUserIds && data.targetUserIds.length > 0),
-    'Either channelId or targetUserIds is required',
+    // A guest-only series has no channel or teammates; it is backed by the organizer's self-DM.
+    (data) =>
+      data.channelId ||
+      (data.targetUserIds && data.targetUserIds.length > 0) ||
+      (data.externalInvitees && data.externalInvitees.length > 0),
+    'Either channelId, targetUserIds or externalInvitees is required',
   )
   .refine(
     (data) => !data.endsOn || data.endsOn > data.startsOn,
@@ -260,3 +268,49 @@ export type CancelScheduledCallInput = z.infer<typeof CancelScheduledCallSchema>
 export const CancelRecurringSeriesSchema = z.object({}).default({});
 
 export type CancelRecurringSeriesInput = z.infer<typeof CancelRecurringSeriesSchema>;
+
+// ── Calls admin panel ──────────────────────────────────────────────────────
+
+/** Comma-separated query value (`?status=ACTIVE,IN_PROGRESS`) → array; blank → undefined. */
+const csvQueryList = <T extends z.ZodTypeAny>(item: T) =>
+  z.preprocess(
+    (value) => {
+      if (typeof value !== 'string') return undefined;
+      const items = value.split(',').map((part) => part.trim()).filter(Boolean);
+      return items.length > 0 ? items : undefined;
+    },
+    z.array(item).optional(),
+  );
+
+const adminListPaging = {
+  // `all` needs SCRIBE:ADMIN; `mine` is calls the caller created or participates in.
+  scope: z.enum(['mine', 'all']).default('mine'),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: optionalTrimmedString,
+  search: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() ? value.trim() : undefined),
+    z.string().max(200).optional(),
+  ),
+};
+
+export const CallAdminListCallsQuerySchema = z.object({
+  ...adminListPaging,
+  status: csvQueryList(z.nativeEnum(CallStatus)),
+  type: z.nativeEnum(CallType).optional(),
+  summaryStatus: csvQueryList(z.enum(['pending', 'ready', 'failed'])),
+  hasTranscript: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
+});
+
+export const CallAdminListSeriesQuerySchema = z.object({
+  ...adminListPaging,
+  status: csvQueryList(z.nativeEnum(RecurringCallSeriesStatus)),
+});
+
+export const CallAdminChangeOwnerSchema = z.object({
+  newOwnerUserId: z.string().trim().min(1, 'newOwnerUserId is required'),
+  // Also move the series organizer and every future SCHEDULED instance.
+  applyToSeries: z.boolean().optional().default(false),
+});

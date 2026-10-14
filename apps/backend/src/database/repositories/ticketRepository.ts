@@ -248,19 +248,6 @@ export class TicketRepository {
       kanbanPosition = generateKeyBetween(null, null);
     }
 
-    // Upsert merchant if merchantId is provided
-    if (data.merchantId) {
-      await db.merchant.upsert({
-        where: { mid: data.merchantId },
-        update: {}, // No update needed if exists
-        create: {
-          mid: data.merchantId,
-        }
-      });
-      logger.info(`[TicketRepository] Upserted merchant with mid: ${data.merchantId}`);
-    }
-
-
     // Ticket creation + initial stage visit + the ETA domain-service evaluation must commit atomically.
     // Reuses the caller's transaction when one was passed in; otherwise opens its own.
     const createResult = tx
@@ -860,7 +847,6 @@ export class TicketRepository {
       closedAt?: Date | null;
       closedBy?: string | null;
       aiPriority?: string;
-      merchantId?: string | null;
     },
     updatedBy: string,
     options: { cascadeFlow?: boolean } = {},
@@ -876,7 +862,6 @@ export class TicketRepository {
     if (fields.closedAt !== undefined) data.closedAt = fields.closedAt;
     if (fields.closedBy !== undefined) data.closedBy = fields.closedBy;
     if (fields.aiPriority !== undefined) data.aiPriority = fields.aiPriority;
-    if (fields.merchantId !== undefined) data.merchantId = fields.merchantId;
 
     if (Object.keys(data).length <= 2) {
       return;
@@ -930,15 +915,6 @@ export class TicketRepository {
     // Closure bookkeeping when the status changes; explicit closedAt/closedBy from the caller win.
     if (fields.statusV2 !== undefined && fields.closedAt === undefined && fields.closedBy === undefined) {
       Object.assign(data, deriveTicketClosurePatch(previousStatus, fields.statusV2, updatedBy, new Date()));
-    }
-
-    // Same as createTicket: make sure the merchant row exists before linking to it.
-    if (fields.merchantId) {
-      await prisma.merchant.upsert({
-        where: { mid: fields.merchantId },
-        update: {},
-        create: { mid: fields.merchantId },
-      });
     }
 
     const updatedTicket = await prisma.ticket.update({ where: { id: ticketId }, data });

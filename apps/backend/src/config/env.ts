@@ -164,6 +164,7 @@ const envSchema = Joi.object({
   TAG_GENERATION_CONCURRENCY: Joi.number().integer().min(1).max(20).default(1),
   TAG_GENERATION_LLM_TIMEOUT_MS: Joi.number().integer().min(1000).default(120000),
   ENABLE_STITCH_WORKER: Joi.boolean().default(false),
+  ENABLE_CALL_TRANSCRIPTION_WORKER: Joi.boolean().default(false),
   ENABLE_AI_PROVISIONING_WORKER: Joi.boolean().default(false),
   ENABLE_USER_AI_PROVISIONING: Joi.boolean().default(false),
   XYNE_CLAW_AUTH_INTERNAL_URL: Joi.string().uri().allow('').default(''),
@@ -284,6 +285,9 @@ const envSchema = Joi.object({
   // Same CALL_LITELLM_API_KEY for both; both fall back to CALL_LITELLM_MODEL.
   CALL_RECORDING_FAST_LITELLM_MODEL: Joi.string().allow('').default(''),
   CALL_RECORDING_THINKING_LITELLM_MODEL: Joi.string().allow('').default(''),
+  // Run call/recording/summary-template LLM tasks on the Claw `call-intelligence`
+  // agent instead of calling LiteLLM directly.
+  CALL_AI_USE_CLAW_AGENT: Joi.boolean().default(false),
   ACTIVITY_CLASSIFICATION_MODEL: Joi.string().default(''),
   // Working Hours Configuration (in IST)
   WORKING_HOUR_START: Joi.number().default(11),
@@ -442,6 +446,7 @@ const envSchema = Joi.object({
   JIRA_EULER_BOT_AUTH_TOKEN: Joi.string().allow('').default(''),
   JIRA_MIGRATION_BOT_EMAIL: Joi.string().allow('').default(''),
   JIRA_MIGRATION_BOT_AUTH_TOKEN: Joi.string().allow('').default(''),
+  ENCRYPTION_KEY: Joi.string().allow('').default(''),
   ZERO_CLIENT_ENCRYPTION_ENABLED: Joi.boolean().default(false),
   API_CLIENT_ENCRYPTION_ENABLED: Joi.boolean().default(false),
   ENABLE_DB_ENCRYPTION: Joi.boolean().default(false),
@@ -451,6 +456,7 @@ const envSchema = Joi.object({
   ENCRYPTED_FIELDS_CACHE_TTL_MS: Joi.number().integer().min(1000).default(15 * 60 * 1000),
   ENC_ORG_PROVISION: Joi.boolean().default(false),
   ENC_WORKSPACE_PROVISION: Joi.boolean().default(false),
+  SECRETS_VAULT_CACHE_TTL_MS: Joi.number().integer().min(0).default(5 * 60 * 1000),
   JIRA_MIGRATION_USER_MAP_CSV_LOCATION: Joi.string()
     .allow('')
     .default(''),
@@ -772,6 +778,9 @@ export const config = {
     callRecordingThinkingLitellmModel:
       envVars.CALL_RECORDING_THINKING_LITELLM_MODEL || envVars.CALL_LITELLM_MODEL,
   },
+  callAi: {
+    useClawAgent: envVars.CALL_AI_USE_CLAW_AGENT as boolean,
+  },
   activityClassification: {
     litellmApiKey: envVars.ACTIVITY_CLASSIFICATION_LITELLM_API_KEY,
     model: envVars.ACTIVITY_CLASSIFICATION_MODEL,
@@ -875,6 +884,7 @@ export const config = {
   tagGenerationConcurrency: envVars.TAG_GENERATION_CONCURRENCY as number,
   tagGenerationLlmTimeoutMs: envVars.TAG_GENERATION_LLM_TIMEOUT_MS as number,
   enableStitchWorker: envVars.ENABLE_STITCH_WORKER,
+  enableCallTranscriptionWorker: envVars.ENABLE_CALL_TRANSCRIPTION_WORKER,
   enableAiProvisioningWorker: envVars.ENABLE_AI_PROVISIONING_WORKER,
   aiProvisioning: {
     xyneClawAuthInternalUrl: envVars.XYNE_CLAW_AUTH_INTERNAL_URL as string,
@@ -1196,6 +1206,10 @@ export const config = {
     encryptedFieldsCacheTtlMs: envVars.ENCRYPTED_FIELDS_CACHE_TTL_MS as number,
     orgProvisionEnabled: envVars.ENC_ORG_PROVISION as boolean,
     workspaceProvisionEnabled: envVars.ENC_WORKSPACE_PROVISION as boolean,
+  },
+  encryptionKey: envVars.ENCRYPTION_KEY as string,
+  secretsVault: {
+    cacheTtlMs: envVars.SECRETS_VAULT_CACHE_TTL_MS as number,
   },
   enableFileIndexing: envVars.ENABLE_FILE_INDEXING as boolean,
   enableDriveImportWorker: envVars.ENABLE_DRIVE_IMPORT_WORKER as boolean,

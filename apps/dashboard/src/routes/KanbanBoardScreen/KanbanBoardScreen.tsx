@@ -372,7 +372,6 @@ type CreateTicketSeed = {
   assignee?: { type: 'assigneeTo' | 'userGroup'; value: string } | null;
   priority?: TicketPriority | null;
   tags?: string[];
-  merchantId?: string;
   dynamicFields?: Record<string, string | string[]>;
   boardId?: string;
   channelId?: string;
@@ -2212,9 +2211,10 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
     : multiProjectTagsDetails;
 
   // Accumulate tags from pagination
+  const isTagsPageComplete = projectTagsDetails.type === 'complete';
   useEffect(() => {
     if (!currentPageTags || currentPageTags.length === 0) {
-      if (tagsCursor !== null) {
+      if (tagsCursor !== null && isTagsPageComplete) {
         // No more results from this page
         setHasMoreZeroTags(false);
       }
@@ -2222,7 +2222,7 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
     }
 
     // Check if we got less than page size (no more pages)
-    if (currentPageTags.length < TAGS_PAGE_SIZE) {
+    if (currentPageTags.length < TAGS_PAGE_SIZE && isTagsPageComplete) {
       setHasMoreZeroTags(false);
     }
 
@@ -2232,23 +2232,24 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
       const newTags = currentPageTags.filter(t => !existingIds.has(t.id));
       return [...prev, ...newTags];
     });
-  }, [currentPageTags, tagsCursor]);
+  }, [currentPageTags, tagsCursor, isTagsPageComplete]);
 
   // Combine accumulated tags for display
   const projectTags = accumulatedTags;
 
   // Handle load more tags (pagination)
   const handleLoadMoreTags = useCallback(() => {
-    if (!hasMoreZeroTags || tagsSearchQuery.trim()) return;
+    if (!hasMoreZeroTags || !isTagsPageComplete) return;
     const lastTag = accumulatedTags[accumulatedTags.length - 1];
     if (lastTag) {
       setTagsCursor({ name: lastTag.name, id: lastTag.id });
     }
-  }, [hasMoreZeroTags, tagsSearchQuery, accumulatedTags]);
+  }, [hasMoreZeroTags, isTagsPageComplete, accumulatedTags]);
 
   // Handle tag search callback
   const handleSearchTags = useCallback((query: string) => {
     setTagsSearchQuery(query);
+    setTagsCursor(null);
   }, []);
 
   // Create a map of stageId -> formId for quick lookup (from stages.formId).
@@ -3789,7 +3790,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
     const { inverted, includeUnassigned, ids } = parseAssigneeFilter(filters.assignee ?? []);
     const assigneeId = !inverted && !includeUnassigned && ids.length === 1 ? ids[0] : undefined;
     const userGroupId = filters.userGroups?.length === 1 ? filters.userGroups[0] : undefined;
-    const merchantId = filters.merchantIds?.length === 1 ? filters.merchantIds[0] : undefined;
     return {
       assignee: assigneeId
         ? { type: 'assigneeTo', value: assigneeId }
@@ -3798,7 +3798,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
           : null,
       priority: filters.priority?.length === 1 ? (filters.priority[0] ?? null) : null,
       ...(filters.tags?.length === 1 ? { tags: filters.tags } : {}),
-      ...(merchantId ? { merchantId } : {}),
       ...(channelId ? { channelId } : {}),
       ...(channelId && board ? { boardId: board.id } : {}),
     };
@@ -3838,7 +3837,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
         stageName: column.stageName,
         assignee: groupAssignee ?? viewCreateTicketSeed?.assignee ?? null,
         priority: group.priority ?? viewCreateTicketSeed?.priority ?? null,
-        ...(groupBy === 'merchantId' && hasGroupValue ? { merchantId: group.key } : {}),
         ...(isFormFieldGroup(groupBy) && hasGroupValue
           ? {
               dynamicFields: {
@@ -4408,7 +4406,7 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
       alwaysOfferAllBoards: isTrackView,
       availableTags,
       onLoadMoreTags: handleLoadMoreTags,
-      hasMoreTags: !tagsSearchQuery.trim() && hasMoreZeroTags,
+      hasMoreTags: hasMoreZeroTags,
       onSearchTags: handleSearchTags,
       recentLabelsBoardIds,
       availableStages,
@@ -4434,7 +4432,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
       sourceChannelProjectIds,
       availableTags,
       handleLoadMoreTags,
-      tagsSearchQuery,
       hasMoreZeroTags,
       handleSearchTags,
       recentLabelsBoardIds,
@@ -5541,7 +5538,7 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
                           visibleColumns={visibleColumns}
                           availableTags={availableTags || []}
                           onLoadMoreTags={handleLoadMoreTags}
-                          hasMoreTags={!tagsSearchQuery.trim() && hasMoreZeroTags}
+                          hasMoreTags={hasMoreZeroTags}
                           onSearchTags={handleSearchTags}
                           keyPrefix={`${group.key}::`}
                           layoutScope={kanbanLayoutScope}
@@ -5576,7 +5573,7 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
                   visibleColumns={visibleColumns}
                   availableTags={availableTags || []}
                   onLoadMoreTags={handleLoadMoreTags}
-                  hasMoreTags={!tagsSearchQuery.trim() && hasMoreZeroTags}
+                  hasMoreTags={hasMoreZeroTags}
                   onSearchTags={handleSearchTags}
                   slaPolicies={kanbanSlaPolicies}
                 />
@@ -5616,7 +5613,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
           initialStageName={createTicketSeed?.stageName ?? null}
           initialAssignee={createTicketSeed?.assignee ?? null}
           initialPriority={createTicketSeed?.priority ?? null}
-          initialMerchantId={createTicketSeed?.merchantId}
           initialDynamicFields={createTicketSeed?.dynamicFields}
           onTicketCreated={handleTicketCreated}
         />
@@ -5641,7 +5637,6 @@ const KanbanBoardScreen: React.FC<BoardKanbanScreenProps> = ({
           initialAssignee={createTicketSeed?.assignee ?? null}
           initialPriority={createTicketSeed?.priority ?? null}
           {...(createTicketSeed?.tags ? { initialTags: createTicketSeed.tags } : {})}
-          initialMerchantId={createTicketSeed?.merchantId}
           initialDynamicFields={createTicketSeed?.dynamicFields}
           onTicketCreated={handleTicketCreated}
         />

@@ -59,6 +59,7 @@ import {
   RecapEntityType,
   UserType,
   ViewAccessEntityType,
+  ChannelPublishedEntityType,
 } from '@xyne/shared';
 
 export const zql = createBuilder(schema);
@@ -3170,6 +3171,12 @@ export const queries: AnyQueryRegistry = defineQueries({
       .orderBy('name', 'asc');
   }),
 
+  // Point lookup used by `useChannel` when an id is missing from the hydrated
+  // channel sets (e.g. channel created or made visible after the initial load).
+  // Scoped by ChannelsACL like every other `channels` read, so it never widens visibility.
+  getChannelById: defineQuery(z.object({ channelId: z.string() }), ({ args: { channelId } }) => {
+    return zql.channels.where('id', channelId).one();
+  }),
   channelStats: defineQuery(
     z.object({ channelId: z.string() }),
     ({ args: { channelId } }) => {
@@ -4474,6 +4481,16 @@ export const queries: AnyQueryRegistry = defineQueries({
         .where(helpers => helpers.cmp('id', 'IN', boardIds))
         .orderBy('createdAt', 'desc');
     },
+  ),
+
+  channelPublishedApps: defineQuery(
+    z.object({ channelId: z.string() }),
+    ({ args: { channelId } }) =>
+      zql.channel_published_tabs
+        .where('channelId', channelId)
+        .where('entityType', ChannelPublishedEntityType.APP)
+        .orderBy('position', 'asc')
+        .orderBy('createdAt', 'asc'),
   ),
 
   // Boards mapped to a channel via ChannelBoardMapping.

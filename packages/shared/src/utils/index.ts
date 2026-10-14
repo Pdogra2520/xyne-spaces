@@ -21,6 +21,14 @@ export {
   type ChannelWeightLookup,
 } from './channelRanking.js';
 export { groupChannelsByScope, getDMNames, buildCmdkChannelGroups } from './channelGroups.js';
+export {
+  CMDK_SEARCH_CAC_KEY,
+  DEFAULT_CMDK_SEARCH_CAC_CONFIG,
+  DEFAULT_FLAT_ALL_RANK_PROFILES,
+  cmdkDefaultRankProfiles,
+  cmdkTabKeyForDocType,
+  type CmdkSearchCacConfig,
+} from './cmdkSearchConfig.js';
 export { tierOf, TIER_FUZZY, type Tier } from './searchTier.js';
 export {
   mergeRankedCandidates,

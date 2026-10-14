@@ -3745,6 +3745,7 @@ const SupportScreen = (): ReactElement => {
                         <Tooltip content='Canvases' side='bottom'>
                           <button
                             type='button'
+                            aria-label='Canvases'
                             onClick={() => goCanvases(showCanvases ? '' : 'canvases')}
                             className={cn(
                               'p-1.5 rounded transition-colors',
@@ -3777,7 +3778,7 @@ const SupportScreen = (): ReactElement => {
                               ? 'bg-muted text-foreground'
                               : 'text-muted-foreground hover:text-foreground hover:bg-accent',
                           )}
-                          title='Inbox settings'
+                          aria-label='Inbox settings'
                           data-track-category='Support'
                           data-track-name='ToggleInboxSettings'
                         >

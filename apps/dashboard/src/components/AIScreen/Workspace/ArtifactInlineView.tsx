@@ -22,6 +22,41 @@ function attachmentDownloadUrl(refId: string): string {
   return `/xyne-ai/v2/attachments/${encodeURIComponent(refId)}/download`;
 }
 
+// The sandbox editor is code-server, and code-server needs localStorage,
+// IndexedDB and a service worker. SandboxedFrame withholds allow-same-origin,
+// so the frame gets an opaque origin where all three throw and the workbench
+// never boots. Hence the button: the reason is functional, not a security
+// boundary. /claw-code is served from this origin, so the tab it opens is
+// same-origin too — anything the agent serves there can call /api/* as the
+// viewer, who may be any member of the conversation. The sandbox-access gate in
+// the router narrows who is exposed; only moving the sandbox routes to their own
+// origin removes it (XYNE-65792 follow-up).
+function isSandboxEditorUrl(url: string): boolean {
+  try {
+    return new URL(url).pathname.startsWith('/claw-code/');
+  } catch {
+    return false;
+  }
+}
+
+function SandboxEditorCard({ url }: { url: string }): ReactElement {
+  return (
+    <div className='flex h-full flex-col items-center justify-center gap-3 px-6 text-center'>
+      <p className='text-sm text-muted-foreground'>The sandbox editor opens in its own tab.</p>
+      <button
+        type='button'
+        onClick={event => openLink(url, event, { force: 'external' })}
+        className='flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary/60'
+        data-track-category='AskAI'
+        data-track-name='workspace-sandbox-editor-open'
+      >
+        <ExternalLink className='h-3.5 w-3.5' aria-hidden='true' />
+        Open editor
+      </button>
+    </div>
+  );
+}
+
 export function artifactInlineActions(artifact: ConversationArtifact): ReactElement | null {
   const url = safeHttpUrl(artifact.openRef.url ?? artifact.url);
 
@@ -118,6 +153,7 @@ export function ArtifactInlineView({
     case 'DIFF':
       if (isLocalDiffArtifact(artifact))
         return <LocalDiffView artifact={artifact} guide={reviewGuide ?? null} />;
+      if (url && isSandboxEditorUrl(url)) return <SandboxEditorCard url={url} />;
       return url ? (
         <SandboxedFrame url={url} title={artifact.title} />
       ) : (

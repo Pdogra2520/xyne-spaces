@@ -143,6 +143,29 @@ alerts were dismissed as "won't fix", because the protection is the boundary
 above, not the code. [claw-and-sandbox](../features/claw-and-sandbox.md#network-isolation)
 has the checks that prove the fence holds.
 
+Two gateway routes reach into a sandbox from outside. `/claw-preview/` is open:
+anyone holding a sandbox name can drive its browser. `/claw-code/` is not,
+because code-server also offers file write and a terminal in a pod that holds
+the workspace's GitHub SSH key — the router asks claw-auth whether the caller's
+Spaces session owns that sandbox, and fails closed when it cannot ask. Clearing
+the router's `CLAW_AUTH_URL` removes the check.
+
+On both routes the caller's `Cookie` and `Authorization` headers stop at the
+router and are never relayed into the sandbox. The access check is their only
+consumer; neither websockify nor code-server (`--auth none`) reads them, and the
+pod on the other side runs agent-written code. In the other direction the router
+drops `Set-Cookie`, `Clear-Site-Data` and `Service-Worker-Allowed`, so a sandbox
+cannot set a cookie on the Spaces origin, sign the viewer out, or claim a
+service-worker scope wider than its own path.
+
+Both routes still answer on the dashboard's origin, and that is the remaining
+exposure: whatever the agent serves in the sandbox runs there, so it can call
+`/api/*` as whoever opened the link — and for `/claw-code/` that reader can be
+any member of the conversation, not only the person who started the run. The
+gate decides who gets that far; it does not make the page harmless. Serving the
+sandbox routes from their own origin is the real fix and is tracked as the
+XYNE-65792 follow-up.
+
 ## Workload hardening
 
 Service charts built on `xyne-common` take a `securityContext` and

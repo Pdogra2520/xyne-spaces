@@ -4177,10 +4177,18 @@ export function createMutators(
                   .one());
 
                 // Only delete if they're MENTIONED type (keep AUTHOR participants)
-                if (participant && participant.participationType === ConversationParticipation.MENTIONED && !participant.ticketUpdatesUnsubscribedAt) {
-                  await tx.mutate.conversation_participants.delete({
-                    id: participant.id
-                  });
+                if (participant && participant.participationType === ConversationParticipation.MENTIONED) {
+                  if (participant.ticketUpdatesUnsubscribedAt) {
+                    await tx.mutate.conversation_participants.update({
+                      id: participant.id,
+                      isSubscribed: false,
+                      participationType: null,
+                    });
+                  } else {
+                    await tx.mutate.conversation_participants.delete({
+                      id: participant.id
+                    });
+                  }
                 }
               }
             }
@@ -4651,10 +4659,18 @@ export function createMutators(
                   .one());
 
                 // Only delete if they're MENTIONED type (keep AUTHOR participants for now)
-                if (participant && participant.participationType === ConversationParticipation.MENTIONED && !participant.ticketUpdatesUnsubscribedAt) {
-                  await tx.mutate.conversation_participants.delete({
-                    id: participant.id
-                  });
+                if (participant && participant.participationType === ConversationParticipation.MENTIONED) {
+                  if (participant.ticketUpdatesUnsubscribedAt) {
+                    await tx.mutate.conversation_participants.update({
+                      id: participant.id,
+                      isSubscribed: false,
+                      participationType: null,
+                    });
+                  } else {
+                    await tx.mutate.conversation_participants.delete({
+                      id: participant.id
+                    });
+                  }
                 }
               }
             }
@@ -4680,10 +4696,18 @@ export function createMutators(
                 .one());
 
               // Remove AUTHOR participant (they have no more messages)
-              if (senderParticipant && senderParticipant.participationType === ConversationParticipation.AUTHOR && !senderParticipant.ticketUpdatesUnsubscribedAt) {
-                await tx.mutate.conversation_participants.delete({
-                  id: senderParticipant.id
-                });
+              if (senderParticipant && senderParticipant.participationType === ConversationParticipation.AUTHOR) {
+                if (senderParticipant.ticketUpdatesUnsubscribedAt) {
+                  await tx.mutate.conversation_participants.update({
+                    id: senderParticipant.id,
+                    isSubscribed: false,
+                    participationType: null,
+                  });
+                } else {
+                  await tx.mutate.conversation_participants.delete({
+                    id: senderParticipant.id
+                  });
+                }
               }
             }
           }

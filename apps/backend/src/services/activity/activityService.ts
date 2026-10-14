@@ -51,16 +51,26 @@ export class ActivityService {
     if (activity.actionSource !== 'ticket' || !activity.ticketId || !TICKET_UPDATE_ACTIONS.has(activity.actorAction)) {
       return false;
     }
-    if (activity.actorAction === 'ticket_assigned') {
-      const ticket = await this.prisma.ticket.findUnique({
-        where: { id: activity.ticketId },
-        select: { assignedTo: true },
-      });
-      if (ticket?.assignedTo === activity.userId) {
-        return false;
+    try {
+      if (activity.actorAction === 'ticket_assigned') {
+        const ticket = await this.prisma.ticket.findUnique({
+          where: { id: activity.ticketId },
+          select: { assignedTo: true },
+        });
+        if (ticket?.assignedTo === activity.userId) {
+          return false;
+        }
       }
+      return (await excludeTicketOptOuts(activity.ticketId, [activity.userId])).length === 0;
+    } catch (error) {
+      logger.error('[ActivityService] Ticket opt-out lookup failed, skipping activity', {
+        ticketId: activity.ticketId,
+        userId: activity.userId,
+        actorAction: activity.actorAction,
+        error,
+      });
+      return true;
     }
-    return (await excludeTicketOptOuts(activity.ticketId, [activity.userId])).length === 0;
   }
 
   /**

@@ -2,6 +2,7 @@ import { db } from '@/database/client';
 import { withWorkspaceScope } from '@/database/tenant/context';
 import { FormContextType, FormEntityType, FormFieldType } from '@xyne/shared';
 import { logger } from '@/utils/logger';
+import { sdlcTicketConversation } from '@/sdlc/sdlcNavTarget';
 
 /**
  * Fetch additional actor user IDs from board form fields of type USER.
@@ -91,19 +92,16 @@ export async function excludeTicketOptOuts(ticketId: string, userIds: string[]):
     return userIds;
   }
 
-  const ticket = await db.ticket.findUnique({
-    where: { id: ticketId },
-    select: { conversationId: true },
-  });
+  const conversationId = await sdlcTicketConversation(ticketId);
 
-  if (!ticket?.conversationId) {
+  if (!conversationId) {
     return userIds;
   }
 
   const optedOut = await withWorkspaceScope(() =>
     db.conversationParticipant.findMany({
       where: {
-        conversationId: ticket.conversationId,
+        conversationId,
         userId: { in: userIds },
         ticketUpdatesUnsubscribedAt: { not: null },
       },
@@ -117,19 +115,16 @@ export async function excludeTicketOptOuts(ticketId: string, userIds: string[]):
 
 export async function clearTicketOptOut(ticketId: string, userId: string): Promise<void> {
   try {
-    const ticket = await db.ticket.findUnique({
-      where: { id: ticketId },
-      select: { conversationId: true },
-    });
+    const conversationId = await sdlcTicketConversation(ticketId);
 
-    if (!ticket?.conversationId) {
+    if (!conversationId) {
       return;
     }
 
     await withWorkspaceScope(() =>
       db.conversationParticipant.updateMany({
         where: {
-          conversationId: ticket.conversationId,
+          conversationId,
           userId,
           ticketUpdatesUnsubscribedAt: { not: null },
         },

@@ -3183,12 +3183,19 @@ export const mutators = defineMutators({
               // Only delete if they're MENTIONED type (keep AUTHOR participants for now)
               if (
                 participant &&
-                participant.participationType === ConversationParticipation.MENTIONED &&
-                !participant.ticketUpdatesUnsubscribedAt
+                participant.participationType === ConversationParticipation.MENTIONED
               ) {
-                await tx.mutate.conversation_participants.delete({
-                  id: participant.id,
-                });
+                if (participant.ticketUpdatesUnsubscribedAt) {
+                  await tx.mutate.conversation_participants.update({
+                    id: participant.id,
+                    isSubscribed: false,
+                    participationType: null,
+                  });
+                } else {
+                  await tx.mutate.conversation_participants.delete({
+                    id: participant.id,
+                  });
+                }
               }
             }
           }
@@ -3212,12 +3219,19 @@ export const mutators = defineMutators({
           // Remove AUTHOR participant (they have no more messages)
           if (
             senderParticipant &&
-            senderParticipant.participationType === ConversationParticipation.AUTHOR &&
-            !senderParticipant.ticketUpdatesUnsubscribedAt
+            senderParticipant.participationType === ConversationParticipation.AUTHOR
           ) {
-            await tx.mutate.conversation_participants.delete({
-              id: senderParticipant.id,
-            });
+            if (senderParticipant.ticketUpdatesUnsubscribedAt) {
+              await tx.mutate.conversation_participants.update({
+                id: senderParticipant.id,
+                isSubscribed: false,
+                participationType: null,
+              });
+            } else {
+              await tx.mutate.conversation_participants.delete({
+                id: senderParticipant.id,
+              });
+            }
           }
         }
 

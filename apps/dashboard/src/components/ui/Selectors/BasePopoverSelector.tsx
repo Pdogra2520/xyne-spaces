@@ -1,10 +1,9 @@
-import { useState, useEffect, useRef, ReactNode, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, ReactNode, useMemo } from 'react';
 import * as Popover from '@radix-ui/react-popover';
 import type { Editor } from '@tiptap/react';
 import { PluginKey } from '@tiptap/pm/state';
 import type { VirtualElement } from './Selectors.utils';
 import { useOverlayZIndex } from '../../../contexts/OverlayZIndexContext';
-import { cn } from '../../../utils/classNames';
 
 export interface BaseSelectorItem {
   id: string;
@@ -15,8 +14,6 @@ export interface BaseSelectorPluginState<T extends BaseSelectorItem = BaseSelect
   selectedIndex: number;
   items: T[];
   shouldSelect: boolean;
-  /** Set by a tabbed list: Tab / Shift+Tab switch its tabs instead of picking. */
-  onTab?: ((backwards: boolean) => void) | undefined;
 }
 
 export interface BasePopoverSelectorProps<T extends BaseSelectorItem> {
@@ -26,8 +23,7 @@ export interface BasePopoverSelectorProps<T extends BaseSelectorItem> {
   detectTrigger: (editor: Editor) => { query: string } | null;
   getPosition: (editor: Editor, queryLength: number) => VirtualElement | null;
   onSelect: (item: T) => void;
-  /** A row of the built-in list; unused with `renderList`. */
-  renderItem?: (item: T, index: number, isSelected: boolean) => ReactNode;
+  renderItem: (item: T, index: number, isSelected: boolean) => ReactNode;
   emptyMessage?: string;
   loadingMessage?: string | ReactNode;
   isLoading?: boolean;
@@ -35,20 +31,6 @@ export interface BasePopoverSelectorProps<T extends BaseSelectorItem> {
   triggerChar?: string;
   header?: ReactNode;
   footer?: ReactNode;
-  /**
-   * Renders the whole body instead of the built-in list (which then ignores
-   * renderItem and the empty / loading messages). `setSelectedIndex` moves the
-   * plugin's highlight, so pointer and keyboard share one.
-   */
-  renderList?: (ctx: {
-    selectedIndex: number;
-    setSelectedIndex: (index: number) => void;
-    select: (item: T) => void;
-  }) => ReactNode;
-  /** Tab / Shift+Tab while open: switch the list's tabs instead of picking. */
-  onTab?: (backwards: boolean) => void;
-  /** Merged last over the default surface classes, so a custom border or shadow wins. */
-  contentClassName?: string;
 }
 
 export function BasePopoverSelector<T extends BaseSelectorItem>({
@@ -66,9 +48,6 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
   triggerChar = '@',
   header,
   footer,
-  renderList,
-  onTab,
-  contentClassName,
 }: BasePopoverSelectorProps<T>): React.JSX.Element | null {
   const zIndexClass = useOverlayZIndex() ?? 'z-50';
   const [isOpen, setIsOpen] = useState(false);
@@ -124,20 +103,9 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
         items,
         isOpen,
         selectedIndex: isOpen ? selectedIndex : 0,
-        onTab,
       }),
     );
-  }, [editor, pluginKey, items, isOpen, selectedIndex, onTab]);
-
-  // The transaction listener below copies the plugin's index back into state.
-  const highlight = useCallback(
-    (index: number): void => {
-      if (!editor) return;
-      const { view } = editor;
-      view.dispatch(view.state.tr.setMeta(pluginKey, { selectedIndex: index }));
-    },
-    [editor, pluginKey],
-  );
+  }, [editor, pluginKey, items, isOpen, selectedIndex]);
 
   useEffect(() => {
     if (!editor) return;
@@ -160,14 +128,11 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
           }),
         );
 
-        try {
-          onSelect(selectedItem);
-        } finally {
-          // Re-armed even when a pick throws, or every later keyboard pick is ignored.
-          setTimeout(() => {
-            isSelectingRef.current = false;
-          }, 0);
-        }
+        onSelect(selectedItem);
+
+        setTimeout(() => {
+          isSelectingRef.current = false;
+        }, 0);
       }
 
       if (!pluginState.isOpen && isOpen) {
@@ -217,10 +182,7 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
       <Popover.Anchor virtualRef={{ current: virtualAnchor }} />
       <Popover.Portal>
         <Popover.Content
-          className={cn(
-            `p-0 ${className} rounded-2xl bg-popover border border-border shadow-lg ${zIndexClass} animate-slide-in-up`,
-            contentClassName,
-          )}
+          className={`p-0 ${className} rounded-2xl bg-popover border border-border shadow-lg ${zIndexClass} animate-slide-in-up`}
           side='top'
           align='start'
           sideOffset={8}
@@ -232,9 +194,7 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
           data-testid={triggerChar === '#' ? 'channel-search-results' : 'user-search-results'}
         >
           {header}
-          {renderList ? (
-            renderList({ selectedIndex, setSelectedIndex: highlight, select: onSelect })
-          ) : isLoading ? (
+          {isLoading ? (
             <div className='p-2 px-3 text-sm text-muted-foreground text-center'>
               {loadingMessage}
             </div>
@@ -249,7 +209,7 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
                   key={item.id}
                   ref={index === selectedIndex ? selectedItemRef : null}
                   type='button'
-                  className={`w-full text-left border-none cursor-pointer transition-colors ${mentionedBasedRounding} ${
+                  className={`w-full text-left border-none cursor-pointer transition-all ${mentionedBasedRounding} ${
                     index === selectedIndex ? 'bg-accent' : 'bg-transparent hover:bg-accent'
                   }`}
                   onMouseDown={e => {
@@ -257,7 +217,7 @@ export function BasePopoverSelector<T extends BaseSelectorItem>({
                     onSelect(item);
                   }}
                 >
-                  {renderItem?.(item, index, index === selectedIndex)}
+                  {renderItem(item, index, index === selectedIndex)}
                 </button>
               ))}
             </div>

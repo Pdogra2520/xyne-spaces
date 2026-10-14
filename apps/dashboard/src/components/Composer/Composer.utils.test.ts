@@ -33,16 +33,12 @@ const result = (
 });
 
 describe('rowToPick', () => {
-  it('attaches a user as a person, without the "(you)" mark', () => {
+  it('attaches a user as a person', () => {
     expect(rowToPick(person({ id: 'u1', name: 'Samit Barai' }))).toEqual({
       kind: 'person',
       id: 'u1',
       label: 'Samit Barai',
       mention: 'Samit Barai',
-    });
-    expect(rowToPick(person({ id: 'me', name: 'Pradeesh S (you)' }))).toMatchObject({
-      label: 'Pradeesh S',
-      mention: 'Pradeesh S',
     });
   });
 

@@ -153,6 +153,13 @@ describe("/webhook/progress sandbox preview records sandbox ownership", () => {
     return webhook.slice(start, start + 2500);
   })();
 
+  it("dedupes per run + sandbox, not per run, so a second sandbox is still announced (XYNE-66338)", () => {
+    expect(previewBranch).toContain("const announceKey = `${sessionId}:${sandboxId}`;");
+    expect(previewBranch).toContain("announcedSandboxPreviews.has(announceKey)");
+    expect(previewBranch).toContain("rememberAnnouncedPreview(announceKey)");
+    expect(previewBranch).not.toContain("announcedSandboxPreviews.has(sessionId)");
+  });
+
   it("writes the ConversationArtifact owner row the sandbox router's access check reads", () => {
     expect(previewBranch).toContain("ingestSandboxPreviewSignals(");
   });

@@ -16,6 +16,7 @@ export {
   SANDBOX_CONFIG_SCHEMA,
   makeRepoSetupTool,
   getSandboxSession,
+  isSharedOrReadOnlySandbox,
   probeSession,
   cleanupSdlcSandboxCredentialsForContext,
   buildSandboxStoreKey,

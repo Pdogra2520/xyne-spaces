@@ -52,7 +52,11 @@ export interface UserPreferences {
   relatedContextEnabled: boolean;
   /** How long after the last keystroke to look them up, in ms. Never below 1000. */
   relatedContextDebounceMs: number;
+  /** What "@" opens in the chat and AI composers: the people list, or the tabbed all-context menu. */
+  mentionMenuMode: 'people' | 'all';
 }
+
+export type MentionMenuMode = UserPreferences['mentionMenuMode'];
 
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   sdlcSidebarCollapsed: false,
@@ -69,6 +73,7 @@ export const DEFAULT_USER_PREFERENCES: UserPreferences = {
   sdlcShowClosedTracks: false,
   relatedContextEnabled: false,
   relatedContextDebounceMs: 1000,
+  mentionMenuMode: 'people',
 };
 
 export interface UserPreferencesContext {

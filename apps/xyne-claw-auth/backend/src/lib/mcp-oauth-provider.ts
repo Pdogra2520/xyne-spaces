@@ -23,6 +23,7 @@ export interface McpOAuthConfig {
   confidential: boolean;
   scope?: string;
   dcrScope?: string;
+  resource?: string;
   clientName?: string;
   server: {
     name: string;
@@ -39,6 +40,7 @@ export interface McpOAuthProvider {
   router: Router;
   callbackRouter: Router;
   provider: OAuthTokenProvider;
+  ensureServer: () => Promise<unknown>;
 }
 
 interface StoredTokens {
@@ -127,6 +129,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): McpOAuthProvider
 
   function tokenExchangeBody(params: { grantType: "authorization_code" | "refresh_token"; clientId: string; clientSecret?: string | undefined; code?: string; codeVerifier?: string; redirectUri?: string; refreshToken?: string }): URLSearchParams {
     const body = new URLSearchParams({ grant_type: params.grantType, client_id: params.clientId });
+    if (config.resource) body.set("resource", config.resource);
     if (confidential && params.clientSecret) body.set("client_secret", params.clientSecret);
     if (params.grantType === "authorization_code") {
       body.set("code", params.code ?? "");
@@ -191,6 +194,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): McpOAuthProvider
     url.searchParams.set("code_challenge", codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
     if (config.scope !== undefined) url.searchParams.set("scope", opts.scope ?? config.scope);
+    if (config.resource) url.searchParams.set("resource", config.resource);
     url.searchParams.set("state", state);
     return url.toString();
   }
@@ -347,5 +351,5 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): McpOAuthProvider
     }
   });
 
-  return { router, callbackRouter, provider };
+  return { router, callbackRouter, provider, ensureServer };
 }

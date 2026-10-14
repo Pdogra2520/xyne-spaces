@@ -28,12 +28,44 @@ export interface ClassicOAuthProvider {
   router: Router;
   callbackRouter: Router;
   provider: OAuthTokenProvider;
+  ensureServer: () => Promise<unknown>;
 }
 
 interface ClassicTokens {
   accessToken: string;
   refreshToken: string;
   expires: number;
+}
+
+/** Providers that issue non-expiring tokens (no `expires_in`) are treated as valid for this long. */
+const NON_EXPIRING_TOKEN_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+
+interface RawTokenResponse {
+  ok?: boolean;
+  error?: string;
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  authed_user?: { access_token?: string; refresh_token?: string; expires_in?: number };
+}
+
+/**
+ * Normalise a token response. Some providers answer failures with HTTP 200 and
+ * an `error` / `ok: false` body (GitHub, Slack), nest the user token under
+ * `authed_user` (Slack), or omit `refresh_token` / `expires_in` for tokens that
+ * never expire (GitHub OAuth Apps). Returns null when no access token came back.
+ */
+function parseTokenResponse(raw: RawTokenResponse, previousRefreshToken = ""): ClassicTokens | null {
+  if (raw.ok === false || raw.error) return null;
+  const nested = raw.authed_user;
+  const accessToken = raw.access_token ?? nested?.access_token;
+  if (!accessToken) return null;
+  const expiresIn = raw.expires_in ?? nested?.expires_in;
+  return {
+    accessToken,
+    refreshToken: raw.refresh_token ?? nested?.refresh_token ?? previousRefreshToken,
+    expires: Date.now() + (typeof expiresIn === "number" ? expiresIn * 1000 : NON_EXPIRING_TOKEN_MS),
+  };
 }
 
 export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicOAuthProvider {
@@ -55,7 +87,14 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
     const existing = await prisma.mcpServer.findUnique({ where: { type } });
     if (existing) return existing;
     return prisma.mcpServer.create({
-      data: { type, name: config.server.name, url: config.server.url, description: config.server.description, isOauth: true },
+      data: {
+        type,
+        name: config.server.name,
+        url: config.server.url,
+        description: config.server.description,
+        isOauth: true,
+        connectorMeta: { scope: "global", mode: "self-serve" },
+      },
     });
   }
 
@@ -63,7 +102,7 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
     const { clientId, clientSecret } = getCredentials();
     const response = await fetch(resolve(config.tokenUrl), {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
       body: new URLSearchParams({
         code,
         client_id: clientId,
@@ -79,8 +118,12 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
       throw new HttpError(502, `${label} token exchange failed`);
     }
 
-    const tokens = (await response.json()) as { access_token: string; refresh_token: string; expires_in: number };
-    return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expires: Date.now() + tokens.expires_in * 1000 };
+    const tokens = parseTokenResponse((await response.json()) as RawTokenResponse);
+    if (!tokens) {
+      log.error(`[${type}-oauth] Token exchange returned no access token`);
+      throw new HttpError(502, `${label} token exchange failed`);
+    }
+    return tokens;
   }
 
   async function storeTokens(userId: string, creds: ClassicTokens): Promise<void> {
@@ -115,10 +158,13 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
     label,
     authorize,
     async refresh(creds) {
+      if (!creds.refreshToken) {
+        throw new TokenRefreshError(401, `${label} token expired and has no refresh token; reconnect the account`);
+      }
       const { clientId, clientSecret } = getCredentials();
       const response = await fetch(resolve(config.tokenUrl), {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: new URLSearchParams({
           client_id: clientId,
           client_secret: clientSecret,
@@ -131,11 +177,14 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
         throw new TokenRefreshError(502, `${response.status} ${await response.text()}`);
       }
 
-      const tokens = (await response.json()) as { access_token: string; refresh_token?: string; expires_in: number };
+      const tokens = parseTokenResponse((await response.json()) as RawTokenResponse, creds.refreshToken);
+      if (!tokens) {
+        throw new TokenRefreshError(502, `${label} refresh returned no access token`);
+      }
       return {
-        accessToken: tokens.access_token,
-        refreshToken: config.rotatesRefreshToken ? (tokens.refresh_token ?? creds.refreshToken) : creds.refreshToken,
-        expires: Date.now() + tokens.expires_in * 1000,
+        accessToken: tokens.accessToken,
+        refreshToken: config.rotatesRefreshToken ? tokens.refreshToken : creds.refreshToken,
+        expires: tokens.expires,
       };
     },
   };
@@ -236,5 +285,5 @@ export function createClassicOAuthProvider(config: ClassicOAuthConfig): ClassicO
     }
   });
 
-  return { router, callbackRouter, provider };
+  return { router, callbackRouter, provider, ensureServer };
 }

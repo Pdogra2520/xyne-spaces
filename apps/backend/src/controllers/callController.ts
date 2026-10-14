@@ -51,7 +51,7 @@ import {
   ORIGINAL_TRANSCRIPT_LANGUAGE,
 } from '@xyne/shared';
 import { storageService } from '@/services/storage';
-import { CallVespaFeedSource, queueCallVespaFeed, queueTranscriptFieldsUpdate } from '@/services/callVespaQueue';
+import { CallVespaFeedSource, queueCallVespaFeed, queueRecordingTranscriptDelete, queueTranscriptFieldsUpdate } from '@/services/callVespaQueue';
 import { callShareService } from '@/services/callShareService';
 import { callNotesCanvasService } from '@/services/callNotesCanvasService';
 import { noteTakerTranscriptService } from '@/services/noteTakerTranscriptService';
@@ -3365,6 +3365,8 @@ export class CallController {
 
     // Delete the call record
     await repositories.calls.delete(call.id);
+    // That drops the call doc; the recording's transcript doc goes separately.
+    queueRecordingTranscriptDelete(call);
   };
 
 

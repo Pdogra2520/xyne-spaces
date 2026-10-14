@@ -16,13 +16,13 @@ import { logger } from '@/utils/logger';
 // Same bound as canvasPermissionSync: a channel can be shared many recordings.
 const ENQUEUE_CONCURRENCY = 25;
 
-/** Enqueue an ACL-only refresh for one recording's transcript doc. */
+/**
+ * Enqueue an ACL-only refresh for one recording's transcript doc. Every recording has one
+ * from the moment it ends (callVespaQueue.queueRecordingTranscriptFeed), transcript or not.
+ */
 export async function enqueueRecordingTranscriptPermissionRefresh(
-  call: { id: string; transcript: string | null; workspaceId?: string | null },
+  call: { id: string; workspaceId?: string | null },
 ): Promise<void> {
-  // No transcript means no transcript doc: a partial update would only fail.
-  if (!call.transcript) return;
-
   await vespaQueue.addJob({
     schema: fileSchema,
     jobType: 'update',
@@ -44,7 +44,7 @@ export async function refreshRecordingTranscriptPermissions(externalId: string):
     const call = await withWorkspaceScope(() =>
       db.call.findUnique({
         where: { externalId },
-        select: { id: true, transcript: true, workspaceId: true, callType: true },
+        select: { id: true, workspaceId: true, callType: true },
       }),
     );
     if (!call || call.callType !== CallType.HEADLESS) return;
@@ -71,8 +71,8 @@ async function refreshForShares(
     const callIds = Array.from(new Set(shares.map(s => s.entityId)));
     if (callIds.length === 0) return [];
     return db.call.findMany({
-      where: { id: { in: callIds }, callType: CallType.HEADLESS, transcript: { not: null } },
-      select: { id: true, transcript: true, workspaceId: true },
+      where: { id: { in: callIds }, callType: CallType.HEADLESS },
+      select: { id: true, workspaceId: true },
     });
   });
   if (recordings.length === 0) return;

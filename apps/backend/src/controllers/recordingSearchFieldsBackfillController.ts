@@ -25,10 +25,17 @@ import {
  * New and edited recordings already get all four (mapTranscript, the share/label syncs),
  * so this only catches up the docs nothing has touched since.
  *
- * It only enqueues: each job is a field-scoped `update` that vespaFileWorker's TRANSCRIPT
- * fast path recomputes from Postgres, so no transcript is downloaded or re-embedded. The
- * live vespaQueue is used, the same queue the share/label syncs put these jobs on; batches
- * and the delay between them keep the extra load small.
+ * Recordings without a transcript had no transcript doc at all — one was only fed once the
+ * transcript arrived — so search could not find them. New recordings get one when they end
+ * (callVespaQueue.queueRecordingTranscriptFeed); this feeds one for the older ones.
+ *
+ * It only enqueues, one job per recording:
+ *   - with a transcript: a field-scoped `update` that vespaFileWorker's TRANSCRIPT fast path
+ *     recomputes from Postgres, so no transcript is downloaded or re-embedded.
+ *   - without one: a full `feed` (mapTranscript), which is cheap here — there is no
+ *     transcript to download or chunks to embed.
+ * The live vespaQueue is used, the same queue the share/label syncs put these jobs on;
+ * batches and the delay between them keep the extra load small.
  *
  * Idempotent: every job recomputes from Postgres, so re-running only rewrites the same values.
  */
@@ -52,6 +59,8 @@ type BackfillOptions = {
 
 type CandidateCall = {
   id: string;
+  createdByUserId: string;
+  transcript: string | null;
   workspaceId: string | null;
 };
 
@@ -84,12 +93,9 @@ export class RecordingSearchFieldsBackfillController {
     };
   }
 
-  /** Recordings that have a transcript doc — no transcript means nothing in Vespa to update. */
+  /** Every recording, with or without a transcript. */
   static candidateWhere(): Prisma.CallWhereInput {
-    return {
-      callType: CallType.HEADLESS,
-      transcript: { not: null },
-    };
+    return { callType: CallType.HEADLESS };
   }
 
   /** The next `batchSize` recordings after `cursor`, in id order. */
@@ -102,7 +108,7 @@ export class RecordingSearchFieldsBackfillController {
         ...RecordingSearchFieldsBackfillController.candidateWhere(),
         ...(cursor ? { id: { gt: cursor } } : {}),
       },
-      select: { id: true, workspaceId: true },
+      select: { id: true, createdByUserId: true, transcript: true, workspaceId: true },
       orderBy: { id: 'asc' },
       take: batchSize,
     });
@@ -114,15 +120,19 @@ export class RecordingSearchFieldsBackfillController {
     };
   }
 
-  /** Enqueue the field-scoped refresh for one recording's transcript doc. */
+  /**
+   * Enqueue one recording's transcript doc: the field-scoped refresh when it has a
+   * transcript (its doc exists), a full feed when it has none (its doc may not).
+   */
   static async enqueueRefresh(call: CandidateCall): Promise<boolean> {
     try {
       await vespaQueue.addJob({
         schema: fileSchema,
-        jobType: 'update',
         docId: call.id,
         app: SubApp.TRANSCRIPT,
-        fields: SEARCH_FIELDS,
+        ...(call.transcript
+          ? { jobType: 'update' as const, fields: SEARCH_FIELDS }
+          : { jobType: 'feed' as const, userId: call.createdByUserId }),
         ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
       });
       return true;
@@ -171,7 +181,8 @@ export class RecordingSearchFieldsBackfillController {
 
   /**
    * GET /api/admin/recording-search-backfill/status
-   * `recordings` is how many transcript docs a full run enqueues.
+   * `recordings` is how many jobs a full run enqueues; `withoutTranscript` of them are
+   * full feeds.
    */
   static status = async (_req: Request, res: Response): Promise<void> => {
     try {

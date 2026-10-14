@@ -133,7 +133,7 @@ export function getRecordingSummaryPointerBackfillStatus() {
 const SEARCH_FIELDS_TAG = '[RecordingSearchFieldsBackfill]';
 
 /**
- * Walks every recording with a transcript and enqueues the field-scoped Vespa refresh of its
+ * Walks every recording and enqueues the Vespa refresh (or, without a transcript, the feed) of its
  * transcript doc (see controllers/recordingSearchFieldsBackfillController.ts). Same
  * cross-workspace reasoning as runRecordingSummaryPointerBackfill above.
  */
@@ -210,8 +210,13 @@ export function getRecordingSearchFieldsBackfillStatus() {
     ['Call'],
     'one-off backfill spans every workspace by design — ordinary request context would silently narrow it',
     async () => {
-      const recordings = await RecordingSearchFieldsBackfillController.countRemaining(null);
-      return { success: true as const, recordings };
+      const [recordings, withoutTranscript] = await Promise.all([
+        RecordingSearchFieldsBackfillController.countRemaining(null),
+        db.call.count({
+          where: { ...RecordingSearchFieldsBackfillController.candidateWhere(), transcript: null },
+        }),
+      ]);
+      return { success: true as const, recordings, withoutTranscript };
     },
   );
 }

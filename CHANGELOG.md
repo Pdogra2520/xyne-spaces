@@ -1,3 +1,10 @@
+## [1.498.0](https://github.com/juspay/xyne-spaces/compare/v1.497.0...v1.498.0) (2026-10-14)
+
+
+### Features
+
+* optimising build - testing parallelism ([#2953](https://github.com/juspay/xyne-spaces/issues/2953)) ([f34e1ab](https://github.com/juspay/xyne-spaces/commit/f34e1ab2d9beba2dcc989b875cec004a126a0fe9))
+
 ## [1.497.0](https://github.com/juspay/xyne-spaces/compare/v1.496.0...v1.497.0) (2026-10-14)
 
 

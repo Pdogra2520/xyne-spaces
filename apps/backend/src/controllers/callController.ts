@@ -1711,7 +1711,7 @@ export class CallController {
           : {}),
       });
 
-      queueTranscriptFieldsUpdate(call, [
+      void queueTranscriptFieldsUpdate(call, [
         ...(input.title ? (['fileName'] as const) : []),
         ...(resolvedLabels ? (['labels'] as const) : []),
       ]);
@@ -3366,7 +3366,7 @@ export class CallController {
     // Delete the call record
     await repositories.calls.delete(call.id);
     // That drops the call doc; the recording's transcript doc goes separately.
-    queueRecordingTranscriptDelete(call);
+    void queueRecordingTranscriptDelete(call);
   };
 
 

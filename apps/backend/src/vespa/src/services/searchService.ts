@@ -114,12 +114,6 @@ interface SearchOptions {
    * exact phrase. For prose, such as a draft, rather than a search someone typed.
    */
   literalQuery?: boolean;
-  /**
-   * Match on keywords only: skip the vector half of retrieval (and its embed call). For
-   * a search that filters a list, where a hit must contain the words -- nearestNeighbor
-   * always returns the closest docs, so on transcripts it would match nearly everything.
-   */
-  keywordOnly?: boolean;
 }
 
 export interface ILogger {
@@ -324,7 +318,6 @@ export class SearchService {
         captureDebug,
         privateQuery = false,
         literalQuery = false,
-        keywordOnly = false,
       } = options;
 
       // Derive workspaceId from userId when not explicitly provided
@@ -503,12 +496,10 @@ export class SearchService {
         [],
         {}
       );
-      const useSemanticAnyway =
-        !keywordOnly &&
-        !(
-          Array.isArray(semanticDisabledRankProfiles) &&
-          semanticDisabledRankProfiles.includes(rankProfile)
-        );
+      const useSemanticAnyway = !(
+        Array.isArray(semanticDisabledRankProfiles) &&
+        semanticDisabledRankProfiles.includes(rankProfile)
+      );
       const newFallbackMethod = await superpositionClient.getBooleanValue(
         'vespa_search_new_fallback_method',
         false,

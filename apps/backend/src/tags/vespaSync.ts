@@ -1,9 +1,7 @@
-import { CallType } from '@xyne/shared';
 import { vespaQueue } from '@/queues/vespaQueue';
 import { mailSchema, ticketSchema } from '@/vespa/src/types';
 import { db } from '@/database/client';
-import { withWorkspaceScope } from '@/database/tenant/context';
-import { queueTranscriptFieldsUpdate } from '@/services/callVespaQueue';
+import { queueRecordingTranscriptRefresh } from '@/services/callVespaQueue';
 import { logger } from '@/utils/logger';
 import { DESK_EMAIL_SOURCE_TYPE } from './deskEmail';
 
@@ -15,8 +13,10 @@ const CALL_SOURCE_TYPE = 'CALL';
  * Fire-and-forget: callers use `void enqueueTagVespaRefeed(...)`.
  */
 export async function enqueueTagVespaRefeed(sourceType: string, sourceId: string): Promise<void> {
+  // A recording's transcript doc carries its confirmed label slugs, so confirming, renaming
+  // or deleting one of its Tags refreshes them. sourceId is the Call id (the doc id).
   if (sourceType === CALL_SOURCE_TYPE) {
-    await refreshRecordingLabels(sourceId);
+    await queueRecordingTranscriptRefresh({ id: sourceId }, ['labels']);
     return;
   }
   if (sourceType !== DESK_EMAIL_SOURCE_TYPE) return;
@@ -39,25 +39,5 @@ export async function enqueueTagVespaRefeed(sourceType: string, sourceId: string
     }
   } catch (error) {
     logger.error('[TAG][VESPA] Failed to enqueue re-feed:', error);
-  }
-}
-
-/**
- * A recording's transcript doc carries its confirmed label slugs, so confirming, renaming or
- * deleting one of its Tags must refresh them. sourceId is the Call id (the doc id).
- */
-async function refreshRecordingLabels(callId: string): Promise<void> {
-  try {
-    // Workspace scope: the tag's editor may not be able to read the recording itself.
-    const call = await withWorkspaceScope(() =>
-      db.call.findUnique({
-        where: { id: callId },
-        select: { id: true, transcript: true, workspaceId: true, callType: true },
-      }),
-    );
-    if (!call || call.callType !== CallType.HEADLESS) return;
-    queueTranscriptFieldsUpdate(call, ['labels']);
-  } catch (error) {
-    logger.error('[TAG][VESPA] Failed to enqueue recording label refresh:', error);
   }
 }

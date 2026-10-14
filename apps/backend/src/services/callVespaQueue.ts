@@ -1,4 +1,6 @@
 import { CallType } from '@xyne/shared';
+import { db } from '@/database/client';
+import { withWorkspaceScope } from '@/database/tenant/context';
 import { vespaQueue } from '@/queues/vespaQueue';
 import { logger } from '@/utils/logger';
 import { callSchema, fileSchema, SubApp } from '@/vespa/src/types';
@@ -86,35 +88,80 @@ export const queueCallVespaDelete = (
   });
 };
 
+type TranscriptDocCall = { id: string; workspaceId?: string | null };
+
+/** Transcript doc fields a field-scoped update may refresh (vespaFileWorker's TRANSCRIPT fast path). */
+export type TranscriptDocField = 'fileName' | 'permissions' | 'isPrivate' | 'labels';
+
 /**
- * A recording's transcript is a separate Vespa file doc (docId = call.id) whose
- * `fileName` is the recording title and `labels` its confirmed label slugs. Editing either
- * only re-feeds the call doc, so push the change to the transcript doc too — field-scoped,
- * so the transcript isn't re-embedded.
+ * Queue one job for a call's transcript doc (file schema, subApp TRANSCRIPT, docId = call id).
+ * Never throws: a failure is logged and reported as `false`, so indexing can't undo the
+ * operation that triggered it.
  */
-export const queueTranscriptFieldsUpdate = (
-  call: { id: string; callType?: string | null; transcript?: string | null; workspaceId?: string | null },
-  fields: Array<'fileName' | 'labels'>,
-): void => {
-  if (fields.length === 0) return;
+const queueTranscriptDocJob = async (
+  call: TranscriptDocCall,
+  job: { jobType: 'feed' | 'update' | 'delete'; fields?: TranscriptDocField[]; userId?: string },
+): Promise<boolean> => {
+  try {
+    await vespaQueue.addJob({
+      schema: fileSchema,
+      docId: call.id,
+      app: SubApp.TRANSCRIPT,
+      ...job,
+      ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
+    });
+    return true;
+  } catch (error) {
+    logger.error('[CallVespaQueue] Failed to queue transcript doc job:', {
+      callId: call.id,
+      jobType: job.jobType,
+      fields: job.fields,
+      errorMessage: error,
+    });
+    return false;
+  }
+};
+
+/**
+ * A call's transcript is a separate Vespa file doc (docId = call.id) carrying its title, and
+ * for a recording also its share ACL and confirmed label slugs. Editing any of those only
+ * re-feeds the call doc, so push the change to the transcript doc too — field-scoped, so the
+ * transcript isn't re-embedded. Resolves `false` only when the job could not be queued.
+ */
+export const queueTranscriptFieldsUpdate = async (
+  call: TranscriptDocCall & { callType?: string | null; transcript?: string | null },
+  fields: TranscriptDocField[],
+): Promise<boolean> => {
+  if (fields.length === 0) return true;
   // Every recording has a transcript doc (see queueRecordingTranscriptFeed); any other
   // call has one only once its transcript exists.
-  if (call.callType !== CallType.HEADLESS && !call.transcript) return;
+  if (call.callType !== CallType.HEADLESS && !call.transcript) return true;
+  return queueTranscriptDocJob(call, { jobType: 'update', fields });
+};
 
-  vespaQueue.addJob({
-    schema: fileSchema,
-    jobType: 'update',
-    docId: call.id,
-    app: SubApp.TRANSCRIPT,
-    fields,
-    ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
-  }).catch((error) => {
-    logger.error('[CallVespaQueue] Failed to queue transcript fields update:', {
-      callId: call.id,
+/**
+ * Refresh a recording's transcript doc fields from just its id or externalId — for callers
+ * that hold no Call row (share commands, tag edits). Looked up under workspace scope: the
+ * actor may no longer be able to read the recording (after a self-revoke, say) and the
+ * refresh must still run. Non-recordings are skipped; failures are logged, never thrown.
+ */
+export const queueRecordingTranscriptRefresh = async (
+  where: { id: string } | { externalId: string },
+  fields: TranscriptDocField[],
+): Promise<void> => {
+  try {
+    const call = await withWorkspaceScope(() =>
+      db.call.findUnique({ where, select: { id: true, workspaceId: true, callType: true } }),
+    );
+    if (!call || call.callType !== CallType.HEADLESS) return;
+    await queueTranscriptFieldsUpdate(call, fields);
+  } catch (error) {
+    logger.error('[CallVespaQueue] Failed to look up recording for transcript refresh:', {
+      ...where,
       fields,
       errorMessage: error,
     });
-  });
+  }
 };
 
 /**
@@ -125,37 +172,10 @@ export const queueTranscriptFieldsUpdate = (
  * transcript processing (noteTakerTranscriptService.queueVespaIndexing) fills them in.
  */
 export const queueRecordingTranscriptFeed = (
-  call: { id: string; createdByUserId: string; workspaceId?: string | null },
-): void => {
-  vespaQueue.addJob({
-    schema: fileSchema,
-    jobType: 'feed',
-    docId: call.id,
-    userId: call.createdByUserId,
-    app: SubApp.TRANSCRIPT,
-    ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
-  }).catch((error) => {
-    logger.error('[CallVespaQueue] Failed to queue recording transcript feed:', {
-      callId: call.id,
-      errorMessage: error,
-    });
-  });
-};
+  call: TranscriptDocCall & { createdByUserId: string },
+): Promise<boolean> =>
+  queueTranscriptDocJob(call, { jobType: 'feed', userId: call.createdByUserId });
 
 /** Remove a deleted recording's transcript doc; deleting the call only drops the call doc. */
-export const queueRecordingTranscriptDelete = (
-  call: { id: string; workspaceId?: string | null },
-): void => {
-  vespaQueue.addJob({
-    schema: fileSchema,
-    jobType: 'delete',
-    docId: call.id,
-    app: SubApp.TRANSCRIPT,
-    ...(call.workspaceId ? { workspaceId: call.workspaceId } : {}),
-  }).catch((error) => {
-    logger.error('[CallVespaQueue] Failed to queue recording transcript delete:', {
-      callId: call.id,
-      errorMessage: error,
-    });
-  });
-};
+export const queueRecordingTranscriptDelete = (call: TranscriptDocCall): Promise<boolean> =>
+  queueTranscriptDocJob(call, { jobType: 'delete' });

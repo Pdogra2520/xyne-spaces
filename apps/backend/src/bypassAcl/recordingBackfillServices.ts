@@ -1,7 +1,6 @@
 import { db } from '@/database/client';
 import { logger } from '@/utils/logger';
 import { RecordingSummaryPointerBackfillController } from '@/controllers/recordingSummaryPointerBackfillController';
-import { RecordingSearchFieldsBackfillController } from '@/controllers/recordingSearchFieldsBackfillController';
 import { asSystem } from './base';
 
 const TAG = '[RecordingSummaryPointerBackfill]';
@@ -126,97 +125,6 @@ export function getRecordingSummaryPointerBackfillStatus() {
         : 0;
 
       return { success: true as const, linkable, pointerAbsent, summaryCanvases: callIds.length };
-    },
-  );
-}
-
-const SEARCH_FIELDS_TAG = '[RecordingSearchFieldsBackfill]';
-
-/**
- * Walks every recording and enqueues the Vespa refresh (or, without a transcript, the feed) of its
- * transcript doc (see controllers/recordingSearchFieldsBackfillController.ts). Same
- * cross-workspace reasoning as runRecordingSummaryPointerBackfill above.
- */
-export function runRecordingSearchFieldsBackfill(options: BackfillOptions, startedAt: number) {
-  return asSystem(
-    ['Call'],
-    'one-off backfill spans every workspace by design — ordinary request context would silently narrow it',
-    async () => {
-      const batches: Array<{ batch: number; enqueued: number; failed: number; remaining: number }> = [];
-      let totalEnqueued = 0;
-      let totalFailed = 0;
-      let cursor = options.cursor;
-      let done = false;
-
-      for (let batchNumber = 1; batchNumber <= options.maxBatches; batchNumber += 1) {
-        const { calls, nextCursor, exhausted } =
-          await RecordingSearchFieldsBackfillController.collectBatch(options.batchSize, cursor);
-        cursor = nextCursor;
-
-        let enqueued = calls.length;
-        if (!options.dryRun) {
-          const results = await Promise.all(calls.map(RecordingSearchFieldsBackfillController.enqueueRefresh));
-          enqueued = results.filter(Boolean).length;
-        }
-        const failed = calls.length - enqueued;
-
-        totalEnqueued += enqueued;
-        totalFailed += failed;
-        const remaining = await RecordingSearchFieldsBackfillController.countRemaining(cursor);
-        batches.push({ batch: batchNumber, enqueued, failed, remaining });
-        logger.info(`${SEARCH_FIELDS_TAG} batch #${batchNumber}`, {
-          enqueued,
-          failed,
-          remaining,
-          dryRun: options.dryRun,
-        });
-
-        if (exhausted) {
-          done = true;
-          break;
-        }
-        // Don't sleep only to return: skip the pause on the final allowed batch.
-        if (batchNumber === options.maxBatches) break;
-        if (options.delayMs > 0) {
-          await RecordingSearchFieldsBackfillController.sleep(options.delayMs);
-        }
-      }
-
-      logger.info(`${SEARCH_FIELDS_TAG} finished`, {
-        totalEnqueued,
-        totalFailed,
-        batches: batches.length,
-        done,
-        durationMs: Date.now() - startedAt,
-      });
-
-      return {
-        success: true as const,
-        dryRun: options.dryRun,
-        totalEnqueued,
-        totalFailed,
-        batches,
-        done,
-        // Pass this back as `cursor` on the next request to continue.
-        nextCursor: done ? null : cursor,
-      };
-    },
-  );
-}
-
-/** Same cross-workspace reasoning as runRecordingSearchFieldsBackfill above. */
-export function getRecordingSearchFieldsBackfillStatus() {
-  return asSystem(
-    ['Call'],
-    'one-off backfill spans every workspace by design — ordinary request context would silently narrow it',
-    async () => {
-      const [recordings, withoutTranscript] = await Promise.all([
-        RecordingSearchFieldsBackfillController.countRemaining(null),
-        db.call.count({
-          where: { ...RecordingSearchFieldsBackfillController.candidateWhere(), transcript: null },
-        }),
-      ]);
-      return { success: true as const, recordings, withoutTranscript };
     },
   );
 }

@@ -150,9 +150,6 @@ export interface VespaSearchFilters {
   // Filter-only mode (no query text, just filters)
   filterOnly?: boolean;
 
-  // Keyword-only mode: skip vector retrieval so every hit contains the query words
-  keywordOnly?: boolean;
-
   // Cmd-K exact-match toggle. The query is quoted on the way out (see
   // buildVespaSearchParams) so the backend reads it as a phrase; the quotes are never
   // shown in the box, which is why this is a flag rather than part of the text.

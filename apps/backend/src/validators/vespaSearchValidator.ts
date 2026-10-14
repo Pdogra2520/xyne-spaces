@@ -360,11 +360,6 @@ export const vespaSearchQuerySchema = Joi.object({
     'any.only': 'filterOnly must be "true" or "false"'
   }),
 
-  // Keyword-only mode: skip vector retrieval so every hit contains the query words
-  keywordOnly: Joi.string().valid('true', 'false').optional().messages({
-    'any.only': 'keywordOnly must be "true" or "false"'
-  }),
-
   // Cmd-K "Include bot messages" toggle. Default behavior (omitted/false) excludes BOT messages.
   includeBotMessages: Joi.string().valid('true', 'false').optional().messages({
     'any.only': 'includeBotMessages must be "true" or "false"'

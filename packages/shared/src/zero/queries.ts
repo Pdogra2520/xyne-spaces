@@ -3142,9 +3142,10 @@ export const queries = defineQueries({
   // HEADLESS recordings by row id — the recordings screen's search resolves Vespa hits
   // (docId = call id) to full rows with this. Carries the same `shares` as
   // sharedOatsRecordings so a hit renders and behaves exactly like a list row; the
-  // calls read ACL still decides which of the ids come back.
+  // calls read ACL still decides which of the ids come back. The search pages its hits up
+  // to Vespa's max offset (1000), so this takes every id a search can have loaded.
   oatsRecordingsByIds: defineQuery(
-    z.object({ ids: z.array(z.string()).max(100) }),
+    z.object({ ids: z.array(z.string()).max(1000) }),
     ({ ctx, args: { ids } }) =>
       zql.calls
         .where('workspaceId', ctx.workspaceId)

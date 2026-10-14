@@ -356,7 +356,7 @@ class NoteTakerWebhookController {
    */
   private indexEndedRecording(call: { id: string; callType: string; createdByUserId: string; workspaceId: string | null }): void {
     if (call.callType !== CallType.HEADLESS) return;
-    queueRecordingTranscriptFeed(call);
+    void queueRecordingTranscriptFeed(call);
   }
 
   private async emitCallEndedAutomation(

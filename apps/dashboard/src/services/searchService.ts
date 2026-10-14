@@ -343,10 +343,6 @@ export class SearchService {
       params['filterOnly'] = filters.filterOnly.toString();
     }
 
-    if (filters.keywordOnly !== undefined) {
-      params['keywordOnly'] = filters.keywordOnly.toString();
-    }
-
     if (filters.includeBotMessages !== undefined) {
       params['includeBotMessages'] = filters.includeBotMessages.toString();
     }

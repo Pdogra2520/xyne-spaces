@@ -611,6 +611,11 @@ const electronAPI = {
       return () => ipcRenderer.removeListener('call-window:status', listener);
     },
     takeHandoff: (): Promise<unknown> => ipcRenderer.invoke('call-window:take-handoff'),
+    onPreparing: (callback: () => void) => {
+      const listener = () => callback();
+      ipcRenderer.on('call-window:preparing', listener);
+      return () => ipcRenderer.removeListener('call-window:preparing', listener);
+    },
     onHandoffReady: (callback: () => void) => {
       const listener = () => callback();
       ipcRenderer.on('call-window:handoff-ready', listener);

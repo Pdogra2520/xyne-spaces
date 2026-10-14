@@ -324,6 +324,7 @@ export interface ElectronAPI {
     onStatus: (callback: (status: unknown) => void) => () => void;
     takeHandoff: () => Promise<unknown>;
     onHandoffReady: (callback: () => void) => () => void;
+    onPreparing?: (callback: () => void) => () => void;
     reportStatus: (status: Record<string, unknown>) => void;
     onCommand: (callback: (command: { type: string; endForAll?: boolean }) => void) => () => void;
     openInMain: (appPath: string, workspaceId?: string) => void;

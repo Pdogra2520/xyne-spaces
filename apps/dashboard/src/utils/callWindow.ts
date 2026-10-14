@@ -73,6 +73,8 @@ export interface CallWindowStatus {
   connectionState: string | null;
   participants: CallWindowParticipant[];
   error: string | null;
+  // With phase 'ending': the user left (not a switch to another call).
+  userLeft?: boolean;
 }
 
 export type CallWindowCommand =

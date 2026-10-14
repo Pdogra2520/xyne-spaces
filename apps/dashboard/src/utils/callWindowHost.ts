@@ -32,6 +32,16 @@ export const setCallWindowLeaveHandler = (handler: (() => void) | null): void =>
 
 // The handoff this window is running.
 let activeHandoffId: number | null = null;
+
+// The user left the current call (Leave button, or closing the window), as
+// opposed to leaving it for another call from here. Sent along with "ending"
+// so Electron can take the window off screen at once.
+let userLeftFor: number | null = null;
+
+export const markCallWindowUserLeft = (): void => {
+  userLeftFor = activeHandoffId;
+};
+
 let started = false;
 // Waiting for the previous call to finish leaving before connecting the next.
 // Only the latest handoff may wait: a newer one replaces an older waiter.
@@ -74,6 +84,7 @@ const buildStatus = (
     isLocal: p.isLocal,
   })),
   error: context.error,
+  userLeft: phase === 'ending' && userLeftFor === handoffId,
 });
 
 const report = (status: CallWindowStatus): void => {

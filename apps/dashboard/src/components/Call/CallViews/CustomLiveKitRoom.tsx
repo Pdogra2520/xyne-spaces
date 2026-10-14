@@ -45,7 +45,7 @@ import {
 } from '../lazyPanels';
 import { callService } from '../../../services/Call/callService';
 import { isCallWindowRoute } from '../../../utils/callWindow';
-import { setCallWindowLeaveHandler } from '../../../utils/callWindowHost';
+import { markCallWindowUserLeft, setCallWindowLeaveHandler } from '../../../utils/callWindowHost';
 import {
   createCallWhiteboardPngBlobs,
   getCallWhiteboardState,
@@ -364,6 +364,7 @@ export function CustomLiveKitRoom({
         if (isChatOpen) {
           roomActor.send({ type: 'TOGGLE_CHAT' });
         }
+        if (isCallWindowRoute()) markCallWindowUserLeft();
         roomActor.send({ type: 'DISCONNECT', endForAll });
         setShowEndCallModal(false);
       })();

@@ -85,11 +85,20 @@ export function CallWindowRoot({ children }: { children: ReactNode }): ReactElem
   useCallWindowNavigationGuard();
 
   // Electron keeps this window, hidden, after a call ends. Back to the joining
-  // screen while idle, so the next call opens onto it and not a blank window.
-  const isIdle = useSelector(roomActor, state => state.matches('idle'));
+  // screen when it is brought out again for the next call, so that call opens
+  // onto it and not a blank window. Not as soon as the call goes idle: that is
+  // also the moment the user left, and "Joining call…" would flash up while
+  // the window is on its way out.
+  useEffect(() => window.electronAPI?.callWindow?.onPreparing?.(() => setUiReady(false)), []);
+  // A join started from inside this window (e.g. "Switch" on a call card)
+  // shows the joining screen too, until that call is up.
+  const isJoiningHere = useSelector(
+    roomActor,
+    state => state.matches('initiating') || state.matches('joining'),
+  );
   useEffect(() => {
-    if (isIdle) setUiReady(false);
-  }, [isIdle]);
+    if (isJoiningHere) setUiReady(false);
+  }, [isJoiningHere]);
 
   return (
     <div className='h-screen w-screen overflow-hidden bg-[#131314] text-[#e3e3e3]'>

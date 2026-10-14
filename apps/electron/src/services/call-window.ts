@@ -77,6 +77,7 @@ export interface CallWindowStatus {
   connectionState: string | null;
   participants: CallWindowParticipant[];
   error: string | null;
+  userLeft?: boolean;
 }
 
 interface CallWindowHandoff {
@@ -615,6 +616,7 @@ function prepareCallWindow(owner: CallWindowOwner): void {
   if (callWindow && !callWindow.isDestroyed()) {
     if (isOwnedBy(owner)) {
       log.info('[CallWindow] Prepared: showing the existing window');
+      callWindow.webContents.send('call-window:preparing');
       if (callWindow.isMinimized()) callWindow.restore();
       callWindow.show();
       callWindow.focus();
@@ -700,10 +702,11 @@ export function setupCallWindowHandlers(): void {
       // Out of sight when the call ends, but kept booted for the next one.
       parkCallWindow();
     } else if (next.phase === 'ending') {
-      // Only a leave asked for from outside. One from inside the window may be
-      // a switch to another call, and if that join fails the window would be
-      // gone with its error.
-      if (leaveRequested) hideWhileLeaving();
+      // Only a leave the user asked for (from main, the close dialog, or the
+      // window's Leave button). Any other may be a switch to another call from
+      // inside the window, and if that join fails the window would be gone
+      // with its error.
+      if (leaveRequested || next.userLeft === true) hideWhileLeaving();
     } else if (
       (previousPhase === 'ending' || previousPhase === 'ended') &&
       callWindow &&

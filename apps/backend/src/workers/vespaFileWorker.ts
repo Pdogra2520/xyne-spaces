@@ -273,25 +273,30 @@ export class VespaFileWorker {
 					mappedData = { permissions: await computeCanvasPermissions(docId) } as Partial<InsertDocument>;
 				} else if (
 					app === SubApp.TRANSCRIPT &&
-					fields.every((field) => field === 'permissions' || field === 'isPrivate' || field === 'labels')
+					fields.every(
+						(field) => field === 'fileName' || field === 'permissions' || field === 'isPrivate' || field === 'labels'
+					)
 				) {
-					// Fast path: recording ACL/label refresh — skip the transcript download a full
+					// Fast path: title/ACL/label refresh — skip the transcript download a full
 					// mapTranscript would do. Same derivation as mapTranscript.
 					const call = await db.call.findUnique({
 						where: { id: docId },
-						select: { callType: true, visibility: true },
+						select: { callType: true, visibility: true, title: true },
 					});
 					if (!call) {
 						throw new Error(`Data not found for ${schema}/${docId}`);
 					}
-					if (call.callType !== CallType.HEADLESS) {
+					// The title is every transcript's; the ACL and labels are only a recording's.
+					const isRecording = call.callType === CallType.HEADLESS;
+					if (!isRecording && !fields.includes('fileName')) {
 						logger.info(`[VESPA_FILE_WORKER] Skipping recording ACL/label refresh for non-recording call ${docId}`);
 						return;
 					}
 					mappedData = {
-						...(fields.includes('permissions') ? { permissions: await computeRecordingPermissions(docId) } : {}),
-						...(fields.includes('isPrivate') ? { isPrivate: call.visibility !== CallVisibility.PUBLIC } : {}),
-						...(fields.includes('labels') ? { labels: await computeRecordingLabels(docId) } : {}),
+						...(fields.includes('fileName') ? { fileName: call.title || 'Transcript' } : {}),
+						...(isRecording && fields.includes('permissions') ? { permissions: await computeRecordingPermissions(docId) } : {}),
+						...(isRecording && fields.includes('isPrivate') ? { isPrivate: call.visibility !== CallVisibility.PUBLIC } : {}),
+						...(isRecording && fields.includes('labels') ? { labels: await computeRecordingLabels(docId) } : {}),
 					} as Partial<InsertDocument>;
 				} else {
 					const rawData = await fetchDataBySchema(schema, docId, app);

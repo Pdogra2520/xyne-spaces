@@ -57,7 +57,7 @@ class AutoAssignSweepQueue {
         defaultJobOptions: {
           attempts: 3,
           backoff: { type: 'exponential', delay: 2000 },
-          removeOnComplete: true,
+          removeOnComplete: false,
           removeOnFail: false,
         },
       });
@@ -78,10 +78,11 @@ class AutoAssignSweepQueue {
   /**
    * Request a sweep of one desk.
    *
-   * Keyed on the channel, not on the requested window: one sweep per desk at a time. A
-   * second request arriving while one is still pending joins it rather than starting a
-   * duplicate, even if it asked for a different window, and returns false so the caller
-   * can say the sweep was already running instead of implying it started a fresh one.
+   * Keyed on the channel, not on the requested window: one sweep per desk at a time,
+   * whatever window the second request asked for. A request arriving while the previous
+   * sweep is still queued, running, or draining its classification jobs is refused rather
+   * than started, and returns false so the caller can say the sweep was already running
+   * instead of implying it began a fresh one.
    */
   async enqueue(data: AutoAssignSweepJobData): Promise<{ queued: boolean }> {
     if (!this.queue) {
@@ -96,9 +97,22 @@ class AutoAssignSweepQueue {
         logger.info(`[AUTO-ASSIGN-SWEEP] Sweep already pending for channel ${data.channelId}`);
         return { queued: false };
       }
-      // removeOnFail keeps a failed job, so its id stays taken. Without clearing it here
-      // every later request for this desk would answer "already pending" and no sweep
-      // would ever run again.
+      if (state === 'completed') {
+        const { lastJobId } = (existing.returnvalue ?? {}) as { lastJobId?: string | null };
+        if (lastJobId) {
+          const pending = await emailClassificationQueue.getQueue().getJob(lastJobId);
+          if (pending) {
+            logger.info(
+              `[AUTO-ASSIGN-SWEEP] Sweep for channel ${data.channelId} is still draining ` +
+              `(${lastJobId} not run yet)`,
+            );
+            return { queued: false };
+          }
+        }
+      }
+      // Drained, or failed. Either way the id is still taken — neither removeOnComplete
+      // nor removeOnFail clears it — so drop it here, or every later request for this desk
+      // would answer "already pending" and no sweep would ever run again.
       await existing.remove();
     }
 
@@ -123,6 +137,7 @@ class AutoAssignSweepQueue {
         `[AUTO-ASSIGN-SWEEP] Job ${job.id} completed — channel ${channelId} ` +
         `enqueued=${result.enqueued} skippedNoEmail=${result.skippedNoEmail} skippedNoGroup=${result.skippedNoGroup}`,
       );
+      return result;
     });
   }
 
@@ -150,7 +165,12 @@ class AutoAssignSweepQueue {
    */
   private async sweep(
     data: AutoAssignSweepJobData,
-  ): Promise<{ enqueued: number; skippedNoEmail: number; skippedNoGroup: number }> {
+  ): Promise<{
+    enqueued: number;
+    skippedNoEmail: number;
+    skippedNoGroup: number;
+    lastJobId: string | null;
+  }> {
     const prisma = DatabaseClient.getInstance();
     const { channelId, workspaceId } = data;
 
@@ -177,6 +197,8 @@ class AutoAssignSweepQueue {
     let skippedNoEmail = 0;
     let skippedNoGroup = 0;
     let cursorId: string | undefined;
+    // The highest-delay job queued, i.e. the last one to run — see `enqueue`.
+    let lastJobId: string | null = null;
     
     // Paged rather than one capped read: eligibility (has an email, has a group) cannot be
     // expressed in the query — Email has no relation to Conversation — so a single `take`
@@ -233,6 +255,7 @@ class AutoAssignSweepQueue {
           continue;
         }
 
+        const jobId = `sweep-assign:${ticket.id}`;
         jobs.push({
           name: 'classify',
           data: {
@@ -246,10 +269,11 @@ class AutoAssignSweepQueue {
           },
           opts: {
             delay: totalJobs * STAGGER_MS,
-            jobId: `sweep-assign:${ticket.id}`,
+            jobId,
             removeOnFail: true,
           },
         });
+        lastJobId = jobId;
         totalJobs++;
       }
 
@@ -267,7 +291,7 @@ class AutoAssignSweepQueue {
       );
     }
 
-    return { enqueued: totalJobs, skippedNoEmail, skippedNoGroup };
+    return { enqueued: totalJobs, skippedNoEmail, skippedNoGroup, lastJobId };
   }
 
   async close(): Promise<void> {

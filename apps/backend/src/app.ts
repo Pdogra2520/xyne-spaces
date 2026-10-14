@@ -957,10 +957,6 @@ export class App {
           await onCallRotationQueue.initialize();
         })(),
         (async () => {
-          logger.info('Initializing auto-assign sweep queue...');
-          await autoAssignSweepQueue.initialize();
-        })(),
-        (async () => {
           logger.info('Initializing scheduled message queue...');
           await scheduledMessageQueue.initialize();
         })(),
@@ -971,6 +967,9 @@ export class App {
         (async () => {
           logger.info('Initializing email classification queue...');
           await emailClassificationQueue.initialize();
+          // A sweep job does nothing but enqueue classification jobs.
+          logger.info('Initializing auto-assign sweep queue...');
+          await autoAssignSweepQueue.initialize();
         })(),
       ]);
 
@@ -1009,9 +1008,6 @@ export class App {
       logger.info('Initializing on-call rotation queue...');
       await onCallRotationQueue.initialize();
 
-      logger.info('Initializing auto-assign sweep queue...');
-      await autoAssignSweepQueue.initialize();
-
       logger.info('Initializing scheduled message queue...');
       await scheduledMessageQueue.initialize();
 
@@ -1020,6 +1016,9 @@ export class App {
 
       logger.info('Initializing email classification queue...');
       await emailClassificationQueue.initialize();
+
+      logger.info('Initializing auto-assign sweep queue...');
+      await autoAssignSweepQueue.initialize();
 
       // Call transcription is producer-only here (lazy queue on enqueue); the consumer
       // runs in the worker process — see ENABLE_CALL_TRANSCRIPTION_WORKER.

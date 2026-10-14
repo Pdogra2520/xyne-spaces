@@ -206,6 +206,15 @@ export class EmailClassificationWorker {
     const groupChanged = effectiveGroupId !== null && effectiveGroupId !== ticket.userGroupId;
     const ticketIsUnassigned = !ticket.assignedTo;
 
+    // The sweep selected this ticket because nobody owned it, then it sat in the stagger
+    // window. If someone has taken it since, there is nothing left to assign.
+    if (assignmentOnly && !ticketIsUnassigned) {
+      logger.info(
+        `[EMAIL-CLASSIFICATION-WORKER] Ticket ${ticketId} was claimed by ${ticket.assignedTo} since the sweep selected it; skipping assignment`,
+      );
+      return;
+    }
+
     const priorityAboveThreshold =
       runPriority &&
       classificationData?.result?.priority &&
@@ -307,7 +316,7 @@ export class EmailClassificationWorker {
 
     if (hasMeaningfulUpdates) {
       let updatedTicket;
-      if (assignmentOnly && updatePayload.assignedTo) {
+      if (assignmentOnly) {
         const { count } = await prisma.ticket.updateMany({
           where: { id: ticketId, assignedTo: null },
           data: updatePayload,

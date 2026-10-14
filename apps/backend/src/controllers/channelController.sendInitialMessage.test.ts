@@ -40,7 +40,9 @@ jest.mock('@/database/repositories/channelUserStatusRepository', () => mockModul
 jest.mock('@/database/repositories/emailChannelPreferenceRepository', () => mockModule());
 jest.mock('@/database/repositories/externalSourceRepository', () => mockModule());
 jest.mock('@/database/acl/admin-access', () => mockModule());
-jest.mock('@/bypassAcl/transactions/channelController', () => mockModule());
+// sendInitialMessageTx and the bypass `transaction` primitive both run for real,
+// against the mocked db client above.
+
 jest.mock('@/services/dlResolver', () => mockModule());
 jest.mock('@/services/channelEmailAliasService', () => mockModule());
 jest.mock('@/services/encryptionService', () => mockModule());

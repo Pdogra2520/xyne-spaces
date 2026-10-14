@@ -1,13 +1,13 @@
 import { SDLC_MEMBERSHIP_RELATION, VespaInsertionStatus, VespaOperationType } from '@xyne/shared';
 import { BaseRepository } from './base';
-import type { ChannelParticipantRepository } from './channelParticipantRepository';
-import { Channel, Prisma } from '@prisma/client';
-import { ChannelRole, ChannelScopeType, ChannelVisibility, ChannelType, ProjectType } from '@xyne/shared';
+import { Channel } from '@prisma/client';
+import { ChannelScopeType, ChannelVisibility, ChannelType, ProjectType } from '@xyne/shared';
 import { QueryOptions } from '@/types/database';
 import { logger } from '@/utils/logger';
 import { withWorkspaceScope } from '@/database/tenant/context';
 import { newConnectId } from '@/database/connectGroup';
-import { createChannelWithConnectGroupMaybeTx, createChannelWithConnectGroupTx } from '@/bypassAcl/transactions/connectGroupEntities';
+import { createChannelWithConnectGroupTx } from '@/bypassAcl/transactions/connectGroupEntities';
+import { findOrCreateOneOnOneDmTx, type OneOnOneDmInput } from '@/bypassAcl/transactions/channelRepository';
 //import { queueChannelIngestion } from '@/queues/vespaQueue';
 import { vespaQueue } from '@/queues/vespaQueue';
 import { channelSchema } from '@/vespa/src/types';
@@ -425,91 +425,11 @@ export class ChannelRepository extends BaseRepository<Channel, CreateChannelInpu
    * migration over historical duplicate DMs. Participants and their status/count
    * rows are committed in the same transaction as a newly-created channel.
    */
-  async findOrCreateOneOnOneDMChannel(options: {
-    userId: string;
-    targetUserId: string;
-    channelParticipants: ChannelParticipantRepository;
-    workspaceId: string;
-    projectId: string;
-    description?: string;
-    creatorIsClosed?: boolean;
-    targetIsClosed?: boolean;
-  }): Promise<{ channel: Channel; isExisting: boolean }> {
-    const {
-      userId,
-      targetUserId,
-      channelParticipants,
-      workspaceId,
-      projectId,
-      description,
-      creatorIsClosed = false,
-      targetIsClosed = false,
-    } = options;
-    const name = [userId, targetUserId].sort().join(',');
-
-    const attemptFindOrCreate = () => withWorkspaceScope(() =>
-      this.db.$transaction(async (tx) => {
-        const existing = await tx.channel.findFirst({
-          where: { workspaceId, scopeType: ChannelScopeType.DM, name },
-          orderBy: { createdAt: 'asc' },
-        });
-        if (existing) return { channel: existing, isExisting: true };
-
-        // Same channel + connect_group write as ChannelRepository.create, run on
-        // this transaction so the DM is visible to connectReach from creation.
-        const connectId = newConnectId();
-        const { id: channelId } = await createChannelWithConnectGroupMaybeTx(
-          tx,
-          {
-            scopeType: ChannelScopeType.DM,
-            name,
-            description,
-            visibility: ChannelVisibility.PRIVATE,
-            createdBy: userId,
-            projectId,
-            workspaceId,
-            connectId,
-          },
-          workspaceId,
-          connectId,
-        );
-        const channel = await tx.channel.findUniqueOrThrow({ where: { id: channelId } });
-
-        // Preserve ChannelRepository.create's channel→board dual-write.
-        const boards = await tx.board.findMany({
-          where: { projectId },
-          orderBy: { createdAt: 'asc' },
-          select: { id: true },
-        });
-        if (boards.length > 0) {
-          const now = new Date();
-          await tx.channelBoardMapping.createMany({
-            data: boards.map((board, index) => ({
-              channelId: channel.id,
-              boardId: board.id,
-              workspaceId,
-              isDefault: index === 0,
-              createdBy: userId,
-              createdAt: now,
-              updatedAt: now,
-            })),
-            skipDuplicates: true,
-          });
-        }
-
-        await channelParticipants.addParticipantInTransaction(
-          tx, channel.id, userId, null, ChannelRole.ADMIN, creatorIsClosed,
-        );
-        await channelParticipants.addParticipantInTransaction(
-          tx, channel.id, targetUserId, null, ChannelRole.MEMBER, targetIsClosed,
-        );
-
-        return { channel, isExisting: false };
-      }, {
-        timeout: 10_000,
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      }),
-    );
+  async findOrCreateOneOnOneDMChannel(
+    options: OneOnOneDmInput,
+  ): Promise<{ channel: Channel; isExisting: boolean }> {
+    const { workspaceId } = options;
+    const attemptFindOrCreate = () => withWorkspaceScope(() => findOrCreateOneOnOneDmTx(this.db, options));
 
     const maxAttempts = 3;
     for (let attempt = 1; ; attempt += 1) {

@@ -71,7 +71,7 @@ import { ChannelEmailAliasService } from '@/services/channelEmailAliasService';
 import { ensureDmConversationAuthorParticipant } from '@/utils/dmConversationParticipants';
 import { groupDmParticipantService } from '@/services/groupDmParticipantService';
 import { AppError } from '@/middleware/errorHandler';
-import { sendForwardedMessageTx } from '@/bypassAcl/transactions/channelController';
+import { sendForwardedMessageTx, sendInitialMessageTx } from '@/bypassAcl/transactions/channelController';
 
 export class ChannelController {
   channelRepository: ChannelRepository;
@@ -271,32 +271,10 @@ export class ChannelController {
     let conversation: Conversation;
     let createdMessage: Message;
     try {
-      ({ conversation, createdMessage } = await db.$transaction(async (tx) => {
-        const createdConversation = await this.conversationRepository.createInTransaction(
-          tx,
-          {
-            conversationId,
-            channelId,
-            createdBy: senderId,
-            initialMessageId: messageId,
-          },
-          workspaceId,
-        );
-        const message = await this.messageRepository.createInTransaction(
-          tx,
-          {
-            messageId,
-            conversationId,
-            senderId,
-            content: messageContent.trim(),
-            msgType: MessageType.USER,
-            hasAttachment: false,
-            workspaceId,
-          },
-          workspaceId,
-        );
-        return { conversation: createdConversation, createdMessage: message };
-      }));
+      ({ conversation, createdMessage } = await sendInitialMessageTx(
+        { conversations: this.conversationRepository, messages: this.messageRepository },
+        { conversationId, messageId, channelId, senderId, content: messageContent.trim(), workspaceId },
+      ));
     } catch (error) {
       logger.error('Error persisting initial message:', error);
       return null;

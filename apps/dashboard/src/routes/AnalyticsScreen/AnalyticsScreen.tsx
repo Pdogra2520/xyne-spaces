@@ -1,8 +1,7 @@
 import { ReactElement, useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../../hooks/useAuth';
-import { useCachedQuery } from '../../hooks/useCachedQuery';
-import { queries } from '../../zero/queries';
+import { useCurrentWorkspace } from '../../hooks/useCurrentWorkspace';
 import { analyticsService } from '../../services/Analytics/analyticsService';
 import { getDateRange, formatDateRangeForDisplay } from '../../utils/dateRangeUtils';
 import {
@@ -51,11 +50,7 @@ const AnalyticsScreen = (): ReactElement => {
   const { user } = useAuth();
 
   // Live workspace record so the subtitle reflects the current (and renamed) workspace name.
-  const [workspace] = useCachedQuery(
-    queries.getWorkspaceById({ workspaceId: user?.workspaceId ?? '' }),
-    { enabled: !!user?.workspaceId },
-  );
-  const workspaceName = workspace?.name?.trim();
+  const workspaceName = useCurrentWorkspace()?.name?.trim();
 
   // Listen for theme changes via data-theme attribute (Settings updates this)
   useEffect(() => {

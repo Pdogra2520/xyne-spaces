@@ -13,6 +13,7 @@ import {
   toOpenRef,
   updateConversationArtifact,
 } from "../lib/conversation-artifacts.js";
+import { applySandboxLiveness } from "../lib/sandbox-liveness.js";
 
 const log = createLogger("conversation-artifacts-routes");
 
@@ -58,7 +59,11 @@ conversationArtifactsRouter.get("/", async (req: Request, res: Response): Promis
       res.status(400).json({ success: false, error: "conversationId is required" });
       return;
     }
-    const rows = await listConversationArtifacts(conversationId, getRequesterAliases(req), spacesUserIdOf(req));
+    // XYNE-66339: previews of sandboxes that ended without a destroy call
+    // (idle, deadline, lost pod) come back STALE. Never fails the list.
+    const rows = await applySandboxLiveness(
+      await listConversationArtifacts(conversationId, getRequesterAliases(req), spacesUserIdOf(req)),
+    );
     res.json({ success: true, artifacts: rows.map(serialize) });
   } catch (err) {
     log.error("list failed", err);

@@ -1,3 +1,10 @@
+## [1.501.1](https://github.com/juspay/xyne-spaces/compare/v1.501.0...v1.501.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* ui-tester delivers videos itself, checks exact text in the DOM, resolves sandbox sourceDir ([#3109](https://github.com/juspay/xyne-spaces/issues/3109)) ([37988f6](https://github.com/juspay/xyne-spaces/commit/37988f6035f1c9c4e4ce7245ce864b209b853c8e))
+
 ## [1.501.0](https://github.com/juspay/xyne-spaces/compare/v1.500.0...v1.501.0) (2026-10-15)
 
 

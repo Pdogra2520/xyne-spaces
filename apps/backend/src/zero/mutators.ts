@@ -5571,9 +5571,10 @@ export function createMutators(
         z.object({
           actorAction: z.string().optional(),
           classification: z.nativeEnum(ActivityClassification).optional(),
+          channelIds: z.array(z.string()).optional(),
           timestamp: z.number(),
         }),
-        async ({ tx, args: { actorAction, classification, timestamp } }) => {
+        async ({ tx, args: { actorAction, classification, channelIds, timestamp } }) => {
           let query = zql.activities
             .where('userId', authData.sub)
             .where('isRead', false);
@@ -5583,6 +5584,9 @@ export function createMutators(
           }
           if (classification) {
             query = query.where('classification', classification);
+          }
+          if (channelIds && channelIds.length > 0) {
+            query = query.where('channelId', 'IN', channelIds);
           }
 
           const unreadActivities = await tx.run(query);

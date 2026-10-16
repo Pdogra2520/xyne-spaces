@@ -1,3 +1,10 @@
+## [1.501.2](https://github.com/juspay/xyne-spaces/compare/v1.501.1...v1.501.2) (2026-10-16)
+
+
+### Bug Fixes
+
+* table cells starting with 'N.' render as '1.' on desktop ([#3101](https://github.com/juspay/xyne-spaces/issues/3101)) ([2dc2547](https://github.com/juspay/xyne-spaces/commit/2dc25477fc6f326a89bcb4dd6138a0eb24d27910))
+
 ## [1.501.1](https://github.com/juspay/xyne-spaces/compare/v1.501.0...v1.501.1) (2026-10-15)
 
 

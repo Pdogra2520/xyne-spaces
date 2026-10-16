@@ -1536,6 +1536,7 @@ export const ThreadMessages = ({
           isInPanelWebview ? '' : 'rounded-lg'
         }`}
         ref={dragAndDropAreaRef}
+        data-testid={previewCardMode ? 'thread-preview-card' : 'thread-panel'}
       >
         {/* Drag and Drop Overlay */}
         <DragAndDropOverlay isVisible={isDragging} />
